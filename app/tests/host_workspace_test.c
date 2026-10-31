@@ -224,8 +224,9 @@ void *__wrap_malloc(size_t size)
     return __real_malloc(size);
 }
 
+static int g_clay_frame_width = 1100;
 int __real_GetScreenWidth(void);
-int __wrap_GetScreenWidth(void) { return g_clay_frame_test ? 1100 : __real_GetScreenWidth(); }
+int __wrap_GetScreenWidth(void) { return g_clay_frame_test ? g_clay_frame_width : __real_GetScreenWidth(); }
 int __real_GetScreenHeight(void);
 int __wrap_GetScreenHeight(void) { return g_clay_frame_test ? 800 : __real_GetScreenHeight(); }
 void __real_SetMouseCursor(int cursor);
@@ -20122,7 +20123,7 @@ int main(int argc, char **argv)
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
-        return PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
+        return PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
                PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload());
     if (argc == 2 && strcmp(argv[1], "--sidebar-headings") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
@@ -20180,7 +20181,7 @@ int main(int argc, char **argv)
     {
         return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
-    if (PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
+    if (PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
         PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload())) return 1;
     for (int action = PREF_SETTINGS; action <= PREF_WORKSPACE_EXTENSION; action++)
         if (PICO_TEST_RUN(TestPreferenceSaveResponsive((PreferenceAction)action, false)) ||

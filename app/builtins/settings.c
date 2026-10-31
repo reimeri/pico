@@ -10,6 +10,7 @@
 #include "docs_path.h"
 #include "text_field_ui.h"
 #include "subagent_settings.h"
+#include "settings_controls.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -99,13 +100,6 @@ static PicoModel *ModelAt(SettingsState *s, int index);
 static void FlushModelContext(SettingsState *s);
 static const char *kEffortPresets[] = {"none", "low", "medium", "high", "xhigh"};
 static const int kEffortPresetCount = 5;
-
-#define SETTINGS_ROW_BEGIN                                                                                             \
-    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,                                                    \
-                             .childGap = 4,                                                                            \
-                             .padding = {.bottom = 12},                                                                \
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})                                               \
-    {
 
 static Clay_String CStr(const char *s)
 {
@@ -1013,62 +1007,19 @@ static bool OverId(Clay_String id)
 
 static void RenderLabel(const char *label)
 {
-    CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                            .fontSize = PICO_FONT_CAPTION,
-                                            .textColor = COLOR_MUTED,
-                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+    PicoSettingsControl_Label(label);
 }
 
 static void RenderField(SettingsState *s, Clay_ElementId id, const char *value, const char *placeholder,
                         bool focused)
 {
-    bool hover = Clay_PointerOver(id);
-    Clay_Color bg = focused ? (Clay_Color){54, 54, 66, 255} : (hover ? COLOR_CODE_BG : COLOR_COMPOSER_BG);
-    CLAY(id, {.layout = {.padding = {8, 8, 6, 6}, .sizing = {.width = CLAY_SIZING_GROW(0)}},
-              .clip = {.horizontal = true, .childOffset = {.x = focused ? -s->field.scroll_x : 0.0f}},
-              .backgroundColor = bg,
-              .cornerRadius = CLAY_CORNER_RADIUS(6)})
-    {
-        Clay_TextElementConfig config = PicoTextField_Config(FONT_REGULAR);
-        if (value && value[0])
-        {
-            CLAY_TEXT(CStr(value), CLAY_TEXT_CONFIG(config));
-        }
-        else
-        {
-            config.textColor = COLOR_MUTED;
-            CLAY_TEXT(CStr(placeholder ? placeholder : ""), CLAY_TEXT_CONFIG(config));
-        }
-    }
+    PicoSettingsControl_Field(id, value, placeholder, &s->field, focused);
 }
 
 static void RenderButton(Clay_ElementId id, const char *label, bool enabled, bool primary)
 {
     bool saving = s_active_settings_state && s_active_settings_state->save && id.id == CLAY_ID("SettingsApply").id;
-    bool hover = enabled && Clay_PointerOver(id);
-    Clay_Color bg = primary ? (Clay_Color){74, 104, 180, 255} : COLOR_FOOTER_BG;
-    Clay_Color text = enabled ? COLOR_TEXT : COLOR_MUTED;
-    if (!enabled)
-    {
-        bg = (Clay_Color){38, 38, 44, 255};
-    }
-    else if (hover)
-    {
-        bg = primary ? (Clay_Color){92, 126, 210, 255} : COLOR_CODE_BG;
-    }
-    if (saving)
-    {
-        float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 5.0f);
-        bg = (Clay_Color){54 + 28 * pulse, 74 + 32 * pulse, 126 + 54 * pulse, 255};
-        text = COLOR_TEXT;
-    }
-    CLAY(id, {.layout = {.padding = {14, 14, 8, 8}}, .backgroundColor = bg, .cornerRadius = CLAY_CORNER_RADIUS(6)})
-    {
-        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                .fontSize = PICO_FONT_UI,
-                                                .textColor = text,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-    }
+    PicoSettingsControl_Button(id, label, enabled, primary, saving);
 }
 
 static void EnsureTrashIcon(SettingsState *s)
@@ -1157,26 +1108,7 @@ static void RenderChip(Clay_ElementId id, const char *label, bool on)
 
 static void RenderToggle(Clay_ElementId id, const char *label, bool on)
 {
-    bool hover = Clay_PointerOver(id);
-    CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                         .childGap = 8,
-                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                         .padding = {8, 8, 6, 6},
-                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
-              .backgroundColor = hover ? COLOR_CODE_BG : COLOR_COMPOSER_BG,
-              .cornerRadius = CLAY_CORNER_RADIUS(6)})
-    {
-        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = PICO_FONT_UI,
-                                                .textColor = COLOR_TEXT,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
-        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(10), .height = CLAY_SIZING_FIXED(10)}},
-                      .backgroundColor = on ? COLOR_STATUS_ON : COLOR_STATUS_OFF,
-                      .cornerRadius = CLAY_CORNER_RADIUS(5)})
-        {
-        }
-    }
+    PicoSettingsControl_Toggle(id, label, on);
 }
 
 static void CloseModelDropdown(SettingsState *s)
@@ -1656,6 +1588,7 @@ static void SettingsRender(PicoHost *app, void *state)
     float sh;
     float card_w;
     float card_h;
+    const uint16_t card_pad_x = 20;
     int i;
     s_active_settings_state =
         state ? (SettingsState *)state : (SettingsState *)PicoPlugins_HostState(app, "settings");
@@ -1692,7 +1625,7 @@ static void SettingsRender(PicoHost *app, void *state)
     {
         CLAY(CLAY_ID("SettingsModalCard"),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .padding = {20, 20, 16, 16},
+                         .padding = {card_pad_x, card_pad_x, 16, 16},
                          .childGap = 12,
                          .sizing = {.width = CLAY_SIZING_FIXED(card_w), .height = CLAY_SIZING_FIXED(card_h)}},
               .backgroundColor = COLOR_CONTENT_BG,
@@ -1716,7 +1649,8 @@ static void SettingsRender(PicoHost *app, void *state)
                       .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                 {
                     if (s_active_settings_state->section == 1) {
-                        PicoSubagentSettings_Render(s_active_settings_state->subagents);
+                        PicoSubagentSettings_Render(s_active_settings_state->subagents,
+                            card_w - 2.0f * card_pad_x - (g_overflow ? SCROLLBAR_WIDTH + SCROLLBAR_GAP : 0));
                     } else {
                         RenderGeneral(s_active_settings_state);
                         CLAY_TEXT(CLAY_STRING("Models"), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,

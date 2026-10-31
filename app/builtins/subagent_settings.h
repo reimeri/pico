@@ -8,7 +8,8 @@ PicoSubagentSettings *PicoSettingsUi_SubagentEditor(PicoHost *host);
 PicoSubagentSettings *PicoSubagentSettings_Create(PicoHost *host);
 void PicoSubagentSettings_Free(PicoSubagentSettings *s);
 void PicoSubagentSettings_Open(PicoSubagentSettings *s);
-void PicoSubagentSettings_Render(PicoSubagentSettings *s);
+/* Width is bounded by the Settings card, not a previous content layout. */
+void PicoSubagentSettings_Render(PicoSubagentSettings *s, float width);
 void PicoSubagentSettings_AfterLayout(PicoSubagentSettings *s);
 bool PicoSubagentSettings_Frame(PicoSubagentSettings *s);
 void PicoSubagentSettings_Draw(PicoSubagentSettings *s);

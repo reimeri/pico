@@ -2,6 +2,7 @@
 #include "host_internal.h"
 #include "subagent_config.h"
 #include "text_field_ui.h"
+#include "settings_controls.h"
 #include "json.h"
 #include "overlay.h"
 
@@ -78,14 +79,10 @@ static void SaText(const char *text, Clay_Color color)
     CLAY_TEXT(SaString(text), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = color, .wrapMode = CLAY_TEXT_WRAP_WORDS}));
 }
 
-static void SaButton(Clay_ElementId id, const char *label, bool primary)
+static void SaButton(PicoSubagentSettings *s, Clay_ElementId id, const char *label, bool primary)
 {
-    CLAY(id, {.layout = {.padding = {10, 10, 7, 7}},
-              .backgroundColor = Clay_PointerOver(id) ? COLOR_CODE_BG : (primary ? (Clay_Color){74, 104, 180, 255} : COLOR_FOOTER_BG),
-              .cornerRadius = CLAY_CORNER_RADIUS(5)})
-    {
-        CLAY_TEXT(SaString(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
-    }
+    bool saving = s->save && id.id == CLAY_ID("SubagentSave").id;
+    PicoSettingsControl_Button(id, label, !s->save, primary, saving);
 }
 
 static char *SaBuffer(PicoSubagentSettings *s, int index, int *capacity)
@@ -133,21 +130,19 @@ static void SaFocus(PicoSubagentSettings *s, int index)
 
 static void SaField(PicoSubagentSettings *s, int index, const char *label, const char *placeholder)
 {
-    int cap;
-    char *text = SaBuffer(s, index, &cap);
-    (void)cap;
-    SaText(label, COLOR_MUTED);
-    bool focused = s->focus == index;
-    Clay_ElementId id = CLAY_IDI("SubagentField", index);
-    CLAY(id, {.layout = {.padding = {8, 8, 6, 6}, .sizing = {.width = CLAY_SIZING_GROW(0)}},
-              .clip = {.horizontal = true, .childOffset = {.x = focused ? -s->field.scroll_x : 0}},
-              .backgroundColor = focused ? (Clay_Color){54, 54, 66, 255} : COLOR_COMPOSER_BG,
-              .cornerRadius = CLAY_CORNER_RADIUS(6)})
-    {
-        Clay_TextElementConfig cfg = PicoTextField_Config(FONT_REGULAR);
-        if (!text[0])
-            cfg.textColor = COLOR_MUTED;
-        CLAY_TEXT(SaString(text[0] ? text : placeholder), CLAY_TEXT_CONFIG(cfg));
+    int capacity;
+    char *text = SaBuffer(s, index, &capacity);
+    (void)capacity;
+    SETTINGS_ROW_BEGIN
+        PicoSettingsControl_Label(label);
+        PicoSettingsControl_Field(CLAY_IDI("SubagentField", index), text, placeholder, &s->field, s->focus == index);
+    }
+}
+
+static void SaToggle(Clay_ElementId id, const char *label, bool on)
+{
+    SETTINGS_ROW_BEGIN
+        PicoSettingsControl_Toggle(id, label, on);
     }
 }
 
@@ -347,7 +342,7 @@ static void SaSaveCompleted(PicoHost *host, void *arg)
     if (save->ok)
     {
         PicoSubagentConfig_RequestRefresh(host);
-        PicoOverlay_Notify(host, "Subagent profiles saved. Open workspaces refresh when idle.");
+        PicoOverlay_Notify(host, save->deleting ? "Profile deleted." : "Profile saved.");
     }
     host->ui_relayout_requested = true;
 }
@@ -473,17 +468,44 @@ static void SaRequestAction(PicoSubagentSettings *s, int action, int index)
         SaDoAction(s, action, index);
 }
 
-void PicoSubagentSettings_Render(PicoSubagentSettings *s)
+static void SaActions(PicoSubagentSettings *s, float width)
+{
+    bool existing = s->selected >= 0;
+    const char *save_label = s->save ? "Saving…" : "Save";
+    float required = PicoSettingsControl_ButtonWidth("Cancel") + PicoSettingsControl_ButtonWidth(save_label) + 8;
+    if (existing) required += PicoSettingsControl_ButtonWidth("Duplicate") + PicoSettingsControl_ButtonWidth("Delete…") + 16;
+    bool stacked = width < required;
+    CLAY(CLAY_ID("SubagentActions"), {.layout = {.layoutDirection = stacked ? CLAY_TOP_TO_BOTTOM : CLAY_LEFT_TO_RIGHT,
+                                               .childGap = 8, .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        if (existing)
+        {
+            CLAY(CLAY_ID("SubagentManageActions"), {.layout = {.childGap = 8}})
+            {
+                SaButton(s, CLAY_ID("SubagentDuplicate"), "Duplicate", false);
+                SaButton(s, CLAY_ID("SubagentDelete"), "Delete…", false);
+            }
+        }
+        CLAY(CLAY_ID("SubagentEditActions"), {.layout = {.childGap = 8, .childAlignment = {.x = CLAY_ALIGN_X_RIGHT},
+                                                       .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+        {
+            SaButton(s, CLAY_ID("SubagentCancel"), "Cancel", false);
+            SaButton(s, CLAY_ID("SubagentSave"), save_label, true);
+        }
+    }
+}
+
+void PicoSubagentSettings_Render(PicoSubagentSettings *s, float width)
 {
     if (!s)
         return;
     CLAY_AUTO_ID({.layout = {.childGap = 8}})
     {
-        SaButton(CLAY_ID("SubagentNew"), "New profile", true);
-        SaButton(CLAY_ID("SubagentRefresh"), "Refresh", false);
+        SaButton(s, CLAY_ID("SubagentNew"), "New profile", false);
+        SaButton(s, CLAY_ID("SubagentRefresh"), "Refresh", false);
     }
     if (!s->count)
-        SaText("No profiles yet. Create a profile to make subagents available.", COLOR_MUTED);
+        SaText("No profiles", COLOR_MUTED);
     for (int i = 0; i < s->count; i++)
     {
         PicoSubagentDocument *d = &s->documents[i];
@@ -491,7 +513,11 @@ void PicoSubagentSettings_Render(PicoSubagentSettings *s)
                                           .backgroundColor = s->selected == i || Clay_PointerOver(CLAY_IDI("SubagentRow", i)) ? COLOR_CODE_BG : COLOR_FOOTER_BG,
                                           .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
-            SaText(d->filename, COLOR_TEXT);
+            /* Keep the full stem even for invalid or oversized profile names. */
+            Clay_String name = SaString(d->filename);
+            name.length -= 5; /* Profile discovery only lists *.json files. */
+            CLAY_TEXT(name, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
+                                              .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_WORDS}));
             if (!d->valid)
                 SaText(d->error, COLOR_STATUS_ERR);
             else if (d->profile.description[0])
@@ -507,38 +533,21 @@ void PicoSubagentSettings_Render(PicoSubagentSettings *s)
         if (s->original && !s->original->valid)
         {
             SaText(s->original->error, COLOR_STATUS_ERR);
-            SaText(s->original->parseable ? "Repair the fields below, or edit the file by hand." : "This file cannot be parsed. Saving will ask to replace its contents; comments and unknown fields cannot be preserved.", COLOR_MUTED);
         }
         if (s->original)
-            SaButton(CLAY_ID("SubagentOpenFile"), "Open in text editor", false);
-        SaField(s, SA_NAME, "Name (also the filename)", "e.g. explore");
-        if (s->selected >= 0)
-            SaText("Renaming creates a new profile identity. Existing child sessions keep their original profile name.", COLOR_MUTED);
-        SaField(s, SA_DESCRIPTION, "Description", "Optional listing description");
-        SaField(s, SA_PURPOSE, "Purpose (required; use \\n for newlines, \\\\ for a backslash)", "System-level role for the child");
-        SaField(s, SA_MODEL, "Model ID (blank inherits parent)", "Parent model");
-        SaField(s, SA_EFFORT, "Effort (blank uses inheritance/model default)", "Automatic");
-        SaButton(CLAY_ID("SubagentFast"), s->profile.fast ? "Fast: on" : "Fast: off", s->profile.fast);
-        SaButton(CLAY_ID("SubagentParallel"), s->profile.parallel_safe ? "Parallel-safe: on" : "Parallel-safe: off", s->profile.parallel_safe);
-        SaText("Parallel-safe lets this profile overlap sibling calls; it does not enforce a sandbox or filesystem lock.", COLOR_MUTED);
-        SaButton(CLAY_ID("SubagentRestricted"), s->profile.restricted_tools ? "Tools: allowlist" : "Tools: all registered", s->profile.restricted_tools);
+            SaButton(s, CLAY_ID("SubagentOpenFile"), "Open in text editor", false);
+        SaField(s, SA_NAME, "Name", "explore");
+        SaField(s, SA_DESCRIPTION, "Description", "Optional");
+        SaField(s, SA_PURPOSE, "Purpose", "Required");
+        SaField(s, SA_MODEL, "Model", "Inherit");
+        SaField(s, SA_EFFORT, "Effort", "Automatic");
+        SaToggle(CLAY_ID("SubagentFast"), "Fast", s->profile.fast);
+        SaToggle(CLAY_ID("SubagentParallel"), "Parallel-safe", s->profile.parallel_safe);
+        SaToggle(CLAY_ID("SubagentRestricted"), "Restrict tools", s->profile.restricted_tools);
         if (s->profile.restricted_tools)
-            SaField(s, SA_TOOLS, "Tool names, separated by commas (empty means no tools)", "No tools");
-        SaText("Tool restrictions control Pico's tool catalog, not what allowed tools such as sh can access.", COLOR_MUTED);
-        SaField(s, SA_LIMIT, "Child tool concurrency (blank uses workspace default)", "Workspace default");
-        CLAY_AUTO_ID({.layout = {.childGap = 8}})
-        {
-            SaButton(CLAY_ID("SubagentSave"), s->save ? "Saving…" : "Save profile", true);
-            SaButton(CLAY_ID("SubagentCancel"), "Cancel edit", false);
-        }
-        if (s->selected >= 0)
-        {
-            CLAY_AUTO_ID({.layout = {.childGap = 8}})
-            {
-                SaButton(CLAY_ID("SubagentDuplicate"), "Duplicate", false);
-                SaButton(CLAY_ID("SubagentDelete"), "Delete…", false);
-            }
-        }
+            SaField(s, SA_TOOLS, "Tools", "None");
+        SaField(s, SA_LIMIT, "Max parallel tools", "Default");
+        SaActions(s, width);
     }
     if (s->error[0])
     {
@@ -558,18 +567,19 @@ void PicoSubagentSettings_Render(PicoSubagentSettings *s)
                                                    .backgroundColor = COLOR_CODE_BG,
                                                    .cornerRadius = CLAY_CORNER_RADIUS(8)})
             {
-                const char *message = s->confirm == SA_CONFIRM_DELETE ? "Delete this profile file? Existing child sessions will not be deleted." : s->confirm == SA_CONFIRM_REPLACE ? "Replace the malformed file with this form's validated profile? Its existing contents will be lost."
-                                                                                                                                                                                    : "Discard unsaved profile edits?";
+                const char *message = s->confirm == SA_CONFIRM_DELETE ? "Delete this profile?" :
+                    s->confirm == SA_CONFIRM_REPLACE ? "Replace the invalid file? Its contents will be overwritten." :
+                    "Discard unsaved profile edits?";
                 SaText(message, COLOR_TEXT);
                 CLAY_AUTO_ID({.layout = {.childGap = 8}})
                 {
-                    SaButton(CLAY_ID("SubagentConfirmYes"), s->confirm == SA_CONFIRM_DELETE ? "Delete profile" : s->confirm == SA_CONFIRM_REPLACE ? "Replace file"
+                    SaButton(s, CLAY_ID("SubagentConfirmYes"), s->confirm == SA_CONFIRM_DELETE ? "Delete profile" : s->confirm == SA_CONFIRM_REPLACE ? "Replace file"
                                                                                                                                                   : "Discard edits",
                              true);
-                    SaButton(CLAY_ID("SubagentConfirmNo"), "Keep editing", false);
+                    SaButton(s, CLAY_ID("SubagentConfirmNo"), "Keep editing", false);
                 }
                 if (s->confirm == SA_CONFIRM_REPLACE)
-                    SaButton(CLAY_ID("SubagentRepairFile"), "Open in text editor", false);
+                    SaButton(s, CLAY_ID("SubagentRepairFile"), "Open in text editor", false);
             }
         }
     }

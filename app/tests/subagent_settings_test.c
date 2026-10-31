@@ -270,3 +270,85 @@ done:
     if (!good) Fail("Profile refresh must wait for current work without blocking or cancelling it");
     return !good;
 }
+
+static int TestSubagentSettingsPresentation(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    const char *phase = "setup";
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoHost *host = f.host;
+    char directory[4096], path[4096];
+    PicoSubagentConfig_Directory(directory, sizeof(directory));
+    Pico_MkdirP(directory);
+    PicoPath_Format(path, sizeof(path), "%s/review.team.json", directory);
+    if (WriteFile(path, "{\"purpose\":\"Review changes\",\"description\":\"Review profile\"}\n")) goto done;
+
+    PicoSettingsUi_Open(host);
+    PicoHost_Frame(host);
+    Clay_ElementData general_field = Clay_GetElementData(CLAY_ID("SettingsContextLimit"));
+    Clay_ElementData general_next = Clay_GetElementData(CLAY_ID("SettingsMaxParallelTools"));
+    Clay_ElementData general_toggle = Clay_GetElementData(CLAY_ID("SettingsResumeLast"));
+    Clay_ElementData general_save = Clay_GetElementData(CLAY_ID("SettingsApply"));
+    if (!general_field.found || !general_next.found || !general_toggle.found || !general_save.found) goto done;
+    float spacing = general_next.boundingBox.y - general_field.boundingBox.y;
+    if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsSubagentsTab")))) goto done;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+    phase = "profile names omit only the file extension";
+    if (!FindCardText(&commands, "review.team") || FindCardText(&commands, "review.team.json")) goto done;
+    if (!SubagentSettingsClick(host, CLAY_IDI("SubagentRow", 0))) goto done;
+    phase = "fields and toggles match General Settings";
+    Clay_ElementData name = Clay_GetElementData(CLAY_IDI("SubagentField", 0));
+    Clay_ElementData description = Clay_GetElementData(CLAY_IDI("SubagentField", 1));
+    Clay_ElementData toggle = Clay_GetElementData(CLAY_ID("SubagentFast"));
+    if (!name.found || !description.found || !toggle.found ||
+        fabsf(description.boundingBox.y - name.boundingBox.y - spacing) > 0.01f ||
+        fabsf(name.boundingBox.height - general_field.boundingBox.height) > 0.01f ||
+        fabsf(toggle.boundingBox.height - general_toggle.boundingBox.height) > 0.01f ||
+        fabsf(toggle.boundingBox.x - name.boundingBox.x) > 0.01f ||
+        fabsf(toggle.boundingBox.width - name.boundingBox.width) > 0.01f) goto done;
+
+    phase = "single aligned action row";
+    Clay_ElementData duplicate = Clay_GetElementData(CLAY_ID("SubagentDuplicate"));
+    Clay_ElementData remove = Clay_GetElementData(CLAY_ID("SubagentDelete"));
+    Clay_ElementData cancel = Clay_GetElementData(CLAY_ID("SubagentCancel"));
+    Clay_ElementData save = Clay_GetElementData(CLAY_ID("SubagentSave"));
+    if (!duplicate.found || !remove.found || !cancel.found || !save.found ||
+        fabsf(duplicate.boundingBox.y - save.boundingBox.y) > 0.01f ||
+        fabsf(remove.boundingBox.y - cancel.boundingBox.y) > 0.01f ||
+        duplicate.boundingBox.x + duplicate.boundingBox.width > remove.boundingBox.x ||
+        remove.boundingBox.x + remove.boundingBox.width >= cancel.boundingBox.x ||
+        cancel.boundingBox.x + cancel.boundingBox.width > save.boundingBox.x ||
+        fabsf(save.boundingBox.height - general_save.boundingBox.height) > 0.01f ||
+        fabsf(duplicate.boundingBox.x - name.boundingBox.x) > 0.01f ||
+        fabsf(save.boundingBox.x + save.boundingBox.width - name.boundingBox.x - name.boundingBox.width) > 0.01f) goto done;
+
+    phase = "narrow action groups stay within the form";
+    g_clay_frame_width = 390;
+    for (int pass = 0; pass < 3; pass++) {
+        Clay_SetLayoutDimensions((Clay_Dimensions){390, 800});
+        pico_host_request_redraw(host);
+        PicoHost_Frame(host);
+    }
+    Clay_ElementData card = Clay_GetElementData(CLAY_ID("SettingsModalCard"));
+    Clay_ElementData actions = Clay_GetElementData(CLAY_ID("SubagentActions"));
+    duplicate = Clay_GetElementData(CLAY_ID("SubagentDuplicate"));
+    remove = Clay_GetElementData(CLAY_ID("SubagentDelete"));
+    cancel = Clay_GetElementData(CLAY_ID("SubagentCancel"));
+    save = Clay_GetElementData(CLAY_ID("SubagentSave"));
+    bool stacked = cancel.boundingBox.y >= duplicate.boundingBox.y + duplicate.boundingBox.height;
+    bool inline_groups = fabsf(cancel.boundingBox.y - duplicate.boundingBox.y) < 0.01f &&
+                         remove.boundingBox.x + remove.boundingBox.width < cancel.boundingBox.x;
+    if (!card.found || !actions.found || !duplicate.found || !remove.found || !cancel.found || !save.found ||
+        (!stacked && !inline_groups) || actions.boundingBox.x < card.boundingBox.x ||
+        actions.boundingBox.x + actions.boundingBox.width > card.boundingBox.x + card.boundingBox.width + 0.01f ||
+        remove.boundingBox.x + remove.boundingBox.width > actions.boundingBox.x + actions.boundingBox.width + 0.01f ||
+        save.boundingBox.x + save.boundingBox.width > actions.boundingBox.x + actions.boundingBox.width + 0.01f) goto done;
+    good = true;
+done:
+    g_clay_frame_width = 1100;
+    if (!good) fprintf(stderr, "subagent Settings presentation: %s\n", phase);
+    InteractionFixtureFree(&f);
+    if (!good) Fail("Subagent Settings must use standard controls/spacing and aligned responsive actions");
+    return !good;
+}

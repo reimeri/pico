@@ -47,15 +47,19 @@ Select a main session and click the dim right-edge web icon to expand its browse
 uncreated session shows a non-blocking reminder to send a message first; it does
 not initialize Chromium or show an error overlay. On first use it opens `about:blank`; enter a full URL such as
 `http://localhost:5173` in the address field. The toolbar offers back, forward,
-reload icons, a control-mode slider, a viewport dropdown, a shutdown icon to close
-the page, and a bright web icon to collapse the pane. The footer stays below
-the chat/browser content row at its full shell width.
+reload icons, a control-mode slider, a viewport dropdown, and a shutdown icon to close
+the page. The web icon stays in the far-right strip; click it again to collapse the
+pane without closing the page. The browser opens immediately to the strip's left.
+The strip is always visible and extends beside the footer, with settings at its
+bottom. Settings remains available with no conversation selected or while viewing
+a subagent; the web icon appears only for main conversations. The footer spans
+below chat and browser, stopping before the strip.
 
 - Drag the expanded pane's left edge to resize it; the edge shows a horizontal
   resize cursor. A soft accent-colored spotlight follows the pointer along the
   border when nearby and stays lit while dragging. The pane is at least 300 logical
   pixels wide when space allows and at most half the right column (excluding the
-  sidebar). Each session keeps
+  sidebar and persistent icon strip). Each session keeps
   its chosen width when collapsed and reopened or switched away from, until
   Pico exits. Narrower windows temporarily clamp the width to the available half.
   Toolbar controls wrap onto additional rows when the pane is narrow.

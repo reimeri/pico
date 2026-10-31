@@ -3954,6 +3954,9 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         return PICO_HOST_SHUTDOWN_RETAINED;
     }
     PicoBrowser_Shutdown(host, &deadline);
+    for (int icon = 0; icon < PICO_SHELL_ICON_COUNT; icon++)
+        for (int bright = 0; bright < 2; bright++)
+            if (host->shell_icons[icon][bright].id) UnloadTexture(host->shell_icons[icon][bright]);
     PicoWorktree_Cleanup(host);
     PicoPlugins_Shutdown(host);
     for (i = 0; i < host->workspace_count; i++)
@@ -4006,6 +4009,7 @@ enum
     SHELL_BODY_GAP = 12,
     SHELL_SIDEBAR_WIDTH = 200,
     SHELL_SIDEBAR_PADDING = 8,
+    SHELL_STRIP_WIDTH = 28,
 };
 
 float PicoHost_SidebarContentWidth(void)
@@ -4016,7 +4020,8 @@ float PicoHost_SidebarContentWidth(void)
 
 float PicoHost_RightColumnWidth(const PicoHost *host)
 {
-    float width = Clay_GetLayoutDimensions().width - 2.0f * SHELL_ROOT_PADDING;
+    float width = Clay_GetLayoutDimensions().width - 2.0f * SHELL_ROOT_PADDING -
+                  SHELL_STRIP_WIDTH - SHELL_BODY_GAP;
     if (host && host->view_count[PICO_SLOT_SIDEBAR] > 0)
     {
         width -= SHELL_SIDEBAR_WIDTH + SHELL_BODY_GAP;
@@ -4030,6 +4035,86 @@ float PicoHost_MainColumnWidth(const PicoHost *host)
     float browser = PicoBrowser_ShellWidth(host);
     if (browser > 0) width -= browser + SHELL_BODY_GAP;
     return width > 0.0f ? width : 0.0f;
+}
+
+/* Shell chrome is independent of sidebar extensions and browser lifetime.
+ * Loading these ordinary UI textures must not start the browser service. */
+static void EnsureShellIcons(PicoHost *host)
+{
+    if (host->shell_icons_tried || !IsWindowReady()) return;
+    host->shell_icons_tried = true;
+    const char *paths[PICO_SHELL_ICON_COUNT] = {"resources/web.png", "resources/settings.png"};
+    for (int icon = 0; icon < PICO_SHELL_ICON_COUNT; icon++)
+    {
+        char path[4096];
+        if (!Pico_DataPath(paths[icon], path, sizeof(path))) continue;
+        Image source = LoadImage(path);
+        if (!source.data) continue;
+        for (int bright = 0; bright < 2; bright++)
+        {
+            Image image = ImageCopy(source);
+            if (!image.data) continue;
+            Clay_Color tint = bright ? COLOR_TEXT : COLOR_MUTED;
+            ImageColorTint(&image, (Color){tint.r, tint.g, tint.b, tint.a});
+            Texture2D *texture = &host->shell_icons[icon][bright];
+            *texture = LoadTextureFromImage(image);
+            UnloadImage(image);
+            if (texture->id) SetTextureFilter(*texture, TEXTURE_FILTER_BILINEAR);
+        }
+        UnloadImage(source);
+    }
+}
+
+static void ShellIconButton(PicoHost *host, Clay_ElementId id, PicoShellIcon icon, bool selected)
+{
+    bool hovered = !PicoUi_ModalOpen(host) && !PicoBrowser_BlocksPointer(host) && Clay_PointerOver(id);
+    Texture2D *texture = &host->shell_icons[icon][selected || hovered];
+    CLAY(id,
+         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(SHELL_STRIP_WIDTH), .height = CLAY_SIZING_FIXED(30)},
+                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = hovered ? COLOR_CODE_BG : COLOR_CONTENT_BG,
+          .cornerRadius = CLAY_CORNER_RADIUS(4)})
+    {
+        if (texture->id)
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(20), .height = CLAY_SIZING_FIXED(20)}},
+                          .image = {.imageData = texture}}) {}
+        }
+        else
+        {
+            CLAY_TEXT(icon == PICO_SHELL_ICON_BROWSER ? CLAY_STRING("W") : CLAY_STRING("*"),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
+                                        .textColor = selected || hovered ? COLOR_TEXT : COLOR_MUTED}));
+        }
+    }
+}
+
+static void LayoutShellStrip(PicoHost *host)
+{
+    EnsureShellIcons(host);
+    const PicoAgent *agent = PicoHost_SelectedAgentConst(host);
+    CLAY(CLAY_ID("ShellStrip"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .padding = {0, 0, 2, 2},
+                     .sizing = {.width = CLAY_SIZING_FIXED(SHELL_STRIP_WIDTH), .height = CLAY_SIZING_PERCENT(1)}},
+          .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(6)})
+    {
+        if (PicoAgent_IsUserMain(agent))
+            ShellIconButton(host, CLAY_ID("BrowserToggle"), PICO_SHELL_ICON_BROWSER, agent->browser_expanded);
+        CLAY(CLAY_ID("ShellStripSpace"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_GROW(0)}}}) {}
+        ShellIconButton(host, CLAY_ID("ShellSettings"), PICO_SHELL_ICON_SETTINGS, false);
+    }
+}
+
+static void ShellInput(PicoHost *host)
+{
+    if (!host->window_focused || host->window_minimized || PicoUi_ModalOpen(host) ||
+        PicoBrowser_BlocksPointer(host) || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+    Clay_ElementData settings = Clay_GetElementData(CLAY_ID("ShellSettings"));
+    Vector2 mouse = GetMousePosition();
+    if (settings.found && CheckCollisionPointRec(mouse, (Rectangle){settings.boundingBox.x, settings.boundingBox.y,
+                                                                  settings.boundingBox.width, settings.boundingBox.height}))
+        PicoSettingsUi_Open(host);
 }
 
 static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_height, float delta_time)
@@ -4096,7 +4181,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                              .childGap = 6}})
             {
                 /* Content row grows only inside the exactly bounded RightColumn.
-                 * The footer retains its full shell width when the dock opens. */
+                 * The footer spans chat and browser, beside the persistent strip. */
                 CLAY(CLAY_ID("ChatBrowserRow"),
                      {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                                  .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)},
@@ -4120,6 +4205,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                     RunSlot(app, PICO_SLOT_FOOTER);
                 }
             }
+            LayoutShellStrip(app);
         }
     }
     RunSlot(app, PICO_SLOT_OVERLAY);
@@ -4413,6 +4499,7 @@ void PicoHost_Frame(PicoHost *app)
     mouse_delta.x *= 5.0f;
     mouse_delta.y *= 5.0f;
 
+    ShellInput(app);
     PicoBrowser_Input(app);
 
     if (!PicoBrowser_BlocksKeyboard(app) && IsKeyPressed(KEY_F2))
@@ -4624,7 +4711,9 @@ void PicoHost_Frame(PicoHost *app)
     {
         SetMouseCursor(MOUSE_CURSOR_IBEAM);
     }
-    else if (app->hovered_link || app->hovered_tool || app->hovered_clickable)
+    else if (app->hovered_link || app->hovered_tool || app->hovered_clickable ||
+             (!PicoUi_ModalOpen(app) && !PicoBrowser_BlocksPointer(app) &&
+              (Clay_PointerOver(CLAY_ID("ShellSettings")) || Clay_PointerOver(CLAY_ID("BrowserToggle")))))
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
     }

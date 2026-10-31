@@ -32,7 +32,7 @@
 extern char **environ;
 typedef enum BrowserIcon {
     BROWSER_ICON_BACK, BROWSER_ICON_FORWARD, BROWSER_ICON_RELOAD,
-    BROWSER_ICON_WEB, BROWSER_ICON_AGENT, BROWSER_ICON_USER, BROWSER_ICON_SHUTDOWN, BROWSER_ICON_COUNT
+    BROWSER_ICON_AGENT, BROWSER_ICON_USER, BROWSER_ICON_SHUTDOWN, BROWSER_ICON_COUNT
 } BrowserIcon;
 typedef enum BrowserViewport {
     BROWSER_VIEWPORT_MOBILE, BROWSER_VIEWPORT_TABLET, BROWSER_VIEWPORT_DESKTOP,
@@ -1267,9 +1267,8 @@ static float ClampShellWidth(const PicoHost *host, float width)
 float PicoBrowser_ShellWidth(const PicoHost *host)
 {
     const PicoAgent *a = PicoHost_SelectedAgentConst(host);
-    if (!PicoAgent_IsUserMain(a)) return 0;
+    if (!PicoAgent_IsUserMain(a) || !a->browser_expanded) return 0;
     float width = Clay_GetLayoutDimensions().width;
-    if (!a->browser_expanded) return 28;
     float pane = a->browser_width > 0 ? a->browser_width : fminf(width * 0.44f, 720);
     return ClampShellWidth(host, pane);
 }
@@ -1287,8 +1286,7 @@ static void Button(const char *id, const char *text, float width, bool selected)
          .backgroundColor = selected || Clay_PointerOver(Clay_GetElementId((Clay_String){.length=(int)strlen(id), .chars=id})) ? COLOR_CODE_BG : COLOR_CONTENT_BG,
          .cornerRadius = CLAY_CORNER_RADIUS(4)}) { Label(text); }
 }
-/* Load only ordinary UI textures here; drawing the collapsed affordance must
- * never start Chromium or require the browser GPU transport. */
+/* Toolbar textures do not require Chromium or the browser GPU transport. */
 static void EnsureIcons(PicoHost *host)
 {
     if (!IsWindowReady()) return;
@@ -1298,7 +1296,7 @@ static void EnsureIcons(PicoHost *host)
     s->icons_tried = true;
     const char *paths[BROWSER_ICON_COUNT] = {
         "resources/arrow-left.png", "resources/arrow-left.png", "resources/reload.png",
-        "resources/web.png", "resources/robot.png", "resources/user.png", "resources/shutdown.png"
+        "resources/robot.png", "resources/user.png", "resources/shutdown.png"
     };
     for (int icon = 0; icon < BROWSER_ICON_COUNT; ++icon) {
         char path[4096];
@@ -1327,7 +1325,7 @@ static void Icon(PicoHost *host, BrowserIcon icon, bool bright)
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(20), .height = CLAY_SIZING_FIXED(20)}},
                       .image = {.imageData = texture}}) {}
     } else {
-        const char *fallback[BROWSER_ICON_COUNT] = {"<", ">", "R", "W", "A", "U", "x"};
+        const char *fallback[BROWSER_ICON_COUNT] = {"<", ">", "R", "A", "U", "x"};
         Label(fallback[icon]);
     }
 }
@@ -1550,16 +1548,14 @@ static bool ProfileInput(PicoHost *host)
 static void Toolbar(PicoHost *host, BrowserSession *b, float pane_width)
 {
     float available = fmaxf(0, pane_width - 4);
-    float widths[] = {28, 28, 28, 70, 108, 90, 28, 28};
-    int row[8], rows = 1;
+    float widths[] = {28, 28, 28, 70, 108, 90, 28};
+    int row[7], rows = 1;
     float used = 0;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 7; ++i) {
         widths[i] = fminf(widths[i], available);
-        /* Close/Collapse remain right-aligned via a grow spacer before Close. */
+        /* Shutdown remains right-aligned via a grow spacer. */
         float required = widths[i] + (used > 0 ? 4 : 0) + (i == 6 && used > 0 ? 4 : 0);
-        /* Keep the two right-edge controls together across wrapping. */
-        float group = i == 6 ? widths[7] + 4 : 0;
-        if (used > 0 && used + required + group > available) {
+        if (used > 0 && used + required > available) {
             rows++; used = 0;
             required = widths[i];
         }
@@ -1576,7 +1572,7 @@ static void Toolbar(PicoHost *host, BrowserSession *b, float pane_width)
             CLAY(CLAY_IDI("BrowserToolbarRow", r),
                 {.layout = {.childGap = 4, .childAlignment = {.x = r == row[6] && row[5] != r ? CLAY_ALIGN_X_RIGHT : CLAY_ALIGN_X_LEFT},
                             .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(30)}}}) {
-                for (int i = 0; i < 8; ++i) {
+                for (int i = 0; i < 7; ++i) {
                     if (row[i] != r) continue;
                     switch (i) {
                     case 0: IconButton(host, "BrowserBack", BROWSER_ICON_BACK, user_control, widths[i]); break;
@@ -1592,7 +1588,6 @@ static void Toolbar(PicoHost *host, BrowserSession *b, float pane_width)
                         }
                         IconButton(host, "BrowserClose", BROWSER_ICON_SHUTDOWN, true, widths[i]);
                         break;
-                    case 7: IconButton(host, "BrowserCollapse", BROWSER_ICON_WEB, true, widths[i]); break;
                     }
                 }
             }
@@ -1603,7 +1598,7 @@ void PicoBrowser_Layout(PicoHost *host)
 {
     ProfileDialog(host);
     PicoAgent *a = PicoHost_SelectedAgent(host);
-    if (!PicoAgent_IsUserMain(a)) return;
+    if (!PicoAgent_IsUserMain(a) || !a->browser_expanded) return;
     BrowserSession *b = Selected(host);
     EnsureIcons(host);
     CLAY(CLAY_ID("BrowserPane"),
@@ -1611,49 +1606,40 @@ void PicoBrowser_Layout(PicoHost *host)
                     .sizing = {.width = CLAY_SIZING_FIXED(PicoBrowser_ShellWidth(host)),
                                .height = CLAY_SIZING_PERCENT(1)}, .childGap = 4},
          .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(6)}) {
-        if (!a->browser_expanded) {
-            /* Match the expanded toolbar's top inset and right-edge anchor. */
-            CLAY(CLAY_ID("BrowserToolbar"),
-                {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(34)},
-                            .padding = {0,0,2,2}}}) {
-                IconButton(host, "BrowserExpand", BROWSER_ICON_WEB, false, 28);
+        /* Floating hit target straddles the left edge without participating
+         * in the shell's width/height distribution or bottom-follow layout. */
+        CLAY(CLAY_ID("BrowserResizeHandle"),
+            {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .offset = {.x = -4}, .zIndex = 1},
+             .layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_PERCENT(1)}}}) {}
+        Toolbar(host, b, PicoBrowser_ShellWidth(host));
+        if (b) {
+            CLAY(CLAY_ID("BrowserAddress"),
+                {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(32)},
+                            .padding = {8,8,5,5}},
+                 .clip = {.horizontal = true, .childOffset = {.x = -b->field.scroll_x}},
+                 .backgroundColor = COLOR_BG}) { Label(b->address); }
+            if (b->error[0]) {
+                CLAY(CLAY_ID("BrowserError"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(26)}},
+                     .clip = {.horizontal = true}}) { Label(b->error); }
             }
-        } else {
-            /* Floating hit target straddles the left edge without participating
-             * in the shell's width/height distribution or bottom-follow layout. */
-            CLAY(CLAY_ID("BrowserResizeHandle"),
-                {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .offset = {.x = -4}, .zIndex = 1},
-                 .layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_PERCENT(1)}}}) {}
-            Toolbar(host, b, PicoBrowser_ShellWidth(host));
-            if (b) {
-                CLAY(CLAY_ID("BrowserAddress"),
-                    {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(32)},
-                                .padding = {8,8,5,5}},
-                     .clip = {.horizontal = true, .childOffset = {.x = -b->field.scroll_x}},
-                     .backgroundColor = COLOR_BG}) { Label(b->address); }
-                if (b->error[0]) {
-                    CLAY(CLAY_ID("BrowserError"), {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(26)}},
-                         .clip = {.horizontal = true}}) { Label(b->error); }
-                }
-            }
-            CLAY(CLAY_ID("BrowserSurface"),
-                {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
-                 .clip = {.horizontal = true, .vertical = true}, .backgroundColor = COLOR_BG}) {
-                if (!b) Button("BrowserStart", "Open browser", 150, false);
-                else {
-                    /* This is presentation, not another viewport-sized pane.
-                     * Floating fixed bounds cannot feed image aspect/compression
-                     * residue into the shell's repeated bottom-follow layouts. */
-                    CLAY(CLAY_ID("BrowserImage"),
-                        {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
-                            .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT, .attachPoints = {.element = CLAY_ATTACH_POINT_CENTER_CENTER, .parent = CLAY_ATTACH_POINT_CENTER_CENTER}},
-                         .layout = {.sizing = {.width = CLAY_SIZING_FIXED(b->display_width > 0 ? b->display_width : 1),
-                                              .height = CLAY_SIZING_FIXED(b->display_height > 0 ? b->display_height : 1)}},
-                         /* Clay emits image backgrounds after their image. */
-                         .image = {.imageData = b->texture.id && b->texture.width == b->width && b->texture.height == b->height ? &b->texture : NULL}}) {}
-                    if (b->stopped) Label("Browser stopped. Close and reopen to retry.");
-                    else if (!b->texture.id) Label(b->ready ? "Waiting for page paint..." : "Starting browser...");
-                }
+        }
+        CLAY(CLAY_ID("BrowserSurface"),
+            {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
+             .clip = {.horizontal = true, .vertical = true}, .backgroundColor = COLOR_BG}) {
+            if (!b) Button("BrowserStart", "Open browser", 150, false);
+            else {
+                /* This is presentation, not another viewport-sized pane.
+                 * Floating fixed bounds cannot feed image aspect/compression
+                 * residue into the shell's repeated bottom-follow layouts. */
+                CLAY(CLAY_ID("BrowserImage"),
+                    {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                        .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT, .attachPoints = {.element = CLAY_ATTACH_POINT_CENTER_CENTER, .parent = CLAY_ATTACH_POINT_CENTER_CENTER}},
+                     .layout = {.sizing = {.width = CLAY_SIZING_FIXED(b->display_width > 0 ? b->display_width : 1),
+                                          .height = CLAY_SIZING_FIXED(b->display_height > 0 ? b->display_height : 1)}},
+                     /* Clay emits image backgrounds after their image. */
+                     .image = {.imageData = b->texture.id && b->texture.width == b->width && b->texture.height == b->height ? &b->texture : NULL}}) {}
+                if (b->stopped) Label("Browser stopped. Close and reopen to retry.");
+                else if (!b->texture.id) Label(b->ready ? "Waiting for page paint..." : "Starting browser...");
             }
         }
     }
@@ -1872,7 +1858,14 @@ void PicoBrowser_Input(PicoHost *host)
     if (s && s->resize_pointer_claimed && !s->resize_agent_id) return;
     bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (ResizeInput(host, a, b, click)) return;
-    if (click && (Over("BrowserExpand") || Over("BrowserStart"))) {
+    if (click && Over("BrowserToggle") && a->browser_expanded) {
+        a->browser_expanded = false;
+        if (s) s->control_drag_token = 0;
+        if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
+        pico_host_request_redraw(host);
+        return;
+    }
+    if (click && (Over("BrowserToggle") || Over("BrowserStart"))) {
         if (!a->session_id[0]) {
             PicoOverlay_Notify(host, "Send a message to create this session before opening its browser.");
             return;
@@ -1886,12 +1879,6 @@ void PicoBrowser_Input(PicoHost *host)
         }
         pico_host_request_redraw(host);
         return;
-    }
-    if (click && Over("BrowserCollapse")) {
-        a->browser_expanded = false;
-        if (s) s->control_drag_token = 0;
-        if (b) { Focus(host, b, false); b->address_focus = false; CloseViewport(b); }
-        pico_host_request_redraw(host);
     }
     if (click && Over("BrowserProfile")) {
         if (!a->session_id[0]) { PicoOverlay_Notify(host, "Send a message to create this session before choosing a browser profile."); return; }

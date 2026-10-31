@@ -28,7 +28,7 @@
 #define PICO_CC "cc"
 #endif
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.5.5"
+#define PICO_VERSION "0.5.6"
 #endif
 
 #define PICO_MAX_USER_PLUGINS 32
@@ -1893,7 +1893,8 @@ void PicoPlugins_Poll(PicoHost *app)
     {
         /* Safe mode disables source scanning, not an explicit reload deferred
          * by a settings draft or in-flight persistence. */
-        if (app->plugin_reload_pending) (void)ReloadHostWithPolicy(app, app->plugin_reload_retry);
+        if (app->plugin_reload_pending)
+            (void)ReloadHostWithPolicy(app, app->plugin_reload_retry);
         return;
     }
     AdvanceCompiles(app);
@@ -2197,15 +2198,18 @@ static void ExtensionReload(PicoHost *host, const char *key)
     for (int i = 0; i < count; i++)
     {
         PicoExtInfo info;
-        if (!PicoPlugins_Get(host, i, &info)) continue;
+        if (!PicoPlugins_Get(host, i, &info))
+            continue;
         const char *candidate = info.source ? info.source : info.name;
-        if (!candidate || strcmp(candidate, key)) continue;
+        if (!candidate || strcmp(candidate, key))
+            continue;
         if (info.scope == PICO_EXTENSION_HOST)
             reload_host = true;
         else if (info.workspace_id)
             (void)pico_workspace_request_reload(host, info.workspace_id);
     }
-    if (reload_host) PicoHost_RequestHostReload(host);
+    if (reload_host)
+        PicoHost_RequestHostReload(host);
 }
 
 static void ExtensionSaveCompleted(PicoHost *host, void *arg)
@@ -2241,17 +2245,20 @@ static bool ExtensionPreferenceCapacity(const PicoHost *host, const char *key)
     bool key_pending = false;
     for (const PicoExtensionPreference *pref = host->extension_preferences; pref; pref = pref->next)
     {
-        if (!pref->pending) continue;
+        if (!pref->pending)
+            continue;
         bool listed = false;
         for (int i = 0; i < p->disabled_host_extension_count; i++)
             listed |= !strcmp(p->disabled_host_extensions[i], pref->key);
-        if (!listed) disabled++;
+        if (!listed)
+            disabled++;
         if (!PicoSettings_HostExtensionEnabledByDefault(pref->key))
         {
             listed = false;
             for (int i = 0; i < p->enabled_host_extension_count; i++)
                 listed |= !strcmp(p->enabled_host_extensions[i], pref->key);
-            if (!listed) enabled++;
+            if (!listed)
+                enabled++;
         }
         key_pending |= !strcmp(key, pref->key);
     }
@@ -2260,13 +2267,15 @@ static bool ExtensionPreferenceCapacity(const PicoHost *host, const char *key)
         bool listed = false;
         for (int i = 0; i < p->disabled_host_extension_count; i++)
             listed |= !strcmp(p->disabled_host_extensions[i], key);
-        if (!listed) disabled++;
+        if (!listed)
+            disabled++;
         if (!PicoSettings_HostExtensionEnabledByDefault(key))
         {
             listed = false;
             for (int i = 0; i < p->enabled_host_extension_count; i++)
                 listed |= !strcmp(p->enabled_host_extensions[i], key);
-            if (!listed) enabled++;
+            if (!listed)
+                enabled++;
         }
     }
     return disabled <= PICO_MAX_DISABLED_EXTENSIONS && enabled <= PICO_MAX_DISABLED_EXTENSIONS;
@@ -2275,13 +2284,16 @@ static bool ExtensionPreferenceCapacity(const PicoHost *host, const char *key)
 bool PicoPlugins_SetEnabled(PicoHost *app, int index, bool enabled)
 {
     PicoExtInfo info;
-    if (!app || !PicoPlugins_Get(app, index, &info)) return false;
+    if (!app || !PicoPlugins_Get(app, index, &info))
+        return false;
     const char *key = info.source ? info.source : info.name;
     if (!key || !key[0] || strlen(key) >= PICO_EXTENSION_KEY_MAX ||
-        !strcmp(key, "extensions") || !strcmp(key, "settings")) return false;
+        !strcmp(key, "extensions") || !strcmp(key, "settings"))
+        return false;
     if (info.enabled == enabled)
         return true;
-    if (!ExtensionPreferenceCapacity(app, key)) return false;
+    if (!ExtensionPreferenceCapacity(app, key))
+        return false;
     PicoExtensionPreference *pref = app->extension_preferences;
     while (pref && strcmp(pref->key, key))
         pref = pref->next;

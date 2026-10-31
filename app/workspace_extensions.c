@@ -163,27 +163,6 @@ void PicoWorkspace_RegistrationClear(PicoWorkspace *workspace)
     workspace->active_registration = NULL;
 }
 
-static bool ExtPinned(const char *name)
-{
-    return name && name[0] && strcmp(name, "extensions") == 0;
-}
-
-bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char *name)
-{
-    if (!workspace || !name || !name[0] || ExtPinned(name))
-    {
-        return false;
-    }
-    for (int i = 0; i < workspace->settings.disabled_extension_count; i++)
-    {
-        if (strcmp(workspace->settings.disabled_extensions[i], name) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 static bool ModuleAppliesToWorkspace(const PicoHost *host,
                                      const PicoWorkspace *workspace,
                                      const PicoModuleGeneration *module)
@@ -249,7 +228,7 @@ static bool ActivateWorkspaceModule(PicoWorkspace *workspace, PicoWorkspace *tar
         slot->desired_generation = module->generation;
     }
 
-    bool disabled = PicoWorkspace_ExtensionDisabled(workspace, module->ext.name);
+    bool disabled = PicoHost_ExtensionDisabled(workspace->host, module->source[0] ? module->source : module->ext.name);
     if (disabled)
     {
         if (slot)

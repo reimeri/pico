@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 28 /* Transcript Markdown document origins. */
+#define PICO_EXT_ABI 29 /* Global, source-identified extension preferences. */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);

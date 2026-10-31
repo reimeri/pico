@@ -73,12 +73,12 @@ bool PicoSettings_SetEffort(PicoAgent *agent, const char *level);
 bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoModel *model);
 bool PicoSettings_FastAvailable(const PicoAgent *agent);
 bool PicoSettings_SetFast(PicoAgent *agent, bool enabled);
+/* Keys are builtin names or user extension source paths; preferences are global. */
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);
 bool PicoSettings_HostExtensionEnabledByDefault(const char *name);
-bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled);
 /* Main-thread-only memory mutation and worker-only durable patch, respectively. */
-bool PicoSettings_ExtensionMemory(PicoHost *host, PicoWorkspace *workspace, const char *name, bool disabled);
-bool PicoSettings_WriteExtension(const char *workspace_path, const char *name, bool disabled);
+bool PicoSettings_ExtensionMemory(PicoHost *host, const char *name, bool disabled);
+bool PicoSettings_WriteExtension(const char *name, bool disabled);
 
 
 #define PICO_SETTINGS_MODEL_MAX 64

@@ -1298,6 +1298,14 @@ void PicoChat_SubagentToolRow(PicoWorkspace *workspace, PicoToolRowEvent *event,
     (void)state;
 }
 
+/* This harness supplies its own settings/model implementation. Extension
+ * activation uses the global preference lookup for workspace instances too. */
+bool PicoSettings_HostExtensionEnabledByDefault(const char *name)
+{
+    (void)name;
+    return true;
+}
+
 void PicoHostPreferences_Load(PicoHost *app)
 {
     (void)app;

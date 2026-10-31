@@ -213,7 +213,6 @@ bool PicoWorkspace_Reload(PicoWorkspace *workspace);
 PicoResult PicoWorkspace_RequestReload(PicoHost *host, PicoWorkspace *workspace,
                                        bool retry_compile_failures);
 bool PicoPlugins_LoadWorkspaceSources(PicoHost *host, PicoWorkspace *workspace);
-bool PicoWorkspace_ExtensionDisabled(const PicoWorkspace *workspace, const char *name);
 
 /* False means a detached worker retained the execution host. */
 bool PicoWorkspace_QuiesceBefore(PicoWorkspace *workspace, const struct timespec *deadline);

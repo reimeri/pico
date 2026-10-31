@@ -103,8 +103,8 @@ bool PicoExts_IsOpen(const PicoHost *host)
 
 static bool RowToggleable(const PicoExtInfo *info)
 {
-    return info && info->loaded && info->name && info->name[0] && strcmp(info->name, "extensions") != 0 &&
-           strcmp(info->name, "settings") != 0;
+    return info && info->loaded && info->name && info->name[0] &&
+           (info->source || (strcmp(info->name, "extensions") != 0 && strcmp(info->name, "settings") != 0));
 }
 
 static Clay_String CStr(const char *s)
@@ -189,17 +189,7 @@ static void RenderRow(int index, const PicoExtInfo *info)
                                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 if (info->builtin)
                 {
-                    const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "built-in host" : "built-in workspace";
-                    CLAY_TEXT(CStr(badge),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = PICO_FONT_CAPTION,
-                                                .textColor = COLOR_MUTED,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
-                else
-                {
-                    const char *badge = (info->scope == PICO_EXTENSION_HOST) ? "host" : "workspace";
-                    CLAY_TEXT(CStr(badge),
+                    CLAY_TEXT(CLAY_STRING("built-in"),
                               CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                 .fontSize = PICO_FONT_CAPTION,
                                                 .textColor = COLOR_MUTED,
@@ -213,6 +203,14 @@ static void RenderRow(int index, const PicoExtInfo *info)
                 {
                 }
             }
+            if (info->source)
+            {
+                /* Different files may declare the same name. Keep them identifiable. */
+                CLAY_TEXT(CStr(info->source), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                .fontSize = PICO_FONT_CAPTION,
+                                                                .textColor = COLOR_MUTED,
+                                                                .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+            }
             if (desc)
             {
                 CLAY_TEXT(CStr(desc), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -224,6 +222,35 @@ static void RenderRow(int index, const PicoExtInfo *info)
     }
 }
 
+typedef struct ExtensionRow {
+    int slot_index;
+    PicoExtInfo info;
+} ExtensionRow;
+
+/* The public registry retains per-instance lifecycle diagnostics. The manager
+ * presents module identities instead: builtin name or user source path. */
+static int CollectRows(PicoHost *app, ExtensionRow *rows, int capacity)
+{
+    int count = 0;
+    int slots = PicoPlugins_Count(app);
+    for (int i = 0; i < slots; i++)
+    {
+        PicoExtInfo info;
+        if (!PicoPlugins_Get(app, i, &info)) continue;
+        const char *key = info.source ? info.source : info.name;
+        int row = 0;
+        for (; row < count; row++)
+        {
+            const PicoExtInfo *previous = &rows[row].info;
+            const char *previous_key = previous->source ? previous->source : previous->name;
+            if (key && previous_key && !strcmp(key, previous_key)) break;
+        }
+        if (row == count && count < capacity)
+            rows[count++] = (ExtensionRow){i, info};
+    }
+    return count;
+}
+
 static void RenderSection(PicoHost *app, bool builtin, Clay_String title)
 {
     CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -231,16 +258,13 @@ static void RenderSection(PicoHost *app, bool builtin, Clay_String title)
                                        .textColor = COLOR_MUTED,
                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
 
-    int n = PicoPlugins_Count(app);
+    ExtensionRow rows[PICO_MAX_MODULE_GENERATIONS];
+    int n = CollectRows(app, rows, PICO_MAX_MODULE_GENERATIONS);
     int shown = 0;
     for (int i = 0; i < n; i++)
     {
-        PicoExtInfo info;
-        if (!PicoPlugins_Get(app, i, &info) || info.builtin != builtin)
-        {
-            continue;
-        }
-        RenderRow(i, &info);
+        if (rows[i].info.builtin != builtin) continue;
+        RenderRow(rows[i].slot_index, &rows[i].info);
         shown++;
     }
     if (shown == 0)
@@ -297,6 +321,9 @@ static void ExtsRender(PicoHost *app, void *state)
         {
             CLAY_TEXT(CLAY_STRING("Extensions"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
+
+            CLAY_TEXT(CLAY_STRING("Changes apply to all workspaces"),
+                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED}));
 
             CLAY(CLAY_ID("ExtModalScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
@@ -380,17 +407,14 @@ static void ExtsOnFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
-    int n = PicoPlugins_Count(app);
+    ExtensionRow rows[PICO_MAX_MODULE_GENERATIONS];
+    int n = CollectRows(app, rows, PICO_MAX_MODULE_GENERATIONS);
     for (int i = 0; i < n; i++)
     {
-        PicoExtInfo info;
-        if (!PicoPlugins_Get(app, i, &info) || !RowToggleable(&info))
+        ExtensionRow *row = &rows[i];
+        if (RowToggleable(&row->info) && Clay_PointerOver(CLAY_IDI("ExtModalRow", row->slot_index)))
         {
-            continue;
-        }
-        if (Clay_PointerOver(CLAY_IDI("ExtModalRow", i)))
-        {
-            PicoPlugins_SetEnabled(app, i, !info.enabled);
+            PicoPlugins_SetEnabled(app, row->slot_index, !row->info.enabled);
             return;
         }
     }

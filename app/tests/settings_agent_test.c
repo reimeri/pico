@@ -406,7 +406,7 @@ static int TestExtensionWriterPreservesPreferences(void)
         return Fail("could not write async extension fixture");
     }
     setenv("XDG_CONFIG_HOME", temp, 1);
-    bool wrote = PicoSettings_WriteExtension(NULL, "cache_miss", true);
+    bool wrote = PicoSettings_WriteExtension( "cache_miss", true);
     size_t len = 0;
     char *saved = Pico_ReadFile(path, &len);
     bool preserved = wrote && saved && strstr(saved, "// keep this comment");
@@ -431,7 +431,7 @@ static int TestExtensionWriterPreservesPreferences(void)
     size_t before_len = 0;
     char *before = Pico_ReadFile(path, &before_len);
     fail_file_sync = true;
-    bool failed = !PicoSettings_WriteExtension(NULL, "cache_miss", false);
+    bool failed = !PicoSettings_WriteExtension( "cache_miss", false);
     fail_file_sync = false;
     size_t after_len = 0;
     char *after = Pico_ReadFile(path, &after_len);
@@ -451,13 +451,13 @@ static int TestExtensionMemoryCapacityFailureIsAtomic(void)
 {
     PicoHost host;
     memset(&host, 0, sizeof(host));
-    snprintf(host.preferences.disabled_host_extensions[0], PICO_DISABLED_EXT_NAME, "%s", "cache_miss");
+    snprintf(host.preferences.disabled_host_extensions[0], PICO_EXTENSION_KEY_MAX, "%s", "cache_miss");
     host.preferences.disabled_host_extension_count = 1;
     for (int i = 0; i < PICO_MAX_DISABLED_EXTENSIONS; i++)
-        snprintf(host.preferences.enabled_host_extensions[i], PICO_DISABLED_EXT_NAME, "enabled_%d", i);
+        snprintf(host.preferences.enabled_host_extensions[i], PICO_EXTENSION_KEY_MAX, "enabled_%d", i);
     host.preferences.enabled_host_extension_count = PICO_MAX_DISABLED_EXTENSIONS;
     PicoHostPreferences before = host.preferences;
-    bool changed = PicoSettings_ExtensionMemory(&host, NULL, "cache_miss", false);
+    bool changed = PicoSettings_ExtensionMemory(&host, "cache_miss", false);
     bool unchanged = !changed &&
                      memcmp(&before, &host.preferences, sizeof(before)) == 0;
     return unchanged ? 0 : Fail("failed opt-in capacity check partially changed disabled preferences");

@@ -668,7 +668,7 @@ static void ApplyPreferencesObject(PicoHostPreferences *p, const JsonDoc *doc, i
     }
 }
 
-static bool DisabledNameListed(const char list[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME], int count,
+static bool DisabledNameListed(const char list[PICO_MAX_DISABLED_EXTENSIONS][PICO_EXTENSION_KEY_MAX], int count,
                                const char *name)
 {
     if (!name || !name[0])
@@ -707,10 +707,10 @@ static void ApplyDisabledHostExtensions(PicoHostPreferences *p, const JsonDoc *d
     for (int i = 0; i < n && p->disabled_host_extension_count < PICO_MAX_DISABLED_EXTENSIONS; i++)
     {
         char *name = JsonStrDup(doc, JsonArrayAt(doc, arr, i));
-        if (name && name[0] && !ReservedExtensionName(name) &&
+        if (name && name[0] && strlen(name) < PICO_EXTENSION_KEY_MAX && !ReservedExtensionName(name) &&
             !DisabledNameListed(p->disabled_host_extensions, p->disabled_host_extension_count, name))
         {
-            snprintf(p->disabled_host_extensions[p->disabled_host_extension_count], PICO_DISABLED_EXT_NAME, "%s",
+            snprintf(p->disabled_host_extensions[p->disabled_host_extension_count], PICO_EXTENSION_KEY_MAX, "%s",
                      name);
             p->disabled_host_extension_count++;
         }
@@ -730,34 +730,11 @@ static void ApplyEnabledHostExtensions(PicoHostPreferences *p, const JsonDoc *do
     for (int i = 0; i < n && p->enabled_host_extension_count < PICO_MAX_DISABLED_EXTENSIONS; i++)
     {
         char *name = JsonStrDup(doc, JsonArrayAt(doc, arr, i));
-        if (name && name[0] && !ReservedExtensionName(name) &&
+        if (name && name[0] && strlen(name) < PICO_EXTENSION_KEY_MAX && !ReservedExtensionName(name) &&
             !DisabledNameListed(p->enabled_host_extensions, p->enabled_host_extension_count, name))
         {
-            snprintf(p->enabled_host_extensions[p->enabled_host_extension_count], PICO_DISABLED_EXT_NAME, "%s", name);
+            snprintf(p->enabled_host_extensions[p->enabled_host_extension_count], PICO_EXTENSION_KEY_MAX, "%s", name);
             p->enabled_host_extension_count++;
-        }
-        free(name);
-    }
-}
-
-static void ApplyDisabledExtensions(PicoWorkspaceSettings *s, const JsonDoc *doc, int obj)
-{
-    s->disabled_extension_count = 0;
-    int arr = JsonObjGet(doc, obj, "disabled_extensions");
-    if (!JsonIsArray(doc, arr))
-    {
-        return;
-    }
-    int n = JsonArrayLen(doc, arr);
-    for (int i = 0; i < n && s->disabled_extension_count < PICO_MAX_DISABLED_EXTENSIONS; i++)
-    {
-        char *name = JsonStrDup(doc, JsonArrayAt(doc, arr, i));
-        if (name && name[0] && !ReservedExtensionName(name) &&
-            !DisabledNameListed(s->disabled_extensions, s->disabled_extension_count, name))
-        {
-            snprintf(s->disabled_extensions[s->disabled_extension_count], PICO_DISABLED_EXT_NAME, "%s",
-                     name);
-            s->disabled_extension_count++;
         }
         free(name);
     }
@@ -1038,7 +1015,6 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
                     free(catalog);
                     return false;
                 }
-                ApplyDisabledExtensions(&next, &doc, 0);
                 JsonFree(&doc);
             }
             free(src);
@@ -1063,7 +1039,6 @@ bool PicoWorkspaceSettings_Load(PicoWorkspace *workspace)
                     free(catalog);
                     return false;
                 }
-                ApplyDisabledExtensions(&next, &doc, 0);
                 JsonFree(&doc);
             }
             free(src);
@@ -1151,10 +1126,6 @@ void PicoSettings_PublishResolved(PicoWorkspace *workspace, PicoResolvedSettings
             if (model) { agent->running_model = *model; agent->has_running_model = true; }
         }
     }
-    /* Disabled lists may have changed optimistically while this copy loaded. */
-    resolved->settings.disabled_extension_count = workspace->settings.disabled_extension_count;
-    memcpy(resolved->settings.disabled_extensions, workspace->settings.disabled_extensions,
-           sizeof(resolved->settings.disabled_extensions));
     free(workspace->models);
     workspace->settings = resolved->settings;
     workspace->models = resolved->models;
@@ -1812,153 +1783,52 @@ static bool SaveHostExtensionPreferences(PicoHost *host)
 
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled)
 {
-    if (!host || !name || !name[0] || ReservedExtensionName(name)) return false;
+    if (!host || !name || !name[0] || strlen(name) >= PICO_EXTENSION_KEY_MAX || ReservedExtensionName(name)) return false;
     pthread_mutex_lock(&host->settings_mu);
     PicoHostPreferences before = host->preferences;
-    bool changed = PicoSettings_ExtensionMemory(host, NULL, name, disabled);
+    bool changed = PicoSettings_ExtensionMemory(host, name, disabled);
     bool ok = changed && SaveHostExtensionPreferences(host);
     if (!ok) host->preferences = before;
     pthread_mutex_unlock(&host->settings_mu);
     return ok;
 }
 
-static char *DisabledExtensionsJson(const PicoWorkspaceSettings *s)
+bool PicoSettings_ExtensionMemory(PicoHost *host, const char *name, bool disabled)
 {
-    JsonBuf b;
-    JsonBuf_Init(&b);
-    JsonBuf_Putc(&b, '[');
-    for (int i = 0; i < s->disabled_extension_count; i++)
-    {
-        if (i)
-        {
-            JsonBuf_Putc(&b, ',');
-        }
-        JsonBuf_String(&b, s->disabled_extensions[i]);
-    }
-    JsonBuf_Putc(&b, ']');
-    return JsonBuf_Steal(&b);
-}
-
-static bool SaveDisabledExtensions(PicoWorkspace *workspace)
-{
-    char path[4096];
-    if (!WorkspaceSettingsPath(workspace, path, sizeof(path)) || !path[0])
-    {
-        return false;
-    }
-    char dir[4096];
-    if (PicoPath_Format(dir, sizeof(dir), "%s/.pico", workspace->path))
-    {
-        Pico_MkdirP(dir);
-    }
-    char *json = DisabledExtensionsJson(&workspace->settings);
-    bool ok = json && PatchRootJson(path, "disabled_extensions", json);
-    free(json);
-    return ok;
-}
-
-bool PicoWorkspace_SetExtensionDisabled(PicoWorkspace *workspace, const char *name, bool disabled)
-{
-    if (!workspace || !name || !name[0] || ReservedExtensionName(name))
-    {
-        return false;
-    }
-    pthread_mutex_lock(&workspace->settings_mu);
-    PicoWorkspaceSettings *s = &workspace->settings;
-    int found = -1;
-    for (int i = 0; i < s->disabled_extension_count; i++)
-    {
-        if (strcmp(s->disabled_extensions[i], name) == 0)
-        {
-            found = i;
-            break;
-        }
-    }
-    bool ok = false;
+    if (!host || !name || !name[0] || strlen(name) >= PICO_EXTENSION_KEY_MAX || ReservedExtensionName(name)) return false;
+    PicoHostPreferences *p = &host->preferences;
+    char (*disabled_names)[PICO_EXTENSION_KEY_MAX] = p->disabled_host_extensions;
+    int *disabled_count = &p->disabled_host_extension_count;
+    int (*enabled_count) = &p->enabled_host_extension_count;
+    int found_disabled = -1, found_enabled = -1;
+    for (int i = 0; i < *disabled_count; i++) if (!strcmp(disabled_names[i], name)) found_disabled = i;
+    for (int i = 0; i < *enabled_count; i++) if (!strcmp(p->enabled_host_extensions[i], name)) found_enabled = i;
     if (disabled)
     {
-        if (found >= 0)
+        if (found_disabled < 0)
         {
-            ok = SaveDisabledExtensions(workspace);
-            pthread_mutex_unlock(&workspace->settings_mu);
-            return ok;
+            if (*disabled_count >= PICO_MAX_DISABLED_EXTENSIONS) return false;
+            snprintf(disabled_names[(*disabled_count)++], PICO_EXTENSION_KEY_MAX, "%s", name);
         }
-        if (s->disabled_extension_count >= PICO_MAX_DISABLED_EXTENSIONS)
+        if (found_enabled >= 0)
         {
-            pthread_mutex_unlock(&workspace->settings_mu);
-            return false;
+            memmove(p->enabled_host_extensions + found_enabled, p->enabled_host_extensions + found_enabled + 1,
+                    (size_t)(*enabled_count - found_enabled - 1) * sizeof(p->enabled_host_extensions[0]));
+            p->enabled_host_extensions[--(*enabled_count)][0] = '\0';
         }
-        snprintf(s->disabled_extensions[s->disabled_extension_count], PICO_DISABLED_EXT_NAME, "%s", name);
-        s->disabled_extension_count++;
     }
-    else if (found >= 0)
+    else
     {
-        for (int i = found; i < s->disabled_extension_count - 1; i++)
+        bool add_opt_in = !PicoSettings_HostExtensionEnabledByDefault(name) && found_enabled < 0;
+        if (add_opt_in && *enabled_count >= PICO_MAX_DISABLED_EXTENSIONS) return false;
+        if (found_disabled >= 0)
         {
-            memcpy(s->disabled_extensions[i], s->disabled_extensions[i + 1], PICO_DISABLED_EXT_NAME);
+            memmove(disabled_names + found_disabled, disabled_names + found_disabled + 1,
+                    (size_t)(*disabled_count - found_disabled - 1) * sizeof(disabled_names[0]));
+            disabled_names[--(*disabled_count)][0] = '\0';
         }
-        s->disabled_extension_count--;
-        s->disabled_extensions[s->disabled_extension_count][0] = '\0';
-    }
-    ok = SaveDisabledExtensions(workspace);
-    pthread_mutex_unlock(&workspace->settings_mu);
-    return ok;
-}
-
-bool PicoSettings_ExtensionMemory(PicoHost *host, PicoWorkspace *workspace, const char *name, bool disabled)
-{
-    if (!host || !name || !name[0] || ReservedExtensionName(name)) return false;
-    if (!workspace)
-    {
-        PicoHostPreferences *p = &host->preferences;
-        char (*disabled_names)[PICO_DISABLED_EXT_NAME] = p->disabled_host_extensions;
-        int *disabled_count = &p->disabled_host_extension_count;
-        int (*enabled_count) = &p->enabled_host_extension_count;
-        int found_disabled = -1, found_enabled = -1;
-        for (int i = 0; i < *disabled_count; i++) if (!strcmp(disabled_names[i], name)) found_disabled = i;
-        for (int i = 0; i < *enabled_count; i++) if (!strcmp(p->enabled_host_extensions[i], name)) found_enabled = i;
-        if (disabled)
-        {
-            if (found_disabled < 0)
-            {
-                if (*disabled_count >= PICO_MAX_DISABLED_EXTENSIONS) return false;
-                snprintf(disabled_names[(*disabled_count)++], PICO_DISABLED_EXT_NAME, "%s", name);
-            }
-            if (found_enabled >= 0)
-            {
-                memmove(p->enabled_host_extensions + found_enabled, p->enabled_host_extensions + found_enabled + 1,
-                        (size_t)(*enabled_count - found_enabled - 1) * sizeof(p->enabled_host_extensions[0]));
-                p->enabled_host_extensions[--(*enabled_count)][0] = '\0';
-            }
-        }
-        else
-        {
-            bool add_opt_in = !PicoSettings_HostExtensionEnabledByDefault(name) && found_enabled < 0;
-            if (add_opt_in && *enabled_count >= PICO_MAX_DISABLED_EXTENSIONS) return false;
-            if (found_disabled >= 0)
-            {
-                memmove(disabled_names + found_disabled, disabled_names + found_disabled + 1,
-                        (size_t)(*disabled_count - found_disabled - 1) * sizeof(disabled_names[0]));
-                disabled_names[--(*disabled_count)][0] = '\0';
-            }
-            if (add_opt_in)
-                snprintf(p->enabled_host_extensions[(*enabled_count)++], PICO_DISABLED_EXT_NAME, "%s", name);
-        }
-        return true;
-    }
-    char (*names)[PICO_DISABLED_EXT_NAME] = workspace->settings.disabled_extensions;
-    int *count = &workspace->settings.disabled_extension_count;
-    int found = -1;
-    for (int i = 0; i < *count; i++) if (!strcmp(names[i], name)) { found = i; break; }
-    if (disabled && found < 0)
-    {
-        if (*count >= PICO_MAX_DISABLED_EXTENSIONS) return false;
-        snprintf(names[(*count)++], PICO_DISABLED_EXT_NAME, "%s", name);
-    }
-    else if (!disabled && found >= 0)
-    {
-        memmove(names + found, names + found + 1, (size_t)(*count - found - 1) * sizeof(*names));
-        names[--(*count)][0] = '\0';
+        if (add_opt_in)
+            snprintf(p->enabled_host_extensions[(*enabled_count)++], PICO_EXTENSION_KEY_MAX, "%s", name);
     }
     return true;
 }
@@ -1987,33 +1857,28 @@ static char *ExtensionListJson(const JsonDoc *doc, int obj, const char *key,
         JsonBuf_String(&b, name);
     }
     JsonBuf_Putc(&b, ']');
-    return JsonBuf_Steal(&b);
+    char *json = JsonBuf_Steal(&b);
+    if (count > PICO_MAX_DISABLED_EXTENSIONS) { free(json); return NULL; }
+    return json;
 }
 
-bool PicoSettings_WriteExtension(const char *workspace_path, const char *name, bool disabled)
+bool PicoSettings_WriteExtension(const char *name, bool disabled)
 {
 #ifdef PICO_SESSION_TEST_HOOKS
     extern bool PicoSession_TestHook(const char *);
     if (PicoSession_TestHook("extension_before_save")) return false;
 #endif
-    if (!name || !name[0] || ReservedExtensionName(name)) return false;
+    if (!name || !name[0] || strlen(name) >= PICO_EXTENSION_KEY_MAX || ReservedExtensionName(name)) return false;
     char path[4096], dir[4096];
-    bool local = workspace_path && workspace_path[0];
-    if (local)
-    {
-        if (!PicoPath_Format(dir, sizeof(dir), "%s/.pico", workspace_path) ||
-            !PicoPath_Format(path, sizeof(path), "%s/settings.json", dir)) return false;
-    }
-    else if (!Pico_ConfigDir(dir, sizeof(dir)) || !UserSettingsPath(path, sizeof(path))) return false;
+    if (!Pico_ConfigDir(dir, sizeof(dir)) || !UserSettingsPath(path, sizeof(path))) return false;
     if (!MkdirP(dir)) return false;
     int lock = SettingsLockAcquire(path);
     if (lock < 0) return false;
 
     char *src = NULL, *clean = NULL;
     size_t len = 0;
-    JsonDoc output_doc = {0}, inherited_doc = {0};
-    char *user_src = NULL, *user_clean = NULL;
-    bool output_parsed = false, inherited_parsed = false;
+    JsonDoc output_doc = {0};
+    bool output_parsed = false;
     bool ok = ReadUserSettings(path, &src, &len, NULL, 0);
     if (ok && src)
     {
@@ -2029,25 +1894,10 @@ bool PicoSettings_WriteExtension(const char *workspace_path, const char *name, b
     }
 
     const JsonDoc *list_doc = output_parsed ? &output_doc : NULL;
-    if (ok && local && !output_parsed)
-    {
-        char user_path[4096];
-        size_t user_len = 0;
-        ok = UserSettingsPath(user_path, sizeof(user_path)) &&
-             ReadUserSettings(user_path, &user_src, &user_len, NULL, 0);
-        if (ok && user_src)
-        {
-            ok = PrepareSettingsJson(user_src, user_len, user_path, &user_clean, NULL, 0);
-            if (ok) inherited_parsed = JsonParse(&inherited_doc, user_clean, strlen(user_clean)) == 0;
-            ok = ok && inherited_parsed;
-            if (inherited_parsed) list_doc = &inherited_doc;
-        }
-    }
-
-    const char *disabled_key = local ? "disabled_extensions" : "disabled_host_extensions";
+    const char *disabled_key = "disabled_host_extensions";
     char *disabled_json = ok ? ExtensionListJson(list_doc, 0, disabled_key, name, disabled) : NULL;
     char *enabled_json = NULL;
-    if (ok && !local && !PicoSettings_HostExtensionEnabledByDefault(name))
+    if (ok && !PicoSettings_HostExtensionEnabledByDefault(name))
     {
         enabled_json = ExtensionListJson(list_doc, 0, "enabled_host_extensions", name, !disabled);
         ok = enabled_json != NULL;
@@ -2065,10 +1915,7 @@ bool PicoSettings_WriteExtension(const char *workspace_path, const char *name, b
     free(enabled_json);
     free(src);
     free(clean);
-    free(user_src);
-    free(user_clean);
     if (output_parsed) JsonFree(&output_doc);
-    if (inherited_parsed) JsonFree(&inherited_doc);
     SettingsLockRelease(lock);
     return ok;
 }

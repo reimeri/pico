@@ -7,7 +7,7 @@
 
 static bool ExtPinned(const char *name)
 {
-    return name && name[0] && strcmp(name, "extensions") == 0;
+    return name && name[0] && (strcmp(name, "extensions") == 0 || strcmp(name, "settings") == 0);
 }
 
 static bool HostExtensionExplicitlyEnabled(const PicoHost *host, const char *name)
@@ -95,7 +95,7 @@ bool PicoHostExtensions_Activate(PicoHost *host, PicoModuleGeneration *module)
         slot->desired_generation = module->generation;
     }
 
-    bool disabled = PicoHost_ExtensionDisabled(host, module->ext.name);
+    bool disabled = PicoHost_ExtensionDisabled(host, module->source[0] ? module->source : module->ext.name);
     if (disabled)
     {
         if (slot)

@@ -8026,9 +8026,7 @@ static int TestWorkspaceReloadUsesLiveOwnerAndSettings(void)
                       workspace->command_count == 1 &&
                       workspace->commands[0].workspace == workspace;
 
-    snprintf(workspace->settings.disabled_extensions[0],
-             sizeof(workspace->settings.disabled_extensions[0]), "%s", module.ext.name);
-    workspace->settings.disabled_extension_count = 1;
+    PicoSettings_ExtensionMemory(&host, module.ext.name, true);
     bool second = WaitWorkspaceReload(workspace);
     bool disabled = second && g_workspace_reload_inits == 1 &&
                     g_workspace_reload_shutdowns == 1 && workspace->command_count == 0 &&
@@ -17744,8 +17742,7 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
             { extension_index = i; break; }
         }
         if (extension_index < 0) goto done;
-        initial_disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
-                                                        : PicoWorkspace_ExtensionDisabled(workspace, extension);
+        initial_disabled = PicoHost_ExtensionDisabled(host, extension);
     }
     g_preference_ready_fd = ready[1];
     g_preference_continue_fd = proceed[0];
@@ -17794,8 +17791,7 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     }
     else
     {
-        bool disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
-                                                      : PicoWorkspace_ExtensionDisabled(workspace, extension);
+        bool disabled = PicoHost_ExtensionDisabled(host, extension);
         if (disabled != !want_enabled) goto done;
         pico_host_pump(host); /* Activation/reload cannot wait for this disk write. */
         if (action == PREF_HOST_EXTENSION)
@@ -17832,8 +17828,7 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     }
     else
     {
-        bool disabled = action == PREF_HOST_EXTENSION ? PicoHost_ExtensionDisabled(host, extension)
-                                                      : PicoWorkspace_ExtensionDisabled(workspace, extension);
+        bool disabled = PicoHost_ExtensionDisabled(host, extension);
         bool expected_disabled = fail ? initial_disabled : !want_enabled;
         if (disabled != expected_disabled) goto done;
         if (action == PREF_HOST_EXTENSION)
@@ -18168,41 +18163,219 @@ done:
     return good ? 0 : 1;
 }
 
-static int TestWorkspaceExtensionPreferenceKeepsEffectiveList(bool local_file)
+static bool WorkspaceHasTool(PicoWorkspace *workspace, const char *name)
+{
+    for (int i = 0; workspace && i < workspace->tool_count; i++)
+        if (!strcmp(workspace->tools[i].name, name)) return true;
+    return false;
+}
+
+static bool WaitExtensionReloads(PicoHost *host)
+{
+    PICO_TEST_WAIT_LOOP("global extension reload")
+    {
+        pico_host_pump(host);
+        bool pending = host->reload_queued || host->plugin_reload_pending || host->plugin_compile;
+        for (int i = 0; i < host->workspace_count; i++)
+            pending |= host->workspaces[i]->state == PICO_WORKSPACE_RELOADING;
+        if (!pending) return true;
+    }
+    return false;
+}
+
+static int TestGlobalExtensionToggle(void)
 {
     InteractionFixture f = {0};
+    char other[] = "/tmp/pico-extension-other-XXXXXX";
+    char future[] = "/tmp/pico-extension-future-XXXXXX";
     bool good = false;
-    if (!InteractionFixtureInit(&f)) goto done;
-    char path[4096];
-    if (!PicoPath_Format(path, sizeof(path), "%s/pico/settings.json", f.cfg) ||
-        WriteFile(path, "{\"disabled_extensions\":[\"diff\"],\"model\":\"test\"}\n")) goto done;
-    if (local_file)
-    {
-        char directory[4096], local_path[4096];
-        if (!PicoPath_Format(directory, sizeof(directory), "%s/.pico", f.dir) ||
-            !PicoPath_Format(local_path, sizeof(local_path), "%s/settings.json", directory)) goto done;
-        Pico_MkdirP(directory);
-        if (WriteFile(local_path, "{\"model\":\"test\"}\n")) goto done;
-    }
-    PicoWorkspace *ws = PicoHost_FindWorkspace(f.host, f.workspace);
-    if (!PicoWorkspaceSettings_Load(ws) || PicoWorkspace_ExtensionDisabled(ws, "diff") != !local_file) goto done;
-    int index = -1;
+    const char *phase = "fixture";
+    if (!mkdtemp(other) || !mkdtemp(future) || !InteractionFixtureInit(&f)) goto done;
+    PicoWorkspaceId other_id = 0, future_id = 0;
+    if (pico_workspace_open(f.host, other, &other_id) != PICO_OK) goto done;
+    PicoWorkspace *first = PicoHost_FindWorkspace(f.host, f.workspace);
+    PicoWorkspace *second = PicoHost_FindWorkspace(f.host, other_id);
+
+    /* Workspace files cannot override the global preference. */
+    char directory[4096], local_path[4096];
+    snprintf(directory, sizeof(directory), "%s/.pico", f.dir);
+    Pico_MkdirP(directory);
+    snprintf(local_path, sizeof(local_path), "%s/.pico/settings.json", f.dir);
+    const char *local_settings = "{\"disabled_extensions\":[\"ask-user\"],\"disabled_host_extensions\":[\"ask-user\"]}\n";
+    if (WriteFile(local_path, local_settings) || !PicoWorkspaceSettings_Load(first) ||
+        !WaitWorkspaceReload(first) || !WorkspaceHasTool(first, "ask_user")) goto done;
+
+    phase = "one visible row across host and two workspaces";
+    PicoExts_Open(f.host);
+    PicoHost_Frame(f.host);
+    int row = -1, rows = 0;
     for (int i = 0; i < PicoPlugins_Count(f.host); i++)
     {
         PicoExtInfo info;
-        if (PicoPlugins_Get(f.host, i, &info) && info.workspace_id == f.workspace && !strcmp(info.name, "sh"))
-        { index = i; break; }
+        if (PicoPlugins_Get(f.host, i, &info) && !strcmp(info.name, "ask-user") &&
+            Clay_GetElementData(CLAY_IDI("ExtModalRow", i)).found)
+        { row = i; rows++; }
     }
-    if (index < 0 || !PicoPlugins_SetEnabled(f.host, index, false) ||
-        !PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
-    /* Reloading from disk, not inspecting optimistic memory, protects the
-     * inherited list when the first local settings override is created. */
-    if (!PicoWorkspaceSettings_Load(ws) || PicoWorkspace_ExtensionDisabled(ws, "diff") != !local_file ||
-        !PicoWorkspace_ExtensionDisabled(ws, "sh")) goto done;
+    if (rows != 1 || !PicoPlugins_HostState(f.host, "ask-user") ||
+        !WorkspaceHasTool(second, "ask_user")) goto done;
+    phase = "one click disables all parts";
+    /* Bring the actual row into the modal's clipped viewport before clicking. */
+    Clay_ElementData target = Clay_GetElementData(CLAY_IDI("ExtModalRow", row));
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ExtModalScroll"));
+    Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("ExtModalScroll"));
+    if (!scroll.found || !viewport.found) goto done;
+    scroll.scrollPosition->y -= target.boundingBox.y - viewport.boundingBox.y;
+    pico_host_request_redraw(f.host);
+    PicoHost_Frame(f.host);
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("ExtModalRow", row))) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL) || !WaitExtensionReloads(f.host)) goto done;
+    if (PicoPlugins_HostState(f.host, "ask-user") || WorkspaceHasTool(first, "ask_user") ||
+        WorkspaceHasTool(second, "ask_user")) goto done;
+    phase = "future workspace and saved global preference";
+    if (pico_workspace_open(f.host, future, &future_id) != PICO_OK ||
+        WorkspaceHasTool(PicoHost_FindWorkspace(f.host, future_id), "ask_user")) goto done;
+    PicoHostPreferences_Load(f.host);
+    if (!PicoHost_ExtensionDisabled(f.host, "ask-user")) goto done;
+    size_t len = 0;
+    char *unchanged = Pico_ReadFile(local_path, &len);
+    bool local_unchanged = unchanged && !strcmp(unchanged, local_settings);
+    free(unchanged);
+    if (!local_unchanged) goto done;
+    phase = "reenable every existing instance";
+    row = FindHostExtensionIndex(f.host, "ask-user");
+    if (row < 0 || !PicoPlugins_SetEnabled(f.host, row, true) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL) || !WaitExtensionReloads(f.host) ||
+        !PicoPlugins_HostState(f.host, "ask-user")) goto done;
+    for (int i = 0; i < f.host->workspace_count; i++)
+        if (!WorkspaceHasTool(f.host->workspaces[i], "ask_user")) goto done;
     good = true;
 done:
     InteractionFixtureFree(&f);
-    if (!good) Fail("workspace extension preference writes must preserve the effective disabled list");
+    RmRf(other); RmRf(future);
+    if (!good) { fprintf(stderr, "global extension phase: %s\n", phase); Fail("one extension toggle must control all current and future instances"); }
+    return good ? 0 : 1;
+}
+
+static int TestExtensionSourceIdentity(void)
+{
+    static const char code[] =
+        "#include \"pico/plugin.h\"\n"
+        "static void Run(PicoAgentContext *c,const char *a,PicoToolResult *r,void *s){}\n"
+        "static void Cmd(PicoHost *h,PicoAgentId a,const char *x,void *s){}\n"
+        "static int Host(PicoHost *h,void **s){pico_host_add_command(h,MARKER,\"test\",Cmd);return 0;}\n"
+        "static int Workspace(PicoWorkspace *w,void **s){pico_add_tool(w,MARKER,\"test\",\"{}\",Run,NULL,PICO_TOOL_SEQUENTIAL);return 0;}\n"
+        "PicoExt pico_ext(void){return (PicoExt){.abi=PICO_EXT_ABI,.name=\"cache_miss\",.host_init=Host,.workspace_init=Workspace};}\n";
+    InteractionFixture f = {0};
+    char other[] = "/tmp/pico-source-other-XXXXXX", cache[] = "/tmp/pico-source-cache-XXXXXX";
+    bool good = false;
+    const char *phase = "fixture";
+    if (!mkdtemp(other) || !mkdtemp(cache) || !InteractionFixtureInit(&f)) goto done;
+    setenv("XDG_CACHE_HOME", cache, 1);
+    char directory[4096], sources[2][4096], body[4096];
+    snprintf(directory, sizeof(directory), "%s/pico/extensions/distinct-source-preferences", f.cfg);
+    if (MkdirParents(directory)) goto done;
+    for (int i = 0; i < 2; i++)
+    {
+        if (!PicoPath_Format(sources[i], sizeof(sources[i]), "%s/source-%d.c", directory, i)) goto done;
+        snprintf(body, sizeof(body), "#define MARKER \"source_%d\"\n%s", i, code);
+        if (WriteFile(sources[i], body)) goto done;
+    }
+    f.host->safe_mode = false;
+    if (!WaitHostReload(f.host)) goto done;
+    PicoWorkspace *first = PicoHost_FindWorkspace(f.host, f.workspace);
+    if (!WaitWorkspaceReload(first)) goto done;
+    PicoWorkspaceId other_id = 0;
+    if (pico_workspace_open(f.host, other, &other_id) != PICO_OK) goto done;
+    PicoWorkspace *second = PicoHost_FindWorkspace(f.host, other_id);
+    phase = "same-named sources have separate rows and are not builtin opt-ins";
+    InteractionOmitDrawHooks(f.host);
+    PicoExts_Open(f.host);
+    PicoHost_Frame(f.host);
+    int target = -1, source_rows[2] = {0};
+    for (int i = 0; i < PicoPlugins_Count(f.host); i++)
+    {
+        PicoExtInfo info;
+        if (!PicoPlugins_Get(f.host, i, &info) || !info.source) continue;
+        for (int j = 0; j < 2; j++)
+            if (!strcmp(info.source, sources[j]))
+            {
+                if (!info.enabled) goto done;
+                if (Clay_GetElementData(CLAY_IDI("ExtModalRow", i)).found) source_rows[j]++;
+                if (j == 0 && info.scope == PICO_EXTENSION_HOST) target = i;
+            }
+    }
+    if (target < 0 || source_rows[0] != 1 || source_rows[1] != 1 ||
+        !WorkspaceHasTool(first, "source_0") || !WorkspaceHasTool(second, "source_1")) goto done;
+    phase = "toggle and persist only the selected source";
+    if (!PicoPlugins_SetEnabled(f.host, target, false) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL) || !WaitExtensionReloads(f.host)) goto done;
+    PicoHostPreferences_Load(f.host);
+    if (!PicoHost_ExtensionDisabled(f.host, sources[0]) || PicoHost_ExtensionDisabled(f.host, sources[1])) goto done;
+    for (int i = 0; i < f.host->workspace_count; i++)
+        if (WorkspaceHasTool(f.host->workspaces[i], "source_0") ||
+            !WorkspaceHasTool(f.host->workspaces[i], "source_1")) goto done;
+    bool kept_host_command = false;
+    for (int i = 0; i < f.host->command_count; i++)
+    {
+        if (!strcmp(f.host->commands[i].name, "source_0")) goto done;
+        kept_host_command |= !strcmp(f.host->commands[i].name, "source_1");
+    }
+    if (!kept_host_command) goto done;
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    unsetenv("XDG_CACHE_HOME");
+    RmRf(other); RmRf(cache);
+    if (!good) { fprintf(stderr, "extension source phase: %s\n", phase); Fail("different source paths must have independent global preferences"); }
+    return good ? 0 : 1;
+}
+
+static int TestExtensionPendingRollbackCapacity(void)
+{
+    InteractionFixture f = {0};
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool released = false, good = false;
+    if (!InteractionFixtureInit(&f) || pipe(ready) || pipe(proceed)) goto done;
+    /* Fill the durable list, with a real extension as the last entry. */
+    for (int i = 0; i < PICO_MAX_DISABLED_EXTENSIONS - 1; i++)
+    {
+        char key[64];
+        snprintf(key, sizeof(key), "capacity_fixture_%d", i);
+        if (!PicoSettings_ExtensionMemory(f.host, key, true)) goto done;
+    }
+    if (!PicoHost_SetExtensionDisabled(f.host, "sh", true)) goto done;
+    int sh = -1;
+    for (int i = 0; i < PicoPlugins_Count(f.host); i++)
+    {
+        PicoExtInfo info;
+        if (PicoPlugins_Get(f.host, i, &info) && !strcmp(info.name, "sh")) { sh = i; break; }
+    }
+    if (sh < 0) goto done;
+    g_preference_ready_fd = ready[1];
+    g_preference_continue_fd = proceed[0];
+    g_preference_fail = true;
+    g_preference_stage = "extension_before_save";
+    if (!PicoPlugins_SetEnabled(f.host, sh, true) || !TransferTestByte(ready[0], false)) goto done;
+    /* A different toggle cannot consume the pending removal's rollback slot. */
+    int footer = FindHostExtensionIndex(f.host, "footer");
+    if (footer < 0 || PicoPlugins_SetEnabled(f.host, footer, false)) goto done;
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    if (!PicoCatalog_DrainPersistBefore(f.host, NULL) || !WaitExtensionReloads(f.host) ||
+        !PicoHost_ExtensionDisabled(f.host, "sh") || PicoHost_ExtensionDisabled(f.host, "footer")) goto done;
+    PicoHostPreferences_Load(f.host);
+    good = PicoHost_ExtensionDisabled(f.host, "sh") && !PicoHost_ExtensionDisabled(f.host, "footer");
+done:
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    InteractionFixtureFree(&f);
+    g_preference_stage = NULL;
+    g_preference_ready_fd = g_preference_continue_fd = -1;
+    for (int i = 0; i < 2; i++)
+    {
+        if (ready[i] >= 0) close(ready[i]);
+        if (proceed[i] >= 0) close(proceed[i]);
+    }
+    if (!good) Fail("pending extension saves must reserve capacity to restore confirmed preferences");
     return good ? 0 : 1;
 }
 
@@ -19606,8 +19779,9 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarLiveSavedPagination()) ||
         PICO_TEST_RUN(TestSidebarBlankDraftOrdering()) ||
         PICO_TEST_RUN(TestSidebarInboxMissingSavedTitle()) ||
-        PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(false)) ||
-        PICO_TEST_RUN(TestWorkspaceExtensionPreferenceKeepsEffectiveList(true))) return 1;
+        PICO_TEST_RUN(TestGlobalExtensionToggle()) ||
+        PICO_TEST_RUN(TestExtensionSourceIdentity()) ||
+        PICO_TEST_RUN(TestExtensionPendingRollbackCapacity())) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
         PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||

@@ -37,7 +37,7 @@
 #define PICO_MAX_AUTH 16
 #define PICO_MAX_EFFORTS 16
 #define PICO_MAX_DISABLED_EXTENSIONS 48
-#define PICO_DISABLED_EXT_NAME 64
+#define PICO_EXTENSION_KEY_MAX 4096 /* builtin name or user source path, including NUL */
 
 typedef enum PicoRole {
     PICO_ROLE_USER = 0,
@@ -546,9 +546,10 @@ typedef struct PicoHostPreferences {
     int chat_width;
     bool spell;
     char spell_lang[32];
-    char disabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
+    /* Global extension preferences: builtin names or user source paths. */
+    char disabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_EXTENSION_KEY_MAX];
     int disabled_host_extension_count;
-    char enabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
+    char enabled_host_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_EXTENSION_KEY_MAX];
     int enabled_host_extension_count;
 } PicoHostPreferences;
 
@@ -559,8 +560,6 @@ typedef struct PicoWorkspaceSettings {
     double compact_ratio;
     bool compact_enabled;
     bool resume_last;
-    char disabled_extensions[PICO_MAX_DISABLED_EXTENSIONS][PICO_DISABLED_EXT_NAME];
-    int disabled_extension_count;
 } PicoWorkspaceSettings;
 
 typedef struct PicoToolBeforeEntry {
@@ -767,6 +766,7 @@ void PicoPlugins_UnloadUser(PicoHost *host);
 void PicoPlugins_Shutdown(PicoHost *host);
 int PicoPlugins_Count(const PicoHost *host);
 bool PicoPlugins_Get(const PicoHost *host, int index, PicoExtInfo *out);
+/* Toggle the indexed module globally: all host/workspace instances, including future workspaces. */
 bool PicoPlugins_SetEnabled(PicoHost *host, int index, bool enabled);
 void *PicoPlugins_HostState(const PicoHost *host, const char *name);
 void *PicoPlugins_WorkspaceState(const PicoWorkspace *workspace, const char *name);

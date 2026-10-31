@@ -62,7 +62,7 @@ typedef struct LoadedPreferences {
     int chat_width;
     double font_scale;
     int disabled_host_extension_count;
-    char first_disabled_host_extension[PICO_DISABLED_EXT_NAME];
+    char first_disabled_host_extension[PICO_EXTENSION_KEY_MAX];
 } LoadedPreferences;
 
 static int LoadPreferences(const char *json_body, const char *workspace_json_body, LoadedPreferences *out)

@@ -123,7 +123,7 @@ static void PrintUsage(const char *argv0)
             "  PICO_FONT_SCALE                   override font_scale (0.5-3.0, default 1.0)\n"
             "  PICO_DISABLE_NATIVE_SCALE         render at logical resolution (upscaled on HiDPI)\n"
             "  ~/.config/pico/settings.json      {model, models, compact_at, resume_last, font_scale,\n"
-            "                                    chat_width, disabled_extensions, disabled_host_extensions, enabled_host_extensions}\n"
+            "                                    chat_width, disabled_host_extensions, enabled_host_extensions}\n"
             "  <workspace>/.pico/settings.json   workspace model/defaults override\n"
             "  ~/.config/pico/auth.json          per-provider credentials (api_key or oauth)\n"
             "  /login openai [browser]           Local browser login (ChatGPT subscription)\n"

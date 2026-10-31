@@ -4,7 +4,7 @@ Use `nix develop` environment for development tooling.
 
 ## Backwards compatability
 
-Do not add any code for backwards compatability as the project is still in development and backwards compatability is not a consideration.
+Only backwards compatability that should be maintained is the compatability with older catalog versions. Maintain a migration pipeline for upgrading older catalog version to the newest one.
 
 ## Extension docs
 

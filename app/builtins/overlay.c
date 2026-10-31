@@ -230,6 +230,13 @@ static void RenderAsk(PicoHost *app)
     }
 }
 
+static float FeedbackMaxWidth(const PicoHost *app)
+{
+    /* Use this pass's allocation so resizing or opening a neighboring pane
+     * cannot leave feedback overlapping it for a frame. */
+    return fminf(720.0f, fmaxf(0.0f, PicoHost_MainColumnWidth(app) - 24.0f));
+}
+
 static void RenderError(PicoHost *app)
 {
     const char *warn = app->status_warn;
@@ -240,13 +247,19 @@ static void RenderError(PicoHost *app)
         return;
     }
 
+    float max_width = FeedbackMaxWidth(app);
+    if (max_width <= 0.0f)
+    {
+        return;
+    }
     const char *title = warn && warn[0] ? "Extension error  (Esc to dismiss, F5 to reload)"
                                         : "Agent error  (Esc to dismiss)";
     const char *body = warn && warn[0] ? warn : agent;
     Clay_String title_s = {.length = (int32_t)strlen(title), .chars = title};
     Clay_String text = {.length = (int32_t)strlen(body), .chars = body};
     CLAY(CLAY_ID("ExtWarn"),
-         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID,
+                       .parentId = CLAY_ID("MainColumn").id,
                        .zIndex = 20,
                        .attachPoints = {.element = CLAY_ATTACH_POINT_CENTER_TOP,
                                         .parent = CLAY_ATTACH_POINT_CENTER_TOP},
@@ -254,7 +267,7 @@ static void RenderError(PicoHost *app)
           .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .padding = {16, 16, 12, 12},
                      .childGap = 8,
-                     .sizing = {.width = CLAY_SIZING_FIT(200, 720)}},
+                     .sizing = {.width = CLAY_SIZING_FIT(fminf(200.0f, max_width), max_width)}},
           .backgroundColor = COLOR_ERROR_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(8)})
     {
@@ -292,17 +305,26 @@ static void RenderToast(PicoHost *app)
     {
         return;
     }
-    float y = HasError(app) ? 110.0f : 12.0f;
+    float max_width = FeedbackMaxWidth(app);
+    if (max_width <= 0.0f)
+    {
+        return;
+    }
+    /* The error is laid out first, so its bottom edge includes this pass's
+     * wrapped text height without a stale measurement or fixed estimate. */
+    bool has_error = HasError(app);
     const char *label = loading ? "Loading session..." : g_notify;
     Clay_String text = {.length = (int32_t)strlen(label), .chars = label};
     CLAY(CLAY_ID("NotifyToast"),
-         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+         {.floating = {.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID,
+                       .parentId = has_error ? CLAY_ID("ExtWarn").id : CLAY_ID("MainColumn").id,
                        .zIndex = 21,
-                       .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP,
-                                        .parent = CLAY_ATTACH_POINT_RIGHT_TOP},
-                       .offset = {.x = -12.0f, .y = y}},
+                       .attachPoints = {.element = CLAY_ATTACH_POINT_CENTER_TOP,
+                                        .parent = has_error ? CLAY_ATTACH_POINT_CENTER_BOTTOM
+                                                            : CLAY_ATTACH_POINT_CENTER_TOP},
+                       .offset = {.y = 12}},
           .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .sizing = {.width = CLAY_SIZING_FIT(200, 720)}},
+                     .sizing = {.width = CLAY_SIZING_FIT(fminf(200.0f, max_width), max_width)}},
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(NOTIFY_TOAST_RADIUS)})
     {

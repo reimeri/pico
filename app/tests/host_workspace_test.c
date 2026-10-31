@@ -2633,6 +2633,170 @@ static int RunBrowserViewportCase(bool with_sidebar);
 static int RunSidebarModeShellCase(bool with_sidebar);
 #endif
 
+static int RunOverlayShellCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewports[] = {{1100, 800}, {1100, 800}, {600, 800}};
+    const char *message = "Errors and notifications belong above the chat, not over the sidebar or browser. "
+                          "Long messages should wrap inside the chat pane when neighboring panes open "
+                          "or the window becomes narrower, without moving the conversation or composer.";
+    char dir[] = "/tmp/pico-overlay-layout-XXXXXX", cfg[] = "/tmp/pico-overlay-config-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    float wide_height = 0, wide_error_height = 0;
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) { free(memory); return 1; }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true, .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, agent_id);
+    for (int i = 0; i < 40; i++)
+        PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "Overlay bottom-follow history");
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(arena_size, memory), viewports[0],
+                         (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    host->chat_follow_bottom = true;
+    for (int stage = 0; stage < 3; stage++)
+    {
+        agent->browser_expanded = stage > 0;
+        pico_status_warn(host, message);
+        PicoOverlay_Notify(host, "Saved");
+        ChatStabilitySnapshot expected = {0};
+        Clay_BoundingBox expected_toast = {0}, expected_error = {0};
+        float short_height = 0, short_error_height = 0, unstacked_y = 0;
+        for (int frame = 0; frame < 70; frame++)
+        {
+            if (frame == 10)
+            {
+                free(host->status_warn); host->status_warn = NULL;
+                PicoOverlay_Notify(host, NULL);
+            }
+            if (frame == 21) PicoOverlay_Notify(host, "Saved");
+            if (frame == 30) PicoOverlay_Notify(host, message);
+            if (frame == 40)
+            {
+                pico_status_warn(host, "Error");
+                PicoOverlay_Notify(host, "Saved");
+            }
+            if (frame == 45)
+            {
+                free(host->status_warn); host->status_warn = NULL;
+                pico_status_warn(host, message);
+            }
+            if (frame == 50)
+            {
+                free(host->status_warn); host->status_warn = NULL;
+                agent->error = JsonDup(message);
+            }
+            if (frame == 55) { free(agent->error); agent->error = NULL; }
+            if (frame == 60) PicoOverlay_Notify(host, NULL);
+            LayoutChatStabilityFrame(host, viewports[stage]);
+            Clay_BoundingBox chat = Clay_GetElementData(CLAY_ID("ChatScroll")).boundingBox;
+            Clay_ElementData error = Clay_GetElementData(CLAY_ID("ExtWarn"));
+            bool error_visible = frame < 10 || (frame >= 40 && frame < 55);
+            if (error.found != error_visible) goto done;
+            if (error_visible)
+            {
+                Clay_BoundingBox box = error.boundingBox;
+                if (fabsf(box.x + box.width / 2 - chat.x - chat.width / 2) > 0.01f ||
+                    box.x < chat.x || box.x + box.width > chat.x + chat.width ||
+                    !ShellVerticallyContains(chat, box) || box.y + box.height / 2 >= chat.y + chat.height / 2)
+                {
+                    Fail("error panels must stay at the chat's top center, clear of neighboring panes");
+                    goto done;
+                }
+                if (frame == 0 || frame == 40 || frame == 45 || frame == 50) expected_error = box;
+                else if (!ShellBoxStable(expected_error, box)) goto done;
+                if (frame == 40) short_error_height = box.height;
+                if (frame == 45)
+                {
+                    if (box.height <= short_error_height) goto done;
+                    if (stage == 0) wide_error_height = box.height;
+                    if (stage == 2 && box.height <= wide_error_height)
+                    {
+                        Fail("error panels must wrap to the narrowed chat width");
+                        goto done;
+                    }
+                }
+            }
+            Clay_ElementData toast = Clay_GetElementData(CLAY_ID("NotifyToast"));
+            bool visible = frame < 10 || (frame >= 21 && frame < 60);
+            if (toast.found != visible) goto done;
+            if (visible)
+            {
+                /* Check the first pass, before a bottom-follow relayout could
+                 * conceal stale positioning after the pane allocation changes. */
+                Clay_BoundingBox box = toast.boundingBox;
+                if (fabsf(box.x + box.width / 2 - chat.x - chat.width / 2) > 0.01f ||
+                    box.x < chat.x || box.x + box.width > chat.x + chat.width ||
+                    !ShellVerticallyContains(chat, box) ||
+                    (!error_visible && box.y + box.height / 2 >= chat.y + chat.height / 2))
+                {
+                    Fail("notifications must stay at the chat's top center, clear of neighboring panes");
+                    goto done;
+                }
+                if (error_visible && box.y <= error.boundingBox.y + error.boundingBox.height)
+                {
+                    Fail("notifications must stack below the error panel's actual wrapped height");
+                    goto done;
+                }
+                if (frame == 0 || frame == 21 || frame == 30 || frame == 40 || frame == 45 ||
+                    frame == 50 || frame == 55) expected_toast = box;
+                else if (!ShellBoxStable(expected_toast, box)) goto done;
+                if (frame == 21) { short_height = box.height; unstacked_y = box.y; }
+                if (frame == 55 && fabsf(box.y - unstacked_y) > 0.01f)
+                {
+                    Fail("dismissing errors must return notifications to the top of the chat");
+                    goto done;
+                }
+                if (frame == 30)
+                {
+                    if (box.height <= short_height) goto done;
+                    if (stage == 0) wide_height = box.height;
+                    if (stage == 2 && box.height <= wide_height)
+                    {
+                        Fail("notifications must wrap to the narrowed chat width");
+                        goto done;
+                    }
+                }
+            }
+            Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+            if (!scroll.found || !scroll.scrollPosition ||
+                scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
+            PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
+                                       scroll.contentDimensions.height, &scroll.scrollPosition->y);
+            (void)PicoHost_LayoutShell(host, viewports[stage].height, 0);
+            PicoChat_HarvestVirtualHeights(host);
+            ChatStabilitySnapshot current;
+            if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
+            if (frame == 20) expected = current;
+            if (frame > 20 && !ChatStabilitySnapshotStable(&expected, &current, with_sidebar))
+            {
+                Fail("errors and notifications must not change bottom-follow shell geometry");
+                goto done;
+            }
+        }
+    }
+    rc = 0;
+done:
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME"); RmRf(cfg); RmRf(dir);
+    if (rc) Fail("chat-centered error and notification layout");
+    return rc;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunShellStabilityCase(false, false, 1714) != 0)
@@ -2668,6 +2832,7 @@ static int TestBottomFollowShellGeometryStable(void)
     if (RunNonTextDiffFooterCase(false) || RunNonTextDiffFooterCase(true)) return 1;
     if (RunSessionReferenceShellCase(false) || RunSessionReferenceShellCase(true)) return 1;
     if (RunBrowserViewportCase(false) || RunBrowserViewportCase(true)) return 1;
+    if (RunOverlayShellCase(false) || RunOverlayShellCase(true)) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (RunSidebarModeShellCase(false) || RunSidebarModeShellCase(true)) return 1;
 #endif
@@ -15107,14 +15272,7 @@ static bool WorkspaceLessToastRenders(PicoHost *host)
     {
         Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
         PicoOverlay_Notify(host, "Workspace-less toast");
-        Clay_BeginLayout();
-        CLAY(CLAY_ID("ToastTestRoot"),
-             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(viewport.width),
-                                    .height = CLAY_SIZING_FIXED(viewport.height)}}})
-        {
-        }
-        PicoOverlay_Render(host, NULL);
-        (void)Clay_EndLayout(0.0f);
+        (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
         rendered = Clay_GetElementData(CLAY_ID("NotifyToast")).found;
     }
     Clay_SetCurrentContext(previous);

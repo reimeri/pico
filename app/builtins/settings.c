@@ -1047,6 +1047,22 @@ static void RenderButton(Clay_ElementId id, const char *label, bool enabled, boo
     PicoSettingsControl_Button(id, label, enabled, primary, saving);
 }
 
+static void RenderTab(Clay_ElementId id, const char *label, bool selected)
+{
+    bool hover = Clay_PointerOver(id);
+    CLAY(id, {.layout = {.padding = {8, 8, 0, 0},
+                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
+                         .sizing = {.width = CLAY_SIZING_PERCENT(0.5f), .height = CLAY_SIZING_PERCENT(1)}},
+              .backgroundColor = hover ? COLOR_CODE_BG : (Clay_Color){0},
+              .border = {.width = {.bottom = selected ? 3 : 1},
+                         .color = selected ? COLOR_LINK : COLOR_HR}})
+    {
+        CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI,
+                                                .textColor = selected ? COLOR_LINK : (hover ? COLOR_TEXT : COLOR_MUTED),
+                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
+    }
+}
+
 static void EnsureTrashIcon(SettingsState *s)
 {
     char path[4096];
@@ -1658,9 +1674,12 @@ static void SettingsRender(PicoHost *app, void *state)
         {
             CLAY_TEXT(CLAY_STRING("Settings"),
                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_TITLE, .textColor = COLOR_TEXT}));
-            CLAY_AUTO_ID({.layout = {.childGap = 8}}) {
-                RenderButton(CLAY_ID("SettingsGeneralTab"), "General & models", true, s_active_settings_state->section == 0);
-                RenderButton(CLAY_ID("SettingsSubagentsTab"), "Subagents", true, s_active_settings_state->section == 1);
+            CLAY(CLAY_ID("SettingsTabs"),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                       .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI_LINE) + 16)}}})
+            {
+                RenderTab(CLAY_ID("SettingsGeneralTab"), "General & models", s_active_settings_state->section == 0);
+                RenderTab(CLAY_ID("SettingsSubagentsTab"), "Subagents", s_active_settings_state->section == 1);
             }
             CLAY(CLAY_ID("SettingsModalScrollRow"),
                  {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,

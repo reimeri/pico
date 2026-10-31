@@ -20495,7 +20495,7 @@ int main(int argc, char **argv)
     if (!IsolateTestHome()) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
-        return PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
+        return PICO_TEST_RUN(TestSettingsTabs()) || PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
                PICO_TEST_RUN(TestSubagentSettingsPartialApply()) || PICO_TEST_RUN(TestSubagentSettingsRenameDependencies()) ||
                PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
                PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
@@ -20561,7 +20561,7 @@ int main(int argc, char **argv)
     {
         return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
-    if (PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
+    if (PICO_TEST_RUN(TestSettingsTabs()) || PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
         PICO_TEST_RUN(TestSubagentSettingsPartialApply()) || PICO_TEST_RUN(TestSubagentSettingsRenameDependencies()) ||
         PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
         PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||

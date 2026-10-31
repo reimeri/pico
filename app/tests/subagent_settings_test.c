@@ -291,6 +291,107 @@ done:
     return !good;
 }
 
+/* Read the visible bottom rule, whether drawn as a border or a rectangle. */
+static float SettingsTabUnderline(Clay_RenderCommandArray *commands, Clay_BoundingBox tab,
+                                  Clay_Color *color)
+{
+    for (int i = 0; i < commands->length; i++) {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        Clay_BoundingBox rule = command->boundingBox;
+        Clay_Color ink;
+        if (command->commandType == CLAY_RENDER_COMMAND_TYPE_BORDER) {
+            rule.height = command->renderData.border.width.bottom;
+            rule.y += command->boundingBox.height - rule.height;
+            ink = command->renderData.border.color;
+        } else if (command->commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE) {
+            ink = command->renderData.rectangle.backgroundColor;
+        } else continue;
+        if (ink.a > 0 && rule.height > 0 && rule.height < tab.height / 4 &&
+            fabsf(rule.x - tab.x) < 0.01f && fabsf(rule.width - tab.width) < 0.01f &&
+            fabsf(rule.y + rule.height - tab.y - tab.height) < 0.01f) {
+            *color = ink;
+            return rule.height;
+        }
+    }
+    return 0;
+}
+
+static int TestSettingsTabs(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    const char *phase = "setup";
+    const int widths[] = {1100, 390};
+    const char *labels[] = {"General & models", "Subagents"};
+    Clay_ElementId ids[] = {CLAY_ID("SettingsGeneralTab"), CLAY_ID("SettingsSubagentsTab")};
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoSettingsUi_Open(f.host);
+    for (int size = 0; size < 2; size++) {
+        g_clay_frame_width = widths[size];
+        Clay_SetLayoutDimensions((Clay_Dimensions){widths[size], 800});
+        pico_host_request_redraw(f.host);
+        PicoHost_Frame(f.host);
+        for (int selected = 0; selected < 2; selected++) {
+            /* The blank outer portion of each tab is also a navigation target. */
+            Clay_ElementData target = Clay_GetElementData(ids[selected]);
+            target.boundingBox.x += selected ? target.boundingBox.width - 1 : 1;
+            target.boundingBox.width = 0;
+            phase = "click outer tab area";
+            if (!SidebarFrameClick(f.host, target)) goto done;
+            g_find_pointer = (Vector2){0};
+            Clay_SetPointerState((Clay_Vector2){0}, false);
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+            Clay_ElementData card = Clay_GetElementData(CLAY_ID("SettingsModalCard"));
+            Clay_RenderCommand *title = FindCardText(&commands, "Settings");
+            Clay_ElementData tabs[] = {Clay_GetElementData(ids[0]), Clay_GetElementData(ids[1])};
+            Clay_Color colors[2] = {0};
+            float rules[2];
+            phase = "equal-width full-content layout";
+            if (!card.found || !title) goto done;
+            float content_x = title->boundingBox.x;
+            float content_width = card.boundingBox.width - 2 * (content_x - card.boundingBox.x);
+            for (int tab = 0; tab < 2; tab++) {
+                phase = "equal-width full-content layout";
+                Clay_BoundingBox expected = {content_x + tab * content_width / 2,
+                    tabs[0].boundingBox.y, content_width / 2, tabs[0].boundingBox.height};
+                if (!tabs[tab].found || !ShellBoxStable(expected, tabs[tab].boundingBox)) {
+                    fprintf(stderr, "tab %d at width %d: expected %g,%g %gx%g; got %g,%g %gx%g\n",
+                            tab, widths[size], expected.x, expected.y, expected.width, expected.height,
+                            tabs[tab].boundingBox.x, tabs[tab].boundingBox.y,
+                            tabs[tab].boundingBox.width, tabs[tab].boundingBox.height);
+                    goto done;
+                }
+                phase = "centered label";
+                Clay_RenderCommand *label = FindCardText(&commands, labels[tab]);
+                if (!label || (size == 0 && fabsf(label->boundingBox.x + label->boundingBox.width / 2 -
+                                                expected.x - expected.width / 2) > 0.01f)) goto done;
+                rules[tab] = SettingsTabUnderline(&commands, tabs[tab].boundingBox, &colors[tab]);
+                phase = "no filled button background";
+                /* Without hover, selection must not look like a filled button. */
+                for (int i = 0; i < commands.length; i++) {
+                    Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+                    if (command->commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE &&
+                        command->renderData.rectangle.backgroundColor.a > 0 &&
+                        ShellBoxStable(command->boundingBox, tabs[tab].boundingBox)) goto done;
+                }
+            }
+            phase = "selected section underline";
+            if (rules[1 - selected] <= 0 || rules[selected] <= rules[1 - selected] ||
+                (colors[0].r == colors[1].r && colors[0].g == colors[1].g && colors[0].b == colors[1].b) ||
+                Clay_GetElementData(CLAY_ID("SettingsContextLimit")).found != (selected == 0)) goto done;
+        }
+    }
+    good = true;
+done:
+    g_clay_frame_width = 1100;
+    InteractionFixtureFree(&f);
+    if (!good) {
+        fprintf(stderr, "Settings tabs: %s\n", phase);
+        Fail("Settings tabs must share the full content width and underline the selected section");
+    }
+    return !good;
+}
+
 static int TestSubagentSettingsPresentation(void)
 {
     InteractionFixture f = {0};

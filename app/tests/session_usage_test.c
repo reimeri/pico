@@ -3070,6 +3070,68 @@ static int TestCatalogDeleteRejectsSwappedCheckout(void)
     return 0;
 }
 
+static int TestCatalogPinMigration(int old_version)
+{
+    char config[] = "/tmp/pico-catalog-pin-cfg-XXXXXX";
+    char ws[] = "/tmp/pico-catalog-pin-ws-XXXXXX";
+    char original[4096], path[4096], version_sql[64];
+    sqlite3 *db = NULL;
+    PicoCatalogWorkspace *list = NULL;
+    PicoHost host = {0};
+    PicoAgent agent = {0};
+    int result = 1, n = 0;
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config) || !mkdtemp(ws)) return Fail("catalog pin setup");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    PicoHost_SetPath(&host, ws);
+    agent.persistence = PICO_SESSION_DURABLE;
+    snprintf(agent.model, sizeof(agent.model), "saved-model");
+    if (PicoSession_LogUser(&host, &agent, "Pinned conversation", "Pinned conversation", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoCatalog_SetProjectName(ws, "Preserved preference") != 0 ||
+        !PicoPath_Format(path, sizeof(path), "%s/sessions/.catalog.sqlite3", config) ||
+        sqlite3_open(path, &db) != SQLITE_OK) goto done;
+    /* Reconstruct the historical column sets, not merely their version tag. */
+    if (sqlite3_exec(db, "ALTER TABLE sessions DROP COLUMN pinned", NULL, NULL, NULL) != SQLITE_OK) goto done;
+    if (old_version <= 2 && sqlite3_exec(db,
+        "ALTER TABLE sessions DROP COLUMN inbox; ALTER TABLE sessions DROP COLUMN last_user_action",
+        NULL, NULL, NULL) != SQLITE_OK) goto done;
+    if (old_version == 1 && sqlite3_exec(db,
+        "DROP INDEX sessions_project_recent; ALTER TABLE sessions DROP COLUMN project_path",
+        NULL, NULL, NULL) != SQLITE_OK) goto done;
+    snprintf(version_sql, sizeof(version_sql), "PRAGMA user_version=%d", old_version);
+    if (sqlite3_exec(db, version_sql, NULL, NULL, NULL) != SQLITE_OK) goto done;
+    sqlite3_close(db); db = NULL;
+    n = PicoCatalog_ScanGrouped(&list);
+    const PicoCatalogWorkspace *group = FindCatalogPath(list, n, ws);
+    if (!group || strcmp(group->name, "Preserved preference") || group->session_count != 1 ||
+        group->sessions[0].pinned || group->inbox_count) goto done;
+    time_t recency = group->sessions[0].mtime;
+    PicoCatalog_Free(list, n); list = NULL; n = 0;
+    if (PicoCatalog_SetPinned(ws, agent.session_id, true) != 0) goto done;
+    n = PicoCatalog_ScanGrouped(&list);
+    group = FindCatalogPath(list, n, ws);
+    if (!group || group->inbox_count != 1 || !group->inbox_sessions[0].pinned ||
+        group->sessions[0].mtime != recency) goto done;
+    PicoCatalog_Free(list, n); list = NULL; n = 0;
+    /* Transcript updates/reconciliation must not overwrite presentation metadata. */
+    if (PicoSession_LogUser(&host, &agent, "Continue", "Continue", NULL) != PICO_SESSION_WRITE_OK ||
+        PicoCatalog_SetInboxPending(ws, agent.session_id, false) != 0) goto done;
+    n = PicoCatalog_ScanGrouped(&list);
+    group = FindCatalogPath(list, n, ws);
+    if (!group || group->inbox_count != 1 || !group->inbox_sessions[0].pinned) goto done;
+    PicoCatalog_Free(list, n); list = NULL; n = 0;
+    if (PicoCatalog_SetPinned(ws, agent.session_id, false) != 0) goto done;
+    n = PicoCatalog_ScanGrouped(&list);
+    group = FindCatalogPath(list, n, ws);
+    if (!group || group->inbox_count) goto done;
+    result = 0;
+done:
+    if (db) sqlite3_close(db);
+    PicoCatalog_Free(list, n);
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    return result ? Fail("catalog migrations and transcript updates must preserve inbox pin preferences") : 0;
+}
+
 static int TestCatalogRejectsIncompatibleSchema(void)
 {
     char config[] = "/tmp/pico-catalog-version-cfg-XXXXXX";
@@ -3090,8 +3152,8 @@ static int TestCatalogRejectsIncompatibleSchema(void)
         sqlite3_step(stmt) != SQLITE_ROW) goto done;
     version = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt); stmt = NULL;
-    /* Version 1 was the development schema before project-indexed sessions. */
-    if (sqlite3_exec(db, "PRAGMA user_version=1", NULL, NULL, NULL) != SQLITE_OK)
+    /* A future schema must not be silently reset or downgraded. */
+    if (sqlite3_exec(db, "PRAGMA user_version=999", NULL, NULL, NULL) != SQLITE_OK)
         goto done;
     sqlite3_close(db); db = NULL;
     if (PicoCatalog_Ensure(ws) == 0) goto done;
@@ -4759,6 +4821,9 @@ int main(void)
         PICO_TEST_RUN(TestCatalogDeleteRejectsSwappedCheckout()) != 0 ||
         PICO_TEST_RUN(TestCatalogRejectsCollidingPaths()) != 0 ||
         PICO_TEST_RUN(TestCatalogSQLiteImport()) != 0 ||
+        PICO_TEST_RUN(TestCatalogPinMigration(1)) != 0 ||
+        PICO_TEST_RUN(TestCatalogPinMigration(2)) != 0 ||
+        PICO_TEST_RUN(TestCatalogPinMigration(3)) != 0 ||
         PICO_TEST_RUN(TestCatalogRejectsIncompatibleSchema()) != 0)
     {
         return 1;

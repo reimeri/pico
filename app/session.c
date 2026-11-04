@@ -57,6 +57,26 @@ static bool CatalogDbExec(sqlite3 *db, const char *sql);
 static bool CatalogDbPrepare(sqlite3 *db, sqlite3_stmt **stmt, const char *sql);
 static const char *CatalogDbText(sqlite3_stmt *stmt, int column);
 static bool CatalogDbReadProject(sqlite3 *db, const char *path, PicoCatalogWorkspace *ws);
+int PicoCatalog_SetPinned(const char *checkout_path, const char *session_id, bool pinned)
+{
+    sqlite3 *db = CatalogDbOpen();
+    sqlite3_stmt *stmt = NULL;
+    if (!db) return -1;
+    bool ok = CatalogDbPrepare(db, &stmt,
+        "UPDATE sessions SET pinned=? WHERE workspace_path=? AND id=? AND kind=0");
+    if (ok)
+    {
+        sqlite3_bind_int(stmt, 1, pinned);
+        sqlite3_bind_text(stmt, 2, checkout_path, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, session_id, -1, SQLITE_TRANSIENT);
+        ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    if (ok) CatalogMarkChanged();
+    return ok ? 0 : -1;
+}
+
 static bool CatalogDbWorkspace(sqlite3 *db, const char *path, const char *key,
                                const char *project, const char *checkout, bool worktree);
 static bool CatalogDbReconcileDir(sqlite3 *db, const char *dir, const char *workspace,
@@ -4491,7 +4511,20 @@ static bool CatalogDbMarkInstalled(const char *root)
     return access(marker, F_OK) == 0 || CatalogAtomicWrite(marker, "1\n", 2, true);
 }
 
-enum { CATALOG_DB_VERSION = 3 };
+static bool CatalogDbHasColumn(sqlite3 *db, const char *column)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool found = false;
+    if (CatalogDbPrepare(db, &stmt, "SELECT 1 FROM pragma_table_info('sessions') WHERE name=?"))
+    {
+        sqlite3_bind_text(stmt, 1, column, -1, SQLITE_TRANSIENT);
+        found = sqlite3_step(stmt) == SQLITE_ROW;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+enum { CATALOG_DB_VERSION = 4 };
 
 static sqlite3 *CatalogDbOpenUnlocked(void)
 {
@@ -4515,6 +4548,41 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
         !CatalogDbPrepare(db, &stmt, "PRAGMA user_version")) goto fail;
     if (sqlite3_step(stmt) == SQLITE_ROW) version = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt); stmt = NULL;
+    /* Migrations are transactional and re-read the version after acquiring the
+     * write lock, so concurrent processes can safely open an older catalog. */
+    if (version > 0 && version < CATALOG_DB_VERSION)
+    {
+        if (!CatalogDbExec(db, "BEGIN IMMEDIATE")) goto fail;
+        if (!CatalogDbPrepare(db, &stmt, "PRAGMA user_version")) goto fail;
+        if (sqlite3_step(stmt) == SQLITE_ROW) version = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt); stmt = NULL;
+        if (version == 1)
+        {
+            if (!CatalogDbHasColumn(db, "project_path") &&
+                !CatalogDbExec(db, "ALTER TABLE sessions ADD COLUMN project_path TEXT NOT NULL DEFAULT '';"
+                                  "UPDATE sessions SET project_path=(SELECT project_path FROM workspaces WHERE path=workspace_path);")) goto fail;
+            if (!CatalogDbExec(db, "CREATE INDEX IF NOT EXISTS sessions_project_recent ON sessions(project_path,kind,mtime DESC,mtime_nsec DESC,id DESC);"
+                                  "PRAGMA user_version=2")) goto fail;
+            version = 2;
+        }
+        if (version == 2)
+        {
+            if (!CatalogDbHasColumn(db, "inbox") &&
+                !CatalogDbExec(db, "ALTER TABLE sessions ADD COLUMN inbox INTEGER NOT NULL DEFAULT 0")) goto fail;
+            if (!CatalogDbHasColumn(db, "last_user_action") &&
+                !CatalogDbExec(db, "ALTER TABLE sessions ADD COLUMN last_user_action INTEGER NOT NULL DEFAULT 0")) goto fail;
+            /* Re-read transcript-derived metadata introduced after v2. */
+            if (!CatalogDbExec(db, "UPDATE sessions SET size=-1; UPDATE workspaces SET last_reconcile=0; PRAGMA user_version=3")) goto fail;
+            version = 3;
+        }
+        if (version == 3)
+        {
+            if (!CatalogDbExec(db, "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;"
+                                   "PRAGMA user_version=4")) goto fail;
+            version = 4;
+        }
+        if (!CatalogDbExec(db, "COMMIT")) goto fail;
+    }
     if (version == CATALOG_DB_VERSION)
     {
         if (!CatalogDbMarkInstalled(root))
@@ -4560,6 +4628,7 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
         "ctime_nsec INTEGER NOT NULL,inode INTEGER NOT NULL,size INTEGER NOT NULL,"
         "unseen INTEGER NOT NULL,seen INTEGER NOT NULL DEFAULT 0,"
         "inbox INTEGER NOT NULL DEFAULT 0,last_user_action INTEGER NOT NULL DEFAULT 0,"
+        "pinned INTEGER NOT NULL DEFAULT 0,"
         "PRIMARY KEY(workspace_path,id),"
         "FOREIGN KEY(workspace_path) REFERENCES workspaces(path) ON DELETE CASCADE);"
         "CREATE INDEX sessions_recent ON sessions(workspace_path,mtime DESC,mtime_nsec DESC,id DESC);"
@@ -5903,9 +5972,9 @@ static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int req
     sqlite3_stmt *stmt = NULL;
     if (!CatalogDbPrepare(db, &stmt,
         "SELECT s.id,s.title,s.model,s.effort,s.kind,s.mtime,s.mtime_nsec,s.ctime,s.ctime_nsec,"
-        "s.inode,s.size,s.unseen,w.path,w.checkout_name,w.worktree,s.inbox,s.last_user_action"
+        "s.inode,s.size,s.unseen,w.path,w.checkout_name,w.worktree,s.inbox,s.last_user_action,s.pinned"
         " FROM sessions s JOIN workspaces w ON w.path=s.workspace_path"
-        " WHERE s.project_path=? AND s.kind=0 AND (?=0 OR s.inbox=1 OR s.unseen=1)"
+        " WHERE s.project_path=? AND s.kind=0 AND (?=0 OR s.inbox=1 OR s.unseen=1 OR s.pinned=1)"
         " ORDER BY s.mtime DESC,s.mtime_nsec DESC,s.id DESC")) return false;
     sqlite3_bind_text(stmt, 1, group->path, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 2, inbox_only);
@@ -5927,6 +5996,7 @@ static bool CatalogDbGroupRows(sqlite3 *db, PicoCatalogWorkspace *group, int req
         row.unseen_complete = sqlite3_column_int(stmt, 11) != 0;
         row.inbox_pending = sqlite3_column_int(stmt, 15) != 0;
         row.last_user_action = sqlite3_column_int64(stmt, 16);
+        row.pinned = sqlite3_column_int(stmt, 17) != 0;
         snprintf(row.checkout_path, sizeof(row.checkout_path), "%s", CatalogDbText(stmt, 12));
         snprintf(row.checkout_name, sizeof(row.checkout_name), "%s", CatalogDbText(stmt, 13));
         row.worktree = sqlite3_column_int(stmt, 14) != 0;

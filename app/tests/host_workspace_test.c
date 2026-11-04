@@ -18450,6 +18450,114 @@ static bool SidebarInboxAbove(PicoHost *host, const PicoAgent *first, const Pico
     return rows[0].found && rows[1].found && rows[0].boundingBox.y < rows[1].boundingBox.y;
 }
 
+static Clay_ElementId TestInboxIdentity(const char *path, const char *id)
+{
+    Clay_String workspace = {.chars = path, .length = (int)strlen(path)};
+    Clay_String session = {.chars = id, .length = (int)strlen(id)};
+    return CLAY_IDI("SidebarInboxSession", Clay_GetElementIdWithIndex(workspace, Clay_GetElementId(session).id).id);
+}
+
+static int TestSidebarInboxPins(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f)) goto done;
+    f.host->sidebar_inbox_mode = true;
+    PicoAgent *agents[3] = {PicoHost_FindAgent(f.host, f.agent)};
+    Clay_ElementId rows[3];
+    char ids[3][40], path[4096];
+    snprintf(path, sizeof(path), "%s", PicoAgent_WorkspacePath(agents[0]));
+    PicoSession_Start(f.host, agents[0], PICO_SESSION_NEW, NULL);
+    for (int i = 0; i < 3; i++)
+    {
+        if (i)
+        {
+            PicoAgentId id = 0;
+            PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+            if (pico_main_agent_create(f.host, f.workspace, &options, &id) != PICO_OK) goto done;
+            agents[i] = PicoHost_FindAgent(f.host, id);
+        }
+        if (PicoSession_LogUser(f.host, agents[i], "Pin test", "Pin test", NULL) != PICO_SESSION_WRITE_OK ||
+            PicoSession_LogInboxPending(f.host, agents[i], true) != PICO_SESSION_WRITE_OK ||
+            !DrainSessionForAssertion(f.host, agents[i])) goto done;
+        snprintf(ids[i], sizeof(ids[i]), "%s", agents[i]->session_id);
+        rows[i] = TestInboxIdentity(path, ids[i]);
+    }
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1) ||
+        !SidebarInboxAbove(f.host, agents[2], agents[0])) goto done;
+    phase = "indicator pins without selecting";
+    PicoAgentId selected = pico_agent_active(f.host);
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInboxPin", (int)(rows[0].id & 0x7fffffff)))) ||
+        pico_agent_active(f.host) != selected || !PicoCatalog_DrainPersistBefore(f.host, NULL) ||
+        !SidebarInboxAbove(f.host, agents[0], agents[2])) goto done;
+    phase = "menu pins preserve recency within groups";
+    if (!SidebarFrameClickButton(f.host, Clay_GetElementData(rows[1]), MOUSE_BUTTON_RIGHT) ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSessionPin"))) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL) ||
+        !SidebarInboxAbove(f.host, agents[1], agents[0]) ||
+        !SidebarInboxAbove(f.host, agents[0], agents[2])) goto done;
+    phase = "clear keeps live and offline pins";
+    if (pico_agent_close(f.host, agents[1]->id) != PICO_OK) goto done;
+    agents[1] = NULL;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarInboxDone"))) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    if (!Clay_GetElementData(rows[0]).found || !Clay_GetElementData(rows[1]).found ||
+        Clay_GetElementData(rows[2]).found) goto done;
+    phase = "working returns pinned";
+    agents[0]->state = PICO_AGENT_LLM_WAIT;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarCommandsContain(&commands, "Working · 1")) goto done;
+    agents[0]->state = PICO_AGENT_IDLE;
+    if (PicoSession_LogInboxPending(f.host, agents[0], false) != PICO_SESSION_WRITE_OK ||
+        !DrainSessionForAssertion(f.host, agents[0])) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarCommandsContain(&commands, "Completed · 2")) goto done;
+    for (int frame = 0; frame < 20; frame++)
+        (void)PicoHost_LayoutShell(f.host, 800, 1.0f / 60);
+    phase = "unpin menu open";
+    if (!SidebarFrameClickButton(f.host, Clay_GetElementData(rows[1]), MOUSE_BUTTON_RIGHT)) goto done;
+    phase = "unpin menu click";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSessionPin")))) goto done;
+    phase = "unpin drain";
+    if (!PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    phase = "unpin clear";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarInboxDone"))) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    phase = "unpin final visibility";
+    if (!Clay_GetElementData(rows[0]).found || Clay_GetElementData(rows[1]).found) goto done;
+    phase = "restart retains completed pin";
+    if (!WaitHostTasks(f.host) || pico_host_free(f.host) != PICO_HOST_SHUTDOWN_CLEAN) goto done;
+    f.host = NULL;
+    if (pico_host_init(&f.host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(f.host);
+    InteractionOmitDrawHooks(f.host);
+    f.host->sidebar_inbox_mode = true;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    good = Clay_GetElementData(rows[0]).found && SidebarCommandsContain(&commands, "Completed · 1");
+done:
+    if (f.host)
+        for (int i = 0; i < pico_agent_count(f.host); i++)
+        {
+            PicoAgentInfo info;
+            if (pico_agent_info(f.host, i, &info)) PicoHost_FindAgent(f.host, info.id)->state = PICO_AGENT_IDLE;
+        }
+    InteractionFixtureFree(&f);
+    if (!good) { fprintf(stderr, "inbox pin phase: %s\n", phase); Fail("inbox pins must sort first, survive clear and support both controls"); }
+    return !good;
+}
+
 static int TestSidebarInboxWorkingOrder(void)
 {
     InteractionFixture f = {0};
@@ -20875,6 +20983,8 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
                PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
                PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload());
+    if (argc == 2 && strcmp(argv[1], "--sidebar-pins") == 0)
+        return PICO_TEST_RUN(TestSidebarInboxPins());
     if (argc == 2 && strcmp(argv[1], "--sidebar-age") == 0)
         return PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
                PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
@@ -20955,7 +21065,7 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
         PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
-        PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
+        PICO_TEST_RUN(TestSidebarInboxPins()) || PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE))) return 1;

@@ -53,6 +53,7 @@ typedef struct PicoCatalogSession {
     uint64_t size;
     bool unseen_complete;
     bool inbox_pending;
+    bool pinned; /* Durable inbox presentation, independent of transcript activity. */
     int64_t last_user_action; /* Unix seconds, zero when no action has been recorded. */
     PicoAgentKind kind;
 } PicoCatalogSession;
@@ -291,6 +292,8 @@ PicoSessionWriteResult PicoSession_LogInboxPending(PicoHost *app, PicoAgent *age
 void PicoSession_SetInboxPending(PicoHost *app, PicoAgent *agent, bool pending);
 /* Appends the inbox event for a closed session. Clearing also clears its unread
  * completion marker under the same writer lock. Does not change run state. */
+/* Worker-side durable inbox pin preference. Does not change session recency. */
+int PicoCatalog_SetPinned(const char *checkout_path, const char *session_id, bool pinned);
 int PicoCatalog_SetInboxPending(const char *checkout_path, const char *session_id, bool pending);
 typedef enum PicoCatalogPersistStatus {
     PICO_CATALOG_PERSIST_FAILED = -1,

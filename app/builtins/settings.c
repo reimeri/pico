@@ -241,7 +241,10 @@ static bool Unclaim(void)
     {
         return true;
     }
-    if (s_active_settings_state->resizing) g_host->ui_drag_active = false;
+    if (s_active_settings_state->resizing) {
+        PicoSettings_SavePanelWidth(g_host, PICO_PANEL_SETTINGS);
+        g_host->ui_drag_active = false;
+    }
     s_active_settings_state->resizing = false;
     s_active_settings_state->focused = false;
     g_open = false;
@@ -402,7 +405,7 @@ void PicoSettingsUi_Input(PicoHost *host)
     if (!s->open) return;
     bool available = host->window_focused && !host->window_minimized && !PicoUi_ModalOpen(host);
     if (!available) {
-        if (s->resizing) { s->resizing = false; host->ui_drag_active = false; }
+        if (s->resizing) { PicoSettings_SavePanelWidth(host, PICO_PANEL_SETTINGS); s->resizing = false; host->ui_drag_active = false; }
         CancelModelDrag(s);
         return;
     }
@@ -419,6 +422,7 @@ void PicoSettingsUi_Input(PicoHost *host)
         if (!IsKeyPressed(KEY_ESCAPE))
             host->settings_panel_width = ClampPanelWidth(host, s->resize_start_width + s->resize_start_x - GetMousePosition().x);
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ESCAPE)) {
+            PicoSettings_SavePanelWidth(host, PICO_PANEL_SETTINGS);
             s->resizing = false;
             host->ui_drag_active = false;
         }

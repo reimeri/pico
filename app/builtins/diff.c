@@ -8,6 +8,7 @@
 #include "hl_colors.h"
 #include "scrollbar.h"
 #include "host_internal.h"
+#include "settings.h"
 #include "diff_ui.h"
 #include "settings_ui.h"
 #include <math.h>
@@ -73,7 +74,7 @@ typedef struct DiffState
     bool review_failed;
     bool focused, was_visible, resizing, pointer_claimed;
     int mounted_first, mounted_end;
-    float width, resize_x, resize_width;
+    float resize_x, resize_width;
     ReviewFile *files;
     int file_count;
     ReviewRow *rows;
@@ -557,7 +558,10 @@ static bool ClosePanel(DiffState *s)
         s->scroll_y = scroll.scrollPosition->y; s->scroll_x = scroll.scrollPosition->x;
     }
     s->open = false; s->focused = false;
-    if (s->resizing && s->workspace) s->workspace->host->ui_drag_active = false;
+    if (s->resizing && s->workspace) {
+        PicoSettings_SavePanelWidth(s->workspace->host, PICO_PANEL_DIFF);
+        s->workspace->host->ui_drag_active = false;
+    }
     s->resizing = false;
     if (s->workspace) s->workspace->host->ui_relayout_requested = true;
     return true;
@@ -587,9 +591,8 @@ void PicoDiffUi_Open(PicoHost *host)
 float PicoDiffUi_ShellWidth(const PicoHost *host)
 {
     if (!PicoDiff_IsOpen(host)) return 0;
-    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspaceConst(host), "diff");
     return fmaxf(0, fminf(PicoHost_RightColumnWidth(host) * 0.65f,
-                         fmaxf(300, s->width > 0 ? s->width : 700)));
+                         fmaxf(300, host->diff_panel_width > 0 ? host->diff_panel_width : 700)));
 }
 
 static bool ReviewPointerIn(const char *id)
@@ -646,7 +649,7 @@ void PicoDiffUi_Input(PicoHost *host)
     bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || click) s->pointer_claimed = false;
     if (!PicoDiff_IsOpen(host) || !host->window_focused || host->window_minimized || PicoUi_ModalOpen(host)) {
-        if (s->resizing) { s->resizing = false; host->ui_drag_active = false; }
+        if (s->resizing) { PicoSettings_SavePanelWidth(host, PICO_PANEL_DIFF); s->resizing = false; host->ui_drag_active = false; }
         return;
     }
     if (s->resizing || (click && PicoDiffUi_ResizeHovered(host))) {
@@ -655,9 +658,10 @@ void PicoDiffUi_Input(PicoHost *host)
             s->resize_width = PicoDiffUi_ShellWidth(host); host->ui_drag_active = true;
         }
         s->focused = s->pointer_claimed = true;
-        if (!IsKeyPressed(KEY_ESCAPE)) s->width = fminf(PicoHost_RightColumnWidth(host) * 0.65f,
+        if (!IsKeyPressed(KEY_ESCAPE)) host->diff_panel_width = fminf(PicoHost_RightColumnWidth(host) * 0.65f,
             fmaxf(300, s->resize_width + s->resize_x - GetMousePosition().x));
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ESCAPE)) {
+            PicoSettings_SavePanelWidth(host, PICO_PANEL_DIFF);
             s->resizing = false; host->ui_drag_active = false;
         }
         host->ui_relayout_requested = true; pico_host_request_redraw(host);
@@ -1075,7 +1079,10 @@ static void DiffWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
     if (visible && !s->was_visible) s->restore_scroll = true;
     s->was_visible = visible;
     if (!visible) {
-        if (s->resizing) workspace->host->ui_drag_active = false;
+        if (s->resizing) {
+            PicoSettings_SavePanelWidth(workspace->host, PICO_PANEL_DIFF);
+            workspace->host->ui_drag_active = false;
+        }
         s->resizing = false; s->pointer_claimed = false;
     }
     AdoptPending(s);

@@ -949,6 +949,30 @@ bool PicoSettings_ReadSidebarInboxMode(void)
 void PicoHostPreferences_Load(PicoHost *host)
 {
     if (!host) return;
+    if (!host->panel_widths_loaded) {
+        host->panel_widths_loaded = true;
+        char path[4096];
+        size_t len = 0;
+        char *src = UserSettingsPath(path, sizeof(path)) ? Pico_ReadFile(path, &len) : NULL;
+        if (src) {
+            JsonStripComments(src, len);
+            JsonDoc doc;
+            if (JsonParse(&doc, src, len) == 0) {
+                const char *keys[] = {"settings_panel_width", "browser_panel_width", "diff_panel_width"};
+                float *widths[] = {&host->settings_panel_width, &host->browser_panel_width, &host->diff_panel_width};
+                for (int i = 0; i < 3; ++i) {
+                    int tok = JsonObjGet(&doc, 0, keys[i]);
+                    char *raw = JsonRawDup(&doc, tok), *end = NULL;
+                    double width = raw ? strtod(raw, &end) : 0;
+                    if (raw && end != raw && !*end && isfinite(width) && width > 0 && width <= INT_MAX)
+                        *widths[i] = (float)width;
+                    free(raw);
+                }
+                JsonFree(&doc);
+            }
+            free(src);
+        }
+    }
     PicoSettings_ReadPreferences(&host->preferences);
     Pico_SetFontScale((float)host->preferences.font_scale);
 }
@@ -1708,6 +1732,38 @@ bool PicoSettings_WriteSidebarInboxMode(bool inbox)
     return Pico_ConfigDir(dir, sizeof(dir)) && MkdirP(dir) &&
            UserSettingsPath(path, sizeof(path)) &&
            PatchRootJson(path, "sidebar_mode", inbox ? "\"inbox\"" : "\"projects\"");
+}
+
+typedef struct PanelWidthSave { PicoPanelWidth panel; bool saved; float width; } PanelWidthSave;
+
+static void PanelWidthSaveRun(void *state)
+{
+    PanelWidthSave *save = state;
+    char path[4096], dir[4096], value[64];
+    snprintf(value, sizeof(value), "%.9g", (double)save->width);
+    save->saved = Pico_ConfigDir(dir, sizeof(dir)) && MkdirP(dir) &&
+        UserSettingsPath(path, sizeof(path)) && PatchRootJson(path,
+            save->panel == PICO_PANEL_BROWSER ? "browser_panel_width" :
+            save->panel == PICO_PANEL_DIFF ? "diff_panel_width" : "settings_panel_width", value);
+}
+
+static void PanelWidthSaveDone(PicoHost *host, void *state)
+{
+    if (!((PanelWidthSave *)state)->saved)
+        PicoOverlay_Notify(host, "Could not save the panel width. It will only apply until restart.");
+}
+
+void PicoSettings_SavePanelWidth(PicoHost *host, PicoPanelWidth panel)
+{
+    float width = panel == PICO_PANEL_BROWSER ? host->browser_panel_width :
+        panel == PICO_PANEL_DIFF ? host->diff_panel_width : host->settings_panel_width;
+    if (!isfinite(width) || width <= 0) return;
+    PanelWidthSave *save = calloc(1, sizeof(*save));
+    if (save) { save->panel = panel; save->width = width; }
+    if (!save || !PicoHost_EnqueueUiPersist(host, save, PanelWidthSaveRun, PanelWidthSaveDone, free)) {
+        free(save);
+        PicoOverlay_Notify(host, "Could not queue the panel width preference.");
+    }
 }
 
 static bool PatchObjectValue(char **src, size_t *len, const char *key, const char *json_value);

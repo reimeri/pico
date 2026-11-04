@@ -1311,6 +1311,14 @@ bool PicoSettings_HostExtensionEnabledByDefault(const char *name)
     return true;
 }
 
+/* This fixture stubs settings persistence; panel-width durability is covered
+ * by the host/workspace integration tests. */
+void PicoSettings_SavePanelWidth(PicoHost *host, PicoPanelWidth panel)
+{
+    (void)host;
+    (void)panel;
+}
+
 void PicoHostPreferences_Load(PicoHost *app)
 {
     (void)app;

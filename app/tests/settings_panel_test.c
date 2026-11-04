@@ -94,6 +94,22 @@ static int TestSettingsPanelResize(void)
     Clay_BoundingBox chat = Clay_GetElementData(CLAY_ID("MainColumn")).boundingBox;
     Clay_BoundingBox right = Clay_GetElementData(CLAY_ID("RightColumn")).boundingBox;
     if (chat.width <= 0 || chat.x + chat.width >= pane.x || pane.x + pane.width > right.x + right.width + 0.01f) goto done;
+    phase = "panel widths survive a host restart";
+    /* The settings width comes from the gesture above. Queue the other panel
+     * preferences too, checking FIFO patches do not replace each other. */
+    host->browser_panel_width = 375;
+    host->diff_panel_width = 425;
+    PicoSettings_SavePanelWidth(host, PICO_PANEL_BROWSER);
+    PicoSettings_SavePanelWidth(host, PICO_PANEL_DIFF);
+    if (pico_host_free(host) != PICO_HOST_SHUTDOWN_CLEAN) { f.host = NULL; goto done; }
+    f.host = NULL;
+    if (pico_host_init(&f.host, NULL, true) != PICO_OK) goto done;
+    host = f.host;
+    WaitPluginLoad(host);
+    if (host->browser_panel_width != 375 || host->diff_panel_width != 425) goto done;
+    PicoSettingsUi_Open(host);
+    (void)PicoHost_LayoutShell(host, 800, 0);
+    if (fabsf(Clay_GetElementData(CLAY_ID("SettingsPane")).boundingBox.width - pane.width) > 0.01f) goto done;
     good = true;
 done:
     if (!good) fprintf(stderr, "settings panel resize: %s\n", phase);

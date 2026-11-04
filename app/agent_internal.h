@@ -78,7 +78,6 @@ struct PicoAgent {
     bool unseen_complete;
     bool browser_isolated; /* Durable conversation override; false shares workspace site storage. */
     bool browser_expanded; /* Session-local presentation; opening is explicit and lazy. */
-    float browser_width; /* Preferred dock width in logical pixels; zero uses the default. Never persisted. */
     bool inbox_pending; /* inbox review flag; not a run state */
     uint64_t inbox_revision; /* protects newer live state from a failed offline ack */
     PicoAgentRt *runtime;

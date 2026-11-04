@@ -6099,7 +6099,7 @@ static bool BrowserResizeBehavior(PicoHost *host, bool with_sidebar)
     BrowserTestClick(host, "BrowserToggle");
     (void)PicoHost_LayoutShell(host, 800, 0);
     if (fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f) return false;
-    /* Other sessions have their own preferred widths, and switching mid-drag
+    /* All sessions share the preferred width, and switching mid-drag
      * must not apply the old gesture to the new session. */
     PicoAgentId other;
     PicoAgentCreateOptions options = {.kind=PICO_AGENT_MAIN, .session_start=PICO_SESSION_NONE};
@@ -6115,6 +6115,7 @@ static bool BrowserResizeBehavior(PicoHost *host, bool with_sidebar)
     PicoHost_FindAgent(host, other)->browser_expanded = true;
     (void)PicoHost_LayoutShell(host, 800, 0);
     if (!BrowserTestResize(host, 300) || !pico_agent_select(host, agent->id)) return false;
+    preferred = 300;
     (void)PicoHost_LayoutShell(host, 800, 0);
     if (fabsf(Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox.width - preferred) > 0.01f) return false;
     /* Temporary window constraints must not overwrite the remembered width. */
@@ -6282,7 +6283,7 @@ static int RunBrowserViewportCase(bool with_sidebar)
     /* Closing the popup must not permanently capture composer keyboard input. */
     BrowserTestKey(host, 0);
     if (PicoBrowser_BlocksKeyboard(host)) goto done;
-    if (!BrowserResizeBehavior(host, with_sidebar)) { Fail("browser edge resizing must enforce limits, retain per-session widths, and preserve bottom-follow geometry"); goto done; }
+    if (!BrowserResizeBehavior(host, with_sidebar)) { Fail("browser edge resizing must enforce limits, retain global widths, and preserve bottom-follow geometry"); goto done; }
     rc = 0;
 done:
     g_find_input_test = g_find_press = g_find_down = g_find_released = g_find_ctrl = false;

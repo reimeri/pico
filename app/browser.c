@@ -1271,7 +1271,7 @@ float PicoBrowser_ShellWidth(const PicoHost *host)
     const PicoAgent *a = PicoHost_SelectedAgentConst(host);
     if (!PicoAgent_IsUserMain(a) || !a->browser_expanded || (PicoSettingsUi_IsOpen(host) || PicoDiff_IsOpen(host))) return 0;
     float width = Clay_GetLayoutDimensions().width;
-    float pane = a->browser_width > 0 ? a->browser_width : fminf(width * 0.44f, 720);
+    float pane = host->browser_panel_width > 0 ? host->browser_panel_width : fminf(width * 0.44f, 720);
     return ClampShellWidth(host, pane);
 }
 static void Label(const char *text)
@@ -1687,6 +1687,7 @@ bool PicoBrowser_ResizeHovered(const PicoHost *host)
 static void EndResize(PicoHost *host)
 {
     if (host->browser && host->browser->resize_agent_id) {
+        PicoSettings_SavePanelWidth(host, PICO_PANEL_BROWSER);
         host->browser->resize_agent_id = 0;
         host->ui_drag_active = false;
         pico_host_request_redraw(host);
@@ -1713,7 +1714,7 @@ static bool ResizeInput(PicoHost *host, PicoAgent *a, BrowserSession *b, bool cl
     /* Keep ownership through the release/Escape frame, including relayouts. */
     s->claimed_keyboard = s->resize_pointer_claimed = true;
     if (!IsKeyPressed(KEY_ESCAPE)) {
-        a->browser_width = ClampShellWidth(host, s->resize_start_width + s->resize_start_x - GetMousePosition().x);
+        host->browser_panel_width = ClampShellWidth(host, s->resize_start_width + s->resize_start_x - GetMousePosition().x);
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ESCAPE)) EndResize(host);
     pico_host_request_redraw(host);

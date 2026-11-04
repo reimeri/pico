@@ -25,6 +25,9 @@ void Pico_MkdirP(const char *path);
 void Pico_RandomHex(char *out, size_t cap);
 void Pico_IsoTime(char *out, size_t cap, bool filename);
 void PicoHostPreferences_Load(PicoHost *host);
+/* Queue a copied global panel-width preference on the UI persistence worker. */
+typedef enum PicoPanelWidth { PICO_PANEL_SETTINGS, PICO_PANEL_BROWSER, PICO_PANEL_DIFF } PicoPanelWidth;
+void PicoSettings_SavePanelWidth(PicoHost *host, PicoPanelWidth panel);
 /* Internal host UI preference; writes run on the serialized UI persist worker. */
 bool PicoSettings_ReadSidebarInboxMode(void);
 bool PicoSettings_WriteSidebarInboxMode(bool inbox);

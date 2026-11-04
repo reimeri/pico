@@ -61,9 +61,10 @@ below chat and browser, stopping before the strip.
   resize cursor. A soft accent-colored spotlight follows the pointer along the
   border when nearby and stays lit while dragging. The pane is at least 300 logical
   pixels wide when space allows and at most half the right column (excluding the
-  sidebar and persistent icon strip). Each session keeps
-  its chosen width when collapsed and reopened or switched away from, until
-  Pico exits. Narrower windows temporarily clamp the width to the available half.
+  sidebar and persistent icon strip). The chosen width is global across sessions
+  and workspaces and persists across restarts, as do the Settings and Changes
+  panel widths. Narrower windows temporarily clamp the width to the available half
+  without replacing the saved preference.
   Toolbar controls wrap onto additional rows when the pane is narrow.
 - Collapse hides the pane without discarding the page.
 - Close destroys that session's live page, not its cookies or local storage.

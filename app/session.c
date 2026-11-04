@@ -327,6 +327,12 @@ static void ScanSessionFile(const char *path, PicoSessionInfo *info, bool header
                 snprintf(info->model, sizeof(info->model), "%s", model);
             }
             free(model);
+            char *effort = JsonObjStr(&doc, 0, "effort");
+            if (effort && effort[0])
+            {
+                snprintf(info->effort, sizeof(info->effort), "%s", effort);
+            }
+            free(effort);
             if (header_only)
             {
                 free(type);
@@ -792,6 +798,8 @@ static char *BuildSessionHeaderJson(PicoHost *app, PicoAgent *agent)
     JsonBuf_Bool(&b, session_workspace && session_workspace->worktree);
     JsonBuf_Puts(&b, ",\"model\":");
     JsonBuf_String(&b, agent->model);
+    JsonBuf_Puts(&b, ",\"effort\":");
+    JsonBuf_String(&b, agent->effort);
     JsonBuf_Puts(&b, ",\"fast\":");
     JsonBuf_Bool(&b, agent->fast);
     JsonBuf_Puts(&b, ",\"browser_isolated\":");
@@ -1012,7 +1020,10 @@ static void ApplyHeader(PicoAgent *agent, const JsonDoc *doc, int obj)
     if (model && model[0])
     {
         snprintf(agent->model, sizeof(agent->model), "%s", model);
-        agent->effort[0] = '\0';
+        char *effort = JsonObjStr(doc, obj, "effort");
+        /* Older headers omitted effort; let SyncAgent resolve the current default. */
+        snprintf(agent->effort, sizeof(agent->effort), "%s", effort ? effort : "");
+        free(effort);
         agent->fast = JsonEq(doc, JsonObjGet(doc, obj, "fast"), "true");
         PicoSettings_SyncAgent(agent);
     }

@@ -4158,10 +4158,41 @@ static int TestModelResumeReplay(void)
     writer_agent.kind = PICO_AGENT_MAIN;
     writer_agent.fast = true;
     snprintf(writer_agent.model, sizeof(writer_agent.model), "%s", writer_ws.settings.default_model);
-    if (PicoSession_LogUser(&writer, &writer_agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK ||
-        PicoSession_LogModelChange(&writer, &writer_agent, "changed-model", "high") != PICO_SESSION_WRITE_OK)
-    {
+    PicoModel model = {0};
+    snprintf(model.id, sizeof(model.id), "%s", writer_agent.model);
+    snprintf(model.default_effort, sizeof(model.default_effort), "xhigh");
+    writer_ws.models = &model;
+    writer_ws.model_count = 1;
+    PicoSettings_SyncAgent(&writer_agent);
+    if (PicoSession_LogUser(&writer, &writer_agent, "seed", "seed", NULL) != PICO_SESSION_WRITE_OK)
         return Fail("model resume jsonl write");
+
+    /* A catalog default edit must not change a session's initial selection. */
+    snprintf(model.default_effort, sizeof(model.default_effort), "medium");
+    resumed.workspace = &writer_ws;
+    resumed.kind = PICO_AGENT_MAIN;
+    if (PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
+        strcmp(resumed.effort, "xhigh") != 0)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("resume must retain initial effort after the catalog default changes");
+    }
+    PicoSessionInfo *sessions = NULL;
+    int count = PicoSession_List(&writer_ws, &sessions, true);
+    bool listed_effort = false;
+    for (int i = 0; i < count; i++)
+        if (!strcmp(sessions[i].id, writer_agent.session_id))
+            listed_effort = !strcmp(sessions[i].effort, "xhigh");
+    free(sessions);
+    if (!listed_effort)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("session metadata must include the initial effort without model changes");
+    }
+    if (PicoSession_LogModelChange(&writer, &writer_agent, "changed-model", "high") != PICO_SESSION_WRITE_OK)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("model change write");
     }
     resumed.workspace = &writer_ws;
     resumed.kind = PICO_AGENT_MAIN;
@@ -4171,6 +4202,18 @@ static int TestModelResumeReplay(void)
     {
         unlink(writer_agent.session_path);
         return Fail("resume must load the stored model and effort from jsonl");
+    }
+    unlink(writer_agent.session_path);
+
+    /* Legacy headers have no effort and must use today's default, not stale agent state. */
+    if (!AppendRaw(writer_agent.session_path,
+                   "{\"type\":\"session\",\"version\":5,\"id\":\"legacy-effort\","
+                   "\"kind\":\"normal\",\"model\":\"default-model\"}") ||
+        PicoSession_Replay(&writer, &resumed, writer_agent.session_path, false) != 0 ||
+        strcmp(resumed.effort, model.default_effort) != 0)
+    {
+        unlink(writer_agent.session_path);
+        return Fail("legacy headers without effort must resolve the current model default");
     }
     unlink(writer_agent.session_path);
     return 0;

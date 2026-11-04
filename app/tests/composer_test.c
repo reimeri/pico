@@ -10,6 +10,10 @@ bool PicoSettingsUi_IsOpen(const PicoHost *host) { (void)host; return false; }
 bool PicoSettingsUi_BlocksKeyboard(const PicoHost *host) { (void)host; return false; }
 
 void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
+void PicoChat_SelectionChanging(PicoHost *host) { (void)host; }
+void PicoChat_CancelScrollRestore(PicoHost *host) { (void)host; }
+void PicoChat_ForgetSessionScroll(PicoHost *host, const char *workspace, const char *session)
+{ (void)host; (void)workspace; (void)session; }
 const char *MdView_HoveredImagePath(void) { return NULL; }
 
 #include <stdio.h>

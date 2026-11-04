@@ -28,6 +28,10 @@
 #include <unistd.h>
 #include <utime.h>
 
+/* Session persistence is tested without the chat UI. */
+void PicoChat_ForgetSessionScroll(PicoHost *host, const char *workspace, const char *session)
+{ (void)host; (void)workspace; (void)session; }
+
 static char g_config_dir[4096];
 static int g_restored_value;
 static int g_reset_hooks;

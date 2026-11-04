@@ -98,6 +98,12 @@ the selected conversation open and other sessions running.
   Choose a non-stashed project to create a session, or return to its empty draft.
   The picker also offers **Add project**.
 
+When you switch sessions (including between projects), Pico remembers your reading
+position for five minutes after you leave. Returning sooner restores that position,
+even if new output arrived; returning later opens at the bottom. If you left at the
+bottom, you always return to the latest output. These bookmarks are kept only in
+memory and do not survive restarting Pico.
+
 ## Build from source
 
 Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, libwebp, libjpeg, and Raylib's native deps (OpenGL/EGL, X11/Wayland, audio). Ubuntu 26.04:

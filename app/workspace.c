@@ -9,6 +9,7 @@
 #include "subagent_config.h"
 #include "host_internal.h"
 #include "builtins/background_model.h"
+#include "builtins/chat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,6 +96,7 @@ static void SyncSelectedAgent(PicoHost *host, PicoAgentId id)
     {
         return;
     }
+    if (host->selected_agent_id != id) PicoChat_SelectionChanging(host);
     if (host->selected_agent_id != id) PicoClarification_Back(host);
     if (host->selected_agent_id != id) PicoChatFind_Reset(host);
     if (host->selected_agent_id != id) pico_host_request_redraw(host);

@@ -13,6 +13,7 @@
 #include "usage.h"
 #include "host_internal.h"
 #include "overlay.h"
+#include "builtins/chat.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -2878,6 +2879,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     {
         PicoWorkspace_ReleaseSessions(agent->workspace, agent->id);
     }
+    PicoChat_ForgetSessionScroll(app, PicoAgent_WorkspacePath(agent), agent->session_id);
     pico_run_hooks(app, PICO_HOOK_ON_SESSION_RESET, agent->id);
     PicoAgent_DismissError(agent);
     PicoAgent_ClearMessages(agent);
@@ -8444,6 +8446,8 @@ PicoResult PicoCatalog_DeleteSession(PicoHost *host, const char *checkout_path, 
         CatalogDeleteExpand(refs, count);
     }
     result = CatalogDeleteSessionFiles(project, refs, count);
+    for (int i = 0; i < count; i++)
+        if (refs[i].selected) PicoChat_ForgetSessionScroll(host, refs[i].checkout, refs[i].id);
     free(refs);
     return result;
 }

@@ -1,5 +1,6 @@
 #include "clarification.h"
 #include "chat_find.h"
+#include "builtins/chat.h"
 #include "host_internal.h"
 #include "text_field_ui.h"
 #include "agent_internal.h"
@@ -381,6 +382,7 @@ bool PicoChatFind_Reveal(PicoHost *app)
     if (!bounds.found) return false; /* Force mounting completes next layout. */
     f->nearest = f->reveal = false;
     bool changed = app->chat_follow_bottom || previous_active != f->search.active;
+    PicoChat_CancelScrollRestore(app);
     app->chat_follow_bottom = false;
     Clay_BoundingBox box = bounds.box;
     if (box.y < clip.y || box.y + box.height > clip.y + clip.height)

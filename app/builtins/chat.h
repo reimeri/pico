@@ -9,6 +9,10 @@ struct PicoWorkspace;
 struct PicoToolRowEvent;
 
 void PicoChat_InspectClose(void);
+/* Main-thread session navigation; call before changing the selected agent. */
+void PicoChat_SelectionChanging(struct PicoHost *app);
+void PicoChat_CancelScrollRestore(struct PicoHost *app);
+void PicoChat_ForgetSessionScroll(struct PicoHost *app, const char *workspace, const char *session);
 /* Private shell integration: retain automatic shrink space, then correct before present. */
 void PicoChat_ResetBottomSpace(struct PicoHost *app);
 void PicoChat_BeginScrollLayout(struct PicoHost *app);

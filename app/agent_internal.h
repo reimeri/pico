@@ -58,6 +58,9 @@ struct PicoAgent {
     /* Main-thread transcript invalidations. Old readers detect journal overflow
      * and do a full reconciliation rather than losing an offscreen edit. */
     uint64_t transcript_reset_generation;
+    /* Reading anchors survive retries of the live tail, but not replacement
+     * of the conversation (even with identical text at the same indices). */
+    uint64_t transcript_replacement_generation;
     uint64_t transcript_change_seq;
     int transcript_changes[PICO_TRANSCRIPT_CHANGE_CAP];
 

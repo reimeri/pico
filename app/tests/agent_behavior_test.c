@@ -22,6 +22,10 @@
 void PicoComplete_Close(void) {}
 void PicoComposer_ResetPresentation(PicoHost *host) { (void)host; }
 void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }
+void PicoChat_SelectionChanging(PicoHost *host) { (void)host; }
+void PicoChat_CancelScrollRestore(PicoHost *host) { (void)host; }
+void PicoChat_ForgetSessionScroll(PicoHost *host, const char *workspace, const char *session)
+{ (void)host; (void)workspace; (void)session; }
 
 #include <pthread.h>
 #include <dirent.h>

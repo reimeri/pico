@@ -2754,7 +2754,7 @@ static void PicoHost_RemoveClosedWorkspaces(PicoHost *host)
                     }
                     PicoClarification_Back(host);
                     if (next_id) pico_agent_select(host, next_id);
-                    else host->selected_agent_id = 0;
+                    else PicoHost_ClearAgentSelection(host);
                     PicoChatSel_Clear(host);
                     host->chat_follow_bottom = true;
                 }
@@ -3867,6 +3867,7 @@ void PicoAgent_ClearMessages(PicoAgent *agent)
         return;
     }
     agent->transcript_reset_generation++;
+    agent->transcript_replacement_generation++;
     PicoHost *host = agent->workspace ? agent->workspace->host : NULL;
     if (host && host->selected_agent_id == agent->id)
     {
@@ -4312,6 +4313,7 @@ static void UpdateChatFollowFromUserScroll(PicoHost *app, bool over_chat, bool m
         return;
     }
     Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("ChatScroll")));
+    PicoChat_CancelScrollRestore(app);
     app->chat_follow_bottom = ChatScrollAtBottom(data);
 }
 

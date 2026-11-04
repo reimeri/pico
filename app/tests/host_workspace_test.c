@@ -3457,6 +3457,247 @@ static void FindLayoutFrame(PicoHost *host, Clay_Dimensions viewport)
     }
 }
 
+#ifdef PICO_TEST_CLOCK
+/* Same measure/correct/present order as the host frame, without a window. */
+static void BookmarkLayoutFrame(PicoHost *host, Clay_Dimensions viewport)
+{
+    Clay_SetLayoutDimensions(viewport);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0);
+    (void)PicoHost_LayoutShell(host, viewport.height, 0);
+    PicoChat_HarvestVirtualHeights(host);
+    if (PicoChat_TakeVirtualRelayout())
+        (void)PicoHost_LayoutShell(host, viewport.height, 0);
+    PicoChat_RecordVirtualScroll();
+}
+
+static float BookmarkMessageOffset(int message)
+{
+    Clay_ElementData row = Clay_GetElementData(CLAY_IDI("MsgMain", message));
+    Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    return row.found && viewport.found ? row.boundingBox.y - viewport.boundingBox.y : INFINITY;
+}
+
+static bool BookmarkAtBottom(void)
+{
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    return scroll.found && scroll.scrollPosition &&
+           fabsf(scroll.scrollPosition->y - fminf(0, scroll.scrollContainerDimensions.height -
+                                                    scroll.contentDimensions.height)) < 0.5f;
+}
+
+static bool BookmarkReadMessage(PicoHost *host, Clay_Dimensions viewport, int message)
+{
+    /* Find mounts a distant row using public navigation behavior. Then place
+     * the viewport partway through it, rather than relying on estimated sizes. */
+    char query[64];
+    snprintf(query, sizeof(query), "Reading marker %d.", message);
+    PicoChatFind_Open(host);
+    PicoChatFind_SetQuery(host, query);
+    for (int i = 0; i < 12; i++) FindLayoutFrame(host, viewport);
+    PicoChatFind_Reset(host);
+    float offset = BookmarkMessageOffset(message);
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (!isfinite(offset) || !scroll.found || !scroll.scrollPosition) return false;
+    host->chat_follow_bottom = false;
+    scroll.scrollPosition->y -= offset + 12;
+    for (int i = 0; i < 4; i++) BookmarkLayoutFrame(host, viewport);
+    return fabsf(BookmarkMessageOffset(message) + 12) < 0.5f;
+}
+
+static int BookmarkRetryProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn,
+                                 PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta,
+                                 void *user, PicoLlmResult *out, void *state)
+{
+    (void)ctx; (void)turn; (void)cancel; (void)state;
+    PicoLlmDelta partial = {.kind = PICO_LLM_DELTA_TEXT, .text = "discarded", .len = 9, .call_index = -1};
+    PicoLlmDelta reset = {.kind = PICO_LLM_DELTA_RESET};
+    on_delta(user, &partial);
+    on_delta(user, &reset);
+    pico_llm_result_add_text(out, "Completed after retry.");
+    return PICO_LLM_OK;
+}
+
+static int TestSessionScrollBookmarks(void)
+{
+    Clay_Dimensions viewport = {1000, 640};
+    char dirs[2][64] = {"/tmp/pico-bookmark-a-XXXXXX", "/tmp/pico-bookmark-b-XXXXXX"};
+    char cfg[] = "/tmp/pico-bookmark-cfg-XXXXXX";
+    Clay_Context *previous = Clay_GetCurrentContext();
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    PicoHost *host = NULL;
+    PicoAgentId ids[2];
+    PicoWorkspaceId workspaces[2];
+    PicoAgent *agents[2];
+    ShellTestState shell = {.composer_height = 44};
+    if (!memory || !mkdtemp(dirs[0]) || !mkdtemp(dirs[1]) || !mkdtemp(cfg))
+    { free(memory); Fail("bookmark setup"); return 1; }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    { Fail("bookmark host initialization"); goto done; }
+    WaitPluginLoad(host);
+    /* Frame input is real, but overlay drawing needs a graphics context. */
+    host->hook_count = 0;
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &shell);
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+    for (int a = 0; a < 2; a++)
+    {
+        if (pico_workspace_open(host, dirs[a], &workspaces[a]) != PICO_OK ||
+            pico_main_agent_create(host, workspaces[a], &options, &ids[a]) != PICO_OK ||
+            !(agents[a] = PicoHost_FindAgent(host, ids[a])))
+        { Fail("bookmark sessions"); goto done; }
+        for (int i = 0; i < 160; i++)
+        {
+            char text[512];
+            snprintf(text, sizeof(text), "Reading marker %d. Workspace %d.\n\n"
+                     "A paragraph long enough to wrap when the window narrows. "
+                     "More text to make the height depend on the available width.", i, a);
+            PicoAgent_AddMessage(host, agents[a], PICO_ROLE_USER, text);
+            if (PicoSession_LogUser(host, agents[a], text, text, NULL) != PICO_SESSION_WRITE_OK)
+            { Fail("bookmark session persistence"); goto done; }
+        }
+        PicoSession_DrainPersist(host, agents[a]);
+    }
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    { Fail("bookmark Clay initialization"); goto done; }
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    RichText_SetMeasureFunction(Pico_MeasureTextUtf8, NULL);
+    Clay_SetPointerState((Clay_Vector2){0}, false);
+    PicoTestClock_Set(100);
+    pico_agent_select(host, ids[0]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (!BookmarkReadMessage(host, viewport, 90)) { Fail("bookmark reading setup"); goto done; }
+    float expected = BookmarkMessageOffset(90);
+    /* The timeout starts at departure, not the last scroll or selection. */
+    PicoTestClock_Advance(1300);
+    pico_agent_select(host, ids[1]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (!BookmarkAtBottom()) { Fail("first visit must open at bottom"); goto done; }
+    if (!BookmarkReadMessage(host, viewport, 40)) { Fail("second bookmark setup"); goto done; }
+    float other_expected;
+    /* Exercise a real background provider retry: it resets the current attempt,
+     * not the historical message that the user was reading. */
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspaces[0]);
+    PicoProvider provider = {.name = "bookmark-retry", .stream = BookmarkRetryProvider};
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    pico_add_provider(workspace, &provider);
+    PicoHost_PublishRegistration(host, NULL);
+    PicoModel model = {0};
+    snprintf(model.id, sizeof(model.id), "bookmark-model");
+    snprintf(model.provider, sizeof(model.provider), "bookmark-retry");
+    free(workspace->models);
+    workspace->models = malloc(sizeof(model));
+    if (!workspace->models) { Fail("bookmark provider model"); goto done; }
+    *workspace->models = model;
+    workspace->model_count = 1;
+    snprintf(agents[0]->model, sizeof(agents[0]->model), "%s", model.id);
+    if (pico_agent_submit(host, ids[0], "Continue in background", NULL) != PICO_OK)
+    { Fail("bookmark background submit"); goto done; }
+    PICO_TEST_WAIT(PicoAgent_IsBusy(agents[0])) pico_host_pump(host);
+    if (agents[0]->state == PICO_AGENT_ERROR)
+    { Fail("bookmark retry provider failed"); goto done; }
+    PicoTestClock_Advance(1330);
+    pico_agent_select(host, ids[0]);
+    /* A width change invalidates all height estimates. The same reading row
+     * must stay put on every presented frame, not just once measurement ends. */
+    viewport.width = 720;
+    for (int i = 0; i < 16; i++)
+    {
+        BookmarkLayoutFrame(host, viewport);
+        if (fabsf(BookmarkMessageOffset(90) - expected) > 0.5f)
+        { Fail("quick return must restore reading anchor through remeasurement and background output"); goto done; }
+    }
+    PicoTestClock_Advance(2530);
+    for (int i = 0; i < 4; i++) BookmarkLayoutFrame(host, viewport);
+    if (fabsf(BookmarkMessageOffset(90) - expected) > 0.5f)
+    { Fail("expiry must never move a selected session"); goto done; }
+    pico_agent_select(host, ids[1]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (!BookmarkAtBottom()) { Fail("twenty-minute return must open at bottom"); goto done; }
+    /* Save a fresh second position, then alternate both within the window. */
+    if (!BookmarkReadMessage(host, viewport, 40)) { Fail("refresh second bookmark"); goto done; }
+    other_expected = BookmarkMessageOffset(40);
+    pico_agent_select(host, ids[0]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (fabsf(BookmarkMessageOffset(90) - expected) > 0.5f)
+    { Fail("departure must refresh a long-read session bookmark"); goto done; }
+    pico_agent_select(host, ids[1]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (fabsf(BookmarkMessageOffset(40) - other_expected) > 0.5f)
+    { Fail("workspaces must retain independent reading positions"); goto done; }
+    /* Returning from bottom follows new output rather than the old end. */
+    host->chat_follow_bottom = true;
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    pico_agent_select(host, ids[0]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    for (int i = 0; i < 12; i++)
+        PicoAgent_AddMessage(host, agents[1], PICO_ROLE_ASSISTANT, "New bottom-follow output.");
+    pico_agent_select(host, ids[1]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (!BookmarkAtBottom()) { Fail("return from bottom must follow the latest output"); goto done; }
+    /* A closed live agent can be reloaded under a different runtime ID. */
+    char session[40];
+    snprintf(session, sizeof(session), "%s", agents[0]->session_id);
+    if (pico_agent_close(host, ids[0]) != PICO_OK ||
+        PicoSession_LoadAsync(host, workspaces[0], 0, session, false, false, false, false) != PICO_OK)
+    { Fail("bookmark saved-session reload"); goto done; }
+    PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (fabsf(BookmarkMessageOffset(90) - expected) > 0.5f)
+    { Fail("saved session reload must retain its reading position"); goto done; }
+    PicoAgent *reloaded = PicoHost_SelectedAgent(host);
+    PicoAgentId reloaded_id = reloaded->id;
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    /* User wheel input can arrive after selection but before its first layout.
+     * It must win over the queued bookmark, including after cold measurement. */
+    pico_agent_select(host, ids[1]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    pico_agent_select(host, reloaded_id);
+    Clay_ElementData clip = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_pointer = (Vector2){clip.boundingBox.x + 40, clip.boundingBox.y + 40};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    g_find_wheel.y = 100000; /* Deliberately scroll to the start of history. */
+    PicoHost_Frame(host);
+    g_find_wheel = (Vector2){0};
+    g_clay_frame_test = g_find_input_test = false;
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    Clay_ScrollContainerData manual = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+    if (!manual.found || !manual.scrollPosition || fabsf(manual.scrollPosition->y) > 0.5f)
+    { Fail("manual scroll before first layout must supersede restoration"); goto done; }
+    if (!BookmarkReadMessage(host, viewport, 90)) { Fail("reset bookmark setup"); goto done; }
+#endif
+    /* Resetting an away transcript must not apply an old message index. */
+    pico_agent_select(host, ids[1]);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    /* Matching text at the old index is not sufficient after replacement. */
+    char *same_text = strdup(reloaded->messages[90].source);
+    if (!same_text) { Fail("replacement bookmark fixture"); goto done; }
+    PicoAgent_ClearMessages(reloaded);
+    for (int i = 0; i < 160; i++) PicoAgent_AddMessage(host, reloaded, PICO_ROLE_USER, same_text);
+    free(same_text);
+    pico_agent_select(host, reloaded_id);
+    for (int i = 0; i < 12; i++) BookmarkLayoutFrame(host, viewport);
+    if (!BookmarkAtBottom()) { Fail("replaced transcript must discard its old reading position"); goto done; }
+
+done:
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    g_clay_frame_test = g_find_input_test = false;
+    g_find_wheel = (Vector2){0};
+#endif
+    PicoTestClock_Reset();
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dirs[0]); RmRf(dirs[1]);
+    return g_failed ? 1 : 0;
+}
+#endif
+
 typedef struct FindTestRange {
     bool found;
     Clay_BoundingBox box;
@@ -20606,6 +20847,11 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestOpenAiBlockedShutdownChild());
 #endif
     if (!IsolateTestHome()) return 1;
+#ifdef PICO_TEST_CLOCK
+    if (argc == 2 && strcmp(argv[1], "--session-scroll") == 0)
+        return PICO_TEST_RUN(TestSessionScrollBookmarks());
+    if (PICO_TEST_RUN(TestSessionScrollBookmarks())) return 1;
+#endif
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 2 && strcmp(argv[1], "--settings-panel") == 0)
         return PICO_TEST_RUN(TestSettingsPanelInteraction()) || PICO_TEST_RUN(TestSettingsPanelResize()) ||

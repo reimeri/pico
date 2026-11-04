@@ -142,6 +142,23 @@ typedef struct ThinkLabelEntry {
  * stamps rather than frames; ~256 stamps is well under a second of idling. */
 #define THINK_CACHE_STALE_STAMPS 256
 
+/* Navigation state, not catalog data. Only away sessions have an expiry;
+ * reading the selected session never starts an automatic jump-to-bottom timer. */
+#define CHAT_BOOKMARK_SECONDS (5.0 * 60.0)
+typedef struct ChatBookmark {
+    struct ChatBookmark *next;
+    char workspace[4096];
+    char session[40];
+    PicoAgentId owner;
+    uint64_t replacement_generation;
+    int message;
+    PicoRole role;
+    char prefix[64];
+    size_t prefix_len;
+    float offset; /* Message top relative to the viewport top. */
+    double departed_at;
+} ChatBookmark;
+
 typedef struct ChatState {
     ThinkLabelBlock *think_label_blocks;
     ThinkLabelBlock *think_label_block;
@@ -171,6 +188,13 @@ typedef struct ChatState {
     ToolWrapCacheSet inspect_tool_wrap;
     int inspect_virtual_ns;
     bool virtual_relayout;
+    ChatBookmark *bookmarks;
+    ChatBookmark visible_bookmark;
+    ChatBookmark restore_bookmark;
+    bool visible_bookmark_valid;
+    bool selection_pending;
+    bool selection_restore_cancelled;
+    bool restoring_bookmark;
     uint64_t bottom_identity;
     float bottom_extent;
     float bottom_space;
@@ -208,6 +232,8 @@ static __thread ChatState *s_active_chat_state = NULL;
 #define g_inspect_tool_wrap (s_active_chat_state->inspect_tool_wrap)
 #define g_inspect_virtual_ns (s_active_chat_state->inspect_virtual_ns)
 #define g_virtual_relayout (s_active_chat_state->virtual_relayout)
+
+static void RememberVisibleBookmark(ChatState *state);
 
 static bool IsSubagentTool(const PicoTraceLine *line)
 {
@@ -2438,6 +2464,14 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
     {
         force_index = view->app->chat_sel.msg;
     }
+    if (view->id_ns == 0 && s_active_chat_state->restoring_bookmark)
+    {
+        ChatBookmark *bookmark = &s_active_chat_state->restore_bookmark;
+        scroll_top = CHAT_CONTENT_PAD_Y +
+                     PicoTranscriptVirtual_SpanHeight(cache, 0, bookmark->message,
+                                                       TRANSCRIPT_MESSAGE_GAP) - bookmark->offset;
+        force_index = bookmark->message;
+    }
     PicoTranscriptVirtual_Plan(cache, scroll_top, viewport,
                                viewport * TRANSCRIPT_OVERSCAN_VIEWPORTS,
                                force_index, TRANSCRIPT_MESSAGE_GAP);
@@ -2538,6 +2572,7 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
 
 void PicoChat_RecordVirtualScroll(void)
 {
+    RememberVisibleBookmark(s_active_chat_state);
     Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     if (chat.found && chat.scrollPosition)
     {
@@ -2580,6 +2615,167 @@ static ChatState *ChatScrollState(PicoHost *app)
     return app ? (ChatState *)PicoPlugins_HostState(app, "chat") : NULL;
 }
 
+static bool BookmarkMatches(const ChatBookmark *bookmark, const PicoAgent *agent)
+{
+    return PicoAgent_IsUserMain(agent) && agent->workspace && agent->session_id[0] &&
+           strcmp(bookmark->session, agent->session_id) == 0 &&
+           strcmp(bookmark->workspace, PicoAgent_WorkspacePath(agent)) == 0;
+}
+
+static bool BookmarkAnchorValid(const ChatBookmark *bookmark, const PicoAgent *agent)
+{
+    if (!BookmarkMatches(bookmark, agent) || bookmark->message < 0 ||
+        bookmark->message >= agent->message_count ||
+        (bookmark->owner == agent->id &&
+         bookmark->replacement_generation != agent->transcript_replacement_generation)) return false;
+    /* A replay gets a new live agent ID. Validate its anchor against saved
+     * content, but allow streaming to append to that message while away. */
+    const PicoMessage *message = &agent->messages[bookmark->message];
+    return message->role == bookmark->role && message->source_len >= bookmark->prefix_len &&
+           (!bookmark->prefix_len ||
+            (message->source && memcmp(message->source, bookmark->prefix, bookmark->prefix_len) == 0));
+}
+
+static void PruneBookmarks(ChatState *state, double now)
+{
+    for (ChatBookmark **link = &state->bookmarks; *link; )
+    {
+        ChatBookmark *bookmark = *link;
+        if (now - bookmark->departed_at >= CHAT_BOOKMARK_SECONDS)
+        {
+            *link = bookmark->next;
+            free(bookmark);
+        }
+        else link = &bookmark->next;
+    }
+}
+
+static void RememberVisibleBookmark(ChatState *state)
+{
+    if (!state) return;
+    PicoHost *app = state->app;
+    PicoAgent *agent = PicoHost_TranscriptAgent(app);
+    TranscriptView view = {.owner = agent};
+    state->visible_bookmark_valid = false;
+    if (!PicoAgent_IsUserMain(agent) || !agent->workspace || !agent->session_id[0] ||
+        state->selection_pending || state->main_virtual.identity != TranscriptIdentity(&view)) return;
+    Clay_ElementData viewport = Clay_GetElementData(CLAY_ID("ChatScroll"));
+    if (!viewport.found) return;
+    TranscriptView ids = {0};
+    for (int j = 0; j < PicoTranscriptVirtual_MountedCount(&state->main_virtual); j++)
+    {
+        int i = PicoTranscriptVirtual_MountedIndex(&state->main_virtual, j);
+        Clay_ElementData row = Clay_GetElementData(MessageId(&ids, i));
+        if (!row.found || i >= agent->message_count ||
+            row.boundingBox.y + row.boundingBox.height <= viewport.boundingBox.y ||
+            row.boundingBox.y >= viewport.boundingBox.y + viewport.boundingBox.height) continue;
+        ChatBookmark *bookmark = &state->visible_bookmark;
+        *bookmark = (ChatBookmark){.owner = agent->id,
+                                  .replacement_generation = agent->transcript_replacement_generation,
+                                  .message = i, .role = agent->messages[i].role,
+                                  .offset = row.boundingBox.y - viewport.boundingBox.y};
+        snprintf(bookmark->workspace, sizeof(bookmark->workspace), "%s", PicoAgent_WorkspacePath(agent));
+        snprintf(bookmark->session, sizeof(bookmark->session), "%s", agent->session_id);
+        bookmark->prefix_len = agent->messages[i].source_len;
+        if (bookmark->prefix_len > sizeof(bookmark->prefix)) bookmark->prefix_len = sizeof(bookmark->prefix);
+        if (bookmark->prefix_len) memcpy(bookmark->prefix, agent->messages[i].source, bookmark->prefix_len);
+        state->visible_bookmark_valid = true;
+        break;
+    }
+}
+
+void PicoChat_SelectionChanging(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    if (!state) return;
+    double now = PicoClock_Monotonic();
+    PruneBookmarks(state, now);
+    ChatBookmark *visible = state->restoring_bookmark ? &state->restore_bookmark : &state->visible_bookmark;
+    PicoAgent *old = PicoHost_SelectedAgent(app);
+    /* The last completed layout is also usable when close/replay has already
+     * removed the old live agent. Never attribute a clarification view to its
+     * selected owner, or a not-yet-rendered selection to the preceding view. */
+    if (!app->clarification_view_id && !app->chat_follow_bottom &&
+        (state->restoring_bookmark || state->visible_bookmark_valid) &&
+        visible->owner == app->selected_agent_id &&
+        (!old || BookmarkAnchorValid(visible, old)))
+    {
+        ChatBookmark *bookmark = malloc(sizeof(*bookmark));
+        if (bookmark)
+        {
+            *bookmark = *visible;
+            bookmark->departed_at = now;
+            bookmark->next = state->bookmarks;
+            state->bookmarks = bookmark;
+        }
+    }
+    state->visible_bookmark_valid = false;
+    state->restoring_bookmark = false;
+    state->selection_pending = true;
+    state->selection_restore_cancelled = false;
+}
+
+void PicoChat_CancelScrollRestore(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    if (state)
+    {
+        state->restoring_bookmark = false;
+        if (state->selection_pending) state->selection_restore_cancelled = true;
+    }
+}
+
+void PicoChat_ForgetSessionScroll(PicoHost *app, const char *workspace, const char *session)
+{
+    ChatState *state = ChatScrollState(app);
+    if (!state || !workspace || !session || !session[0]) return;
+    for (ChatBookmark **link = &state->bookmarks; *link; )
+    {
+        ChatBookmark *bookmark = *link;
+        if (!strcmp(bookmark->workspace, workspace) && !strcmp(bookmark->session, session))
+        {
+            *link = bookmark->next;
+            free(bookmark);
+        }
+        else link = &bookmark->next;
+    }
+    if (!strcmp(state->visible_bookmark.workspace, workspace) &&
+        !strcmp(state->visible_bookmark.session, session)) state->visible_bookmark_valid = false;
+    if (!strcmp(state->restore_bookmark.workspace, workspace) &&
+        !strcmp(state->restore_bookmark.session, session)) state->restoring_bookmark = false;
+}
+
+static void BeginBookmarkRestore(ChatState *state)
+{
+    PicoHost *app = state->app;
+    PicoAgent *agent = PicoHost_TranscriptAgent(app);
+    if (state->selection_pending)
+    {
+        state->selection_pending = false;
+        if (!state->selection_restore_cancelled) app->chat_follow_bottom = true;
+        PruneBookmarks(state, PicoClock_Monotonic());
+        for (ChatBookmark **link = &state->bookmarks; *link; link = &(*link)->next)
+        {
+            ChatBookmark *bookmark = *link;
+            if (!BookmarkMatches(bookmark, agent)) continue;
+            if (!state->selection_restore_cancelled && BookmarkAnchorValid(bookmark, agent))
+            {
+                state->restore_bookmark = *bookmark;
+                state->restore_bookmark.owner = agent->id;
+                state->restore_bookmark.replacement_generation = agent->transcript_replacement_generation;
+                state->restoring_bookmark = true;
+                app->chat_follow_bottom = false;
+            }
+            *link = bookmark->next;
+            free(bookmark);
+            break;
+        }
+    }
+    if (state->restoring_bookmark &&
+        (app->chat_follow_bottom || !BookmarkAnchorValid(&state->restore_bookmark, agent)))
+        state->restoring_bookmark = false;
+}
+
 void PicoChat_ResetBottomSpace(PicoHost *app)
 {
     ChatState *state = ChatScrollState(app);
@@ -2595,6 +2791,7 @@ void PicoChat_BeginScrollLayout(PicoHost *app)
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     if (state)
     {
+        BeginBookmarkRestore(state);
         state->bottom_input_y = scroll.found && scroll.scrollPosition ? scroll.scrollPosition->y : 0.0f;
     }
 }
@@ -2663,6 +2860,21 @@ bool PicoChat_StabilizeScrollLayout(PicoHost *app)
     {
         state->bottom_space = 0.0f;
         state->bottom_extent = natural;
+    }
+    if (state->restoring_bookmark)
+    {
+        TranscriptView ids = {0};
+        ChatBookmark *bookmark = &state->restore_bookmark;
+        Clay_ElementData row = Clay_GetElementData(MessageId(&ids, bookmark->message));
+        Clay_ElementData clip = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        if (row.found && clip.found)
+        {
+            /* Clamp inside a shortened message rather than landing past it.
+             * Keep correcting while offscreen estimates are being measured. */
+            float offset = fmaxf(bookmark->offset, -fmaxf(0, row.boundingBox.height - 1));
+            state->bottom_input_y = scroll.scrollPosition->y + clip.boundingBox.y - row.boundingBox.y + offset;
+            if (!state->main_virtual.measure_all) state->restoring_bookmark = false;
+        }
     }
     float bottom = fminf(0.0f, viewport - natural - state->bottom_space);
     float target = app->chat_follow_bottom ? bottom : fmaxf(bottom, fminf(0.0f, state->bottom_input_y));
@@ -4202,6 +4414,12 @@ static void ChatShutdown(PicoHost *app, void *state)
     s->virtual_relayout = false;
     PicoChat_InspectClose();
     InspectForceReset();
+    while (s->bookmarks)
+    {
+        ChatBookmark *next = s->bookmarks->next;
+        free(s->bookmarks);
+        s->bookmarks = next;
+    }
     free(s);
     s_active_chat_state = NULL;
 }

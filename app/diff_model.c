@@ -495,7 +495,10 @@ static void ParseUnified(DiffModel *m, const char *patch)
              * same header. Both belong to one raw record, not the next file. */
             bool same_type_change = cur && cur->change_type == 'T' && deleted_type_half &&
                 previous_header_len == len && !memcmp(previous_header, line, (size_t)len);
-            if (!same_type_change) cur = file_index < m->file_count ? &m->files[file_index++] : NULL;
+            if (!same_type_change) {
+                if (cur) cur->patch_complete = true;
+                cur = file_index < m->file_count ? &m->files[file_index++] : NULL;
+            }
             previous_header = line; previous_header_len = len;
             in_hunk = false; deleted_type_half = false;
             if (!cur) m->partial = true;
@@ -518,6 +521,7 @@ static void ParseUnified(DiffModel *m, const char *patch)
         }
         line += len + (nl ? 1 : 0);
     }
+    if (cur && !m->partial) cur->patch_complete = true;
     for (int i = 0; i < m->file_count; i++)
     {
         DiffFile *file = &m->files[i];
@@ -671,6 +675,65 @@ static void AddUntrackedFiles(DiffModel *m, const char *ws)
     free(out);
 }
 
+/* Context is optional: a bounded full-context capture must never displace
+ * the compact changed hunks. Only complete, matching file patches replace
+ * their compact counterparts. Retain the backing buffer in the model stash. */
+static bool SameEdits(const DiffFile *a, const DiffFile *b)
+{
+    int ai = 0, bi = 0;
+    for (;;) {
+        while (ai < a->row_count && a->rows[ai].kind != ROW_ADD && a->rows[ai].kind != ROW_DEL) ai++;
+        while (bi < b->row_count && b->rows[bi].kind != ROW_ADD && b->rows[bi].kind != ROW_DEL) bi++;
+        if (ai == a->row_count || bi == b->row_count) return ai == a->row_count && bi == b->row_count;
+        const DiffRow *ar = &a->rows[ai++], *br = &b->rows[bi++];
+        if (ar->kind != br->kind || ar->len != br->len || memcmp(ar->text, br->text, (size_t)ar->len)) return false;
+    }
+}
+
+static void AddReviewContext(DiffModel *m, const char *ws, const char *base)
+{
+    if (!m->file_count || m->partial) return;
+    char args[256];
+    snprintf(args, sizeof(args), "diff --no-color --no-ext-diff --no-textconv -M --raw -z --patch --submodule=short -U1000000 %s", base);
+    DiffModel *context = calloc(1, sizeof(*context));
+    if (!context) return;
+    size_t size = 0;
+    context->patch = GitRun(ws, args, &context->partial, &size);
+    if (context->patch) {
+        const char *patch = ParseTrackedMetadata(context, context->patch, size);
+        if (context->partial) {
+            char *last = strrchr((char *)patch, '\n');
+            if (last) last[1] = 0; else *((char *)patch) = 0;
+        }
+        ParseUnified(context, patch);
+        DiffStash *stash = calloc(1, sizeof(*stash));
+        if (stash) {
+            for (int i = 0; i < m->file_count; i++) {
+                DiffFile *f = &m->files[i];
+                bool replaced = false;
+                for (int j = 0; j < context->file_count; j++) {
+                    DiffFile *full = &context->files[j];
+                    if (full->patch_complete && f->label_len == full->label_len &&
+                        !memcmp(f->label, full->label, (size_t)f->label_len) && SameEdits(f, full)) {
+                        free(f->rows); *f = *full; full->rows = NULL; full->row_count = 0;
+                        replaced = true; break;
+                    }
+                }
+                if (!replaced) FilePushRow(f, ROW_NOTE, "Additional context unavailable (capture limit or file changed)",
+                    sizeof("Additional context unavailable (capture limit or file changed)") - 1);
+            }
+            stash->buf = context->patch; context->patch = NULL;
+            stash->next = m->stash; m->stash = stash;
+            /* Metadata notes also borrow from context's stash. */
+            while (context->stash) {
+                DiffStash *next = context->stash->next;
+                context->stash->next = m->stash; m->stash = context->stash; context->stash = next;
+            }
+        }
+    }
+    PicoDiffModel_Free(context);
+}
+
 DiffModel *PicoDiffModel_Capture(const char *ws)
 {
     DiffModel *m = calloc(1, sizeof(*m));
@@ -732,6 +795,23 @@ DiffModel *PicoDiffModel_Capture(const char *ws)
         ParseUnified(m, patch);
     }
 
+    AddReviewContext(m, ws, base);
     AddUntrackedFiles(m, ws);
+    for (int fi = 0; fi < m->file_count; fi++) {
+        DiffFile *f = &m->files[fi];
+        int old = 1, new = 1;
+        for (int ri = 0; ri < f->row_count; ri++) {
+            DiffRow *r = &f->rows[ri];
+            if (r->kind == ROW_HUNK && r->len > 3 && r->text[0] == '@') {
+                const char *plus = memchr(r->text, '+', (size_t)r->len);
+                sscanf(r->text, "@@ -%d", &old);
+                if (plus) sscanf(plus, "+%d", &new);
+            }
+            if (r->kind == ROW_CTX || r->kind == ROW_DEL) r->old_line = old++;
+            if (r->kind == ROW_CTX || r->kind == ROW_ADD) r->new_line = new++;
+            if (r->kind == ROW_ADD) f->adds++;
+            if (r->kind == ROW_DEL) f->dels++;
+        }
+    }
     return m;
 }

@@ -10,6 +10,7 @@
 #include "pico/auth.h"
 #include "host_internal.h"
 #include "browser.h"
+#include "diff_ui.h"
 #include "browser/protocol.h"
 #include <sys/socket.h>
 #include "sanitizer_detect.h"
@@ -2841,7 +2842,7 @@ done:
     return rc;
 }
 
-static int RunSettingsPanelShellCase(bool with_sidebar)
+static int RunDockPanelShellCase(bool with_sidebar, bool changes)
 {
     const Clay_Dimensions viewports[] = {{1714, 1392}, {800, 800}, {1714, 1392}};
     char dir[] = "/tmp/pico-settings-shell-XXXXXX", cfg[] = "/tmp/pico-settings-shell-cfg-XXXXXX";
@@ -2873,9 +2874,9 @@ static int RunSettingsPanelShellCase(bool with_sidebar)
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     RichText_SetMeasureFunction(ShellMeasureText, NULL);
     host->chat_follow_bottom = true;
-    PicoSettingsUi_Open(host);
+    if (changes) PicoDiffUi_Open(host); else PicoSettingsUi_Open(host);
     for (int stage = 0; stage < 3; stage++) {
-        if (stage == 2) PicoSettingsUi_Close(host);
+        if (stage == 2) { if (changes) PicoDiffUi_Close(host); else PicoSettingsUi_Close(host); }
         ChatStabilitySnapshot expected = {0};
         Clay_BoundingBox expected_panel = {0}, expected_scroll = {0}, expected_strip = {0};
         const Clay_ElementId controls[] = {CLAY_ID("SettingsCancel"), CLAY_ID("SettingsVersion"), CLAY_ID("SettingsApply")};
@@ -2890,15 +2891,15 @@ static int RunSettingsPanelShellCase(bool with_sidebar)
             PicoChat_HarvestVirtualHeights(host);
             ChatStabilitySnapshot current;
             if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
-            Clay_ElementData panel = Clay_GetElementData(CLAY_ID("SettingsPane"));
-            Clay_ElementData content = Clay_GetElementData(CLAY_ID("SettingsPanelScroll"));
+            Clay_ElementData panel = Clay_GetElementData(Clay_GetElementId(changes ? CLAY_STRING("ChangesPane") : CLAY_STRING("SettingsPane")));
+            Clay_ElementData content = Clay_GetElementData(Clay_GetElementId(changes ? CLAY_STRING("DiffScroll") : CLAY_STRING("SettingsPanelScroll")));
             Clay_BoundingBox strip = Clay_GetElementData(CLAY_ID("ShellStrip")).boundingBox;
             if (panel.found != (stage < 2) || Clay_GetElementData(CLAY_ID("BrowserPane")).found != (stage == 2)) goto done;
             if (panel.found && (!content.found || panel.boundingBox.x < current.main.x + current.main.width ||
                 panel.boundingBox.x + panel.boundingBox.width > strip.x || current.main.width <= 0 ||
                 !ShellVerticallyContains(current.right, panel.boundingBox) ||
                 !ShellVerticallyContains(panel.boundingBox, content.boundingBox))) goto done;
-            if (panel.found) {
+            if (panel.found && !changes) {
                 Clay_BoundingBox boxes[3];
                 for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
                     Clay_ElementData control = Clay_GetElementData(controls[i]);
@@ -2948,13 +2949,19 @@ done:
     if (host) pico_host_free(host);
     free(memory);
     unsetenv("XDG_CONFIG_HOME"); RmRf(cfg); RmRf(dir);
-    if (!good) Fail("settings panel must preserve repeated bottom-follow shell bounds, including narrow layouts and browser restoration");
+    if (!good) Fail("docked panel must preserve repeated bottom-follow shell bounds, including narrow layouts and browser restoration");
     return !good;
+}
+
+static int RunSettingsPanelShellCase(bool with_sidebar)
+{
+    return RunDockPanelShellCase(with_sidebar, false);
 }
 
 static int TestBottomFollowShellGeometryStable(void)
 {
-    if (RunSettingsPanelShellCase(false) || RunSettingsPanelShellCase(true)) return 1;
+    if (RunSettingsPanelShellCase(false) || RunSettingsPanelShellCase(true) ||
+        RunDockPanelShellCase(false, true) || RunDockPanelShellCase(true, true)) return 1;
     if (RunShellStabilityCase(false, false, 1714) != 0)
     {
         return 1;
@@ -18699,6 +18706,7 @@ static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char
 
 #include "subagent_settings_test.c"
 #include "settings_panel_test.c"
+#include "diff_panel_test.c"
 
 typedef enum PreferenceAction
 {
@@ -20853,6 +20861,9 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestSessionScrollBookmarks())) return 1;
 #endif
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--diff-panel") == 0)
+        return PICO_TEST_RUN(TestDiffPanelInteraction()) || PICO_TEST_RUN(TestDiffPanelContext()) || PICO_TEST_RUN(TestDiffFileBands()) || PICO_TEST_RUN(RunDockPanelShellCase(false, true)) ||
+               PICO_TEST_RUN(RunDockPanelShellCase(true, true));
     if (argc == 2 && strcmp(argv[1], "--settings-panel") == 0)
         return PICO_TEST_RUN(TestSettingsPanelInteraction()) || PICO_TEST_RUN(TestSettingsPanelResize()) ||
                PICO_TEST_RUN(TestSettingsPanelBrowserSwitch()) || PICO_TEST_RUN(RunSettingsPanelShellCase(false)) ||
@@ -20947,6 +20958,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE))) return 1;
+    if (PICO_TEST_RUN(TestDiffPanelInteraction()) || PICO_TEST_RUN(TestDiffPanelContext()) || PICO_TEST_RUN(TestDiffFileBands())) return 1;
     if (PICO_TEST_RUN(TestShellStripSettings()) || PICO_TEST_RUN(TestSettingsPanelInteraction()) ||
         PICO_TEST_RUN(TestSettingsPanelResize()) || PICO_TEST_RUN(TestSettingsPanelBrowserSwitch())) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;

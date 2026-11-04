@@ -1,10 +1,11 @@
 #ifndef PICO_DIFF_VIRTUAL_H
 #define PICO_DIFF_VIRTUAL_H
 
-/* Fixed-stride windowing for the diff modal: every row has the same height
- * (single-line text, no wrap), so the visible window is pure arithmetic.
- * The modal mounts only [first, end) plus fixed-height spacers, keeping Clay
- * element count proportional to the viewport instead of the diff size. */
+/* Fixed-stride windowing in diff source-row units. A padded file header can
+ * occupy multiple units; the caller maps the unit window back to whole rows
+ * and adjusts spacers to those row boundaries. Mounting only the visible window
+ * plus fixed-height spacers keeps Clay element count proportional to the
+ * viewport instead of the diff size. */
 
 /* Computes the visible row window and the spacer heights that keep total
  * content height pixel-identical to a fully mounted list.

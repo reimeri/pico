@@ -1,4 +1,5 @@
 #include "settings_ui.h"
+#include "diff_ui.h"
 #include "pico/plugin.h"
 #include "host_internal.h"
 #include "render_scale.h"
@@ -382,7 +383,7 @@ void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt)
             pico_host_request_redraw(app);
         }
     }
-    if (PicoSettingsUi_BlocksKeyboard(app) || pico_ui_modal_claimed(app) || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
+    if (PicoSettingsUi_BlocksKeyboard(app) || PicoDiffUi_BlocksKeyboard(app) || pico_ui_modal_claimed(app) || PicoFooter_MenuOpen() || !IsKeyPressed(KEY_ESCAPE))
     {
         return;
     }

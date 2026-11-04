@@ -27,6 +27,7 @@ typedef struct DiffRow {
      * (context + added lines) for ROW_CTX/ROW_ADD, the pre-image (context +
      * deleted lines) for ROW_DEL. -1 for non-source rows. */
     int img_off;
+    int old_line, new_line; /* zero when absent */
 } DiffRow;
 
 /* Opaque highlight span (defined by highlight.h). */
@@ -39,6 +40,8 @@ typedef struct DiffFile {
     DiffRow *rows;     /* malloc'd */
     int row_count;
     int row_cap;
+    int adds, dels;
+    bool patch_complete; /* internal capture completeness for optional context */
     /* Lazily built syntax spans over the pre/post image (see DiffRow). */
     bool hl_built;
     struct PicoHlSpan *old_spans; /* malloc'd */

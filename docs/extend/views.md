@@ -230,3 +230,26 @@ main slot occupies the entire width to the right of the sidebar. Browser view
 callbacks remain declarative, and core retains retired browser render resources
 until pending Clay commands are discarded or consumed. See [browser](browser.md)
 for control ownership, per-session state, and current limitations.
+
+## Builtin Changes panel
+
+The sidebar Changes control and footer diff chip open the same non-modal,
+resizable shell panel. `PicoDiff_IsOpen(host)` reports visibility for the selected
+workspace; it does **not** imply a modal claim. The builtin no longer registers a
+diff overlay or claims the `"diff"` modal name. Extensions must use the modal APIs,
+not this visibility helper, when deciding whether a modal blocks their UI.
+
+Review state (file collapse/context expansion and scroll anchor) belongs to the
+workspace and survives panel switching for its lifetime. The panel compares the
+current workspace to HEAD (the empty tree on an unborn branch), combining staged
+and unstaged edits and including untracked files; it does not attribute changes
+to an agent or session. Context capture is bounded separately from changed hunks,
+and unavailable context or incomplete changes are explicitly identified. The review
+shows three unchanged lines adjacent to each changed block by default. Each
+collapsed gap expands independently on click; there is no whole-file context toggle.
+File-picker rows show basename, directory, and right-aligned addition/deletion
+totals using the same green/red theme colors as the footer.
+
+Changes, Settings, and Browser use the shell's existing dock rather than a new
+extension slot. The Changes integration functions in `diff_ui.h` are private;
+there is no new public panel registration API.

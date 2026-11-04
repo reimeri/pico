@@ -8,6 +8,9 @@
 #include "hl_colors.h"
 #include "scrollbar.h"
 #include "host_internal.h"
+#include "diff_ui.h"
+#include "settings_ui.h"
+#include <math.h>
 
 #include "clay/clay.h"
 
@@ -37,7 +40,7 @@ typedef struct DiffWorkerCtx
     char workspace[4096];
     bool thread_started;
     bool thread_stop;
-    bool active; /* selected workspace or open modal, published by main thread */
+    bool active; /* selected workspace or open panel, published by main thread */
     bool refresh_requested;
     pthread_t thread;
     /* Worker-thread-only capture dedup: signature of the last published
@@ -46,12 +49,38 @@ typedef struct DiffWorkerCtx
     bool has_sig;
 } DiffWorkerCtx;
 
+typedef struct ReviewFile {
+    char *path;
+    bool collapsed;
+    int *expanded_gaps; /* old-image start lines remain stable across working-tree edits */
+    int gap_count;
+    char adds[24], dels[24];
+} ReviewFile;
+typedef struct ReviewRow {
+    int file, row, hidden, gap_line;
+    int offset_units; /* file headers occupy two source-row strides */
+    char gutter[32];
+    char caption[128];
+} ReviewRow;
+
 typedef struct DiffState
 {
     PicoWorkspace *workspace;
     DiffWorkerCtx *worker;
     DiffModel *model; /* main thread only */
     bool open;
+    bool files_menu;
+    bool review_failed;
+    bool focused, was_visible, resizing, pointer_claimed;
+    int mounted_first, mounted_end;
+    float width, resize_x, resize_width;
+    ReviewFile *files;
+    int file_count;
+    ReviewRow *rows;
+    int row_count, total_units;
+    float scroll_y, scroll_x;
+    bool restore_scroll;
+    char summary[128];
     PicoScrollbar scrollbar;
     bool overflow;
     char chip_adds[32];
@@ -218,6 +247,165 @@ static void StopThread(DiffState *s)
     DiffWorkerCtx_Release(w);
 }
 
+static float ReviewStride(void) { return Pico_FontPx(PICO_FONT_UI) + 4.0f; }
+
+static float ReviewOffset(const DiffState *s, int row)
+{
+    if (row < 0) return 0;
+    return (row < s->row_count ? s->rows[row].offset_units : s->total_units) * ReviewStride();
+}
+
+/* Locate the row containing an offset, including the lower half of a header. */
+static int ReviewAt(const DiffState *s, float offset)
+{
+    int low = 0, high = s->row_count;
+    while (low < high) {
+        int mid = low + (high - low) / 2;
+        if (ReviewOffset(s, mid) <= offset) low = mid + 1;
+        else high = mid;
+    }
+    return s->row_count ? (low > 0 ? low - 1 : 0) : -1;
+}
+
+static void FreeReviewFiles(DiffState *s)
+{
+    for (int i = 0; i < s->file_count; i++) { free(s->files[i].path); free(s->files[i].expanded_gaps); }
+    free(s->files); s->files = NULL; s->file_count = 0;
+}
+
+static bool GapExpanded(const ReviewFile *file, int old_line)
+{
+    for (int i = 0; i < file->gap_count; i++) if (file->expanded_gaps[i] == old_line) return true;
+    return false;
+}
+
+static void AppendReviewRow(DiffState *s, int fi, int ri, int hidden, int gap_line, bool emit)
+{
+    int index = s->row_count++;
+    int offset = s->total_units;
+    DiffRow *r = &s->model->files[fi].rows[ri];
+    s->total_units += r->kind == ROW_HEADER ? 2 : 1;
+    if (!emit) return;
+    ReviewRow *v = &s->rows[index];
+    *v = (ReviewRow){.file=fi, .row=ri, .hidden=hidden, .gap_line=gap_line, .offset_units=offset};
+    if (hidden) snprintf(v->caption, sizeof(v->caption), "… %d unchanged lines · expand context", hidden);
+    else if (r->kind == ROW_HEADER) snprintf(v->caption, sizeof(v->caption), "%s", s->files[fi].collapsed ? "▸" : "▾");
+    else {
+        char old[12] = "", new[12] = "";
+        if (r->old_line) snprintf(old, sizeof(old), "%d", r->old_line);
+        if (r->new_line) snprintf(new, sizeof(new), "%d", r->new_line);
+        snprintf(v->gutter, sizeof(v->gutter), "%5s %5s", old, new);
+    }
+}
+
+static void BuildReviewPass(DiffState *s, bool emit)
+{
+    s->row_count = 0; s->total_units = 0;
+    for (int fi = 0; fi < s->file_count; fi++) {
+        DiffFile *f = &s->model->files[fi];
+        snprintf(s->files[fi].adds, sizeof(s->files[fi].adds), "+%d", f->adds);
+        snprintf(s->files[fi].dels, sizeof(s->files[fi].dels), "−%d", f->dels);
+        for (int ri = 0; ri < f->row_count;) {
+            if (s->files[fi].collapsed && ri) break;
+            if (f->rows[ri].kind != ROW_CTX) {
+                AppendReviewRow(s, fi, ri++, 0, 0, emit); continue;
+            }
+            int start = ri, end = ri;
+            while (end < f->row_count && f->rows[end].kind == ROW_CTX) end++;
+            int gap_line = f->rows[start].old_line;
+            bool before_change = start > 0 && (f->rows[start-1].kind == ROW_ADD || f->rows[start-1].kind == ROW_DEL);
+            bool after_change = end < f->row_count && (f->rows[end].kind == ROW_ADD || f->rows[end].kind == ROW_DEL);
+            int prefix = before_change ? 3 : 0, suffix = after_change ? 3 : 0;
+            if (GapExpanded(&s->files[fi], gap_line) || end - start <= prefix + suffix) {
+                while (ri < end) AppendReviewRow(s, fi, ri++, 0, 0, emit);
+                continue;
+            }
+            for (int n = 0; n < prefix; n++) AppendReviewRow(s, fi, ri++, 0, 0, emit);
+            int hidden = end - ri - suffix;
+            AppendReviewRow(s, fi, ri, hidden, gap_line, emit);
+            ri += hidden;
+            while (ri < end) AppendReviewRow(s, fi, ri++, 0, 0, emit);
+        }
+    }
+}
+
+static void BuildReview(DiffState *s)
+{
+    /* Count the visible document first: collapsed context must not allocate
+     * a ReviewRow for every unchanged source line. */
+    BuildReviewPass(s, false);
+    ReviewRow *rows = s->row_count ? calloc((size_t)s->row_count, sizeof(*rows)) : NULL;
+    s->review_failed = s->row_count && !rows;
+    free(s->rows); s->rows = rows;
+    if (s->review_failed) { s->row_count = 0; s->total_units = 0; return; }
+    BuildReviewPass(s, true);
+}
+
+static void AdoptReview(DiffState *s, DiffModel *fresh)
+{
+    /* Anchor by file and source text, not the old absolute scroll offset.
+     * If that source disappears, choose the closest surviving source line. */
+    Clay_ScrollContainerData scroll = Clay_GetCurrentContext() ?
+        Clay_GetScrollContainerData(CLAY_ID("DiffScroll")) : (Clay_ScrollContainerData){0};
+    if (s->workspace && PicoHost_SelectedWorkspace(s->workspace->host) == s->workspace &&
+        !s->restore_scroll && PicoDiff_IsOpen(s->workspace->host) && scroll.found && scroll.scrollPosition) {
+        s->scroll_y = scroll.scrollPosition->y; s->scroll_x = scroll.scrollPosition->x;
+    }
+    int anchor = ReviewAt(s, -s->scroll_y);
+    ReviewRow *v = anchor >= 0 && anchor < s->row_count ? &s->rows[anchor] : NULL;
+    DiffRow *old = v ? &s->model->files[v->file].rows[v->row] : NULL;
+    const char *path = v ? s->files[v->file].path : NULL;
+    ReviewFile *files = fresh->file_count ? calloc((size_t)fresh->file_count, sizeof(*files)) : NULL;
+    if (fresh->file_count && !files) { PicoDiffModel_Free(fresh); return; }
+    for (int i = 0; i < fresh->file_count; i++) {
+        files[i].path = strndup(fresh->files[i].label, (size_t)fresh->files[i].label_len);
+        if (!files[i].path) {
+            for (int j = 0; j < i; j++) { free(files[j].path); free(files[j].expanded_gaps); }
+            free(files); PicoDiffModel_Free(fresh); return;
+        }
+        for (int j = 0; j < s->file_count; j++) if (!strcmp(files[i].path, s->files[j].path)) {
+            files[i].collapsed = s->files[j].collapsed;
+            if (s->files[j].gap_count) {
+                files[i].expanded_gaps = malloc((size_t)s->files[j].gap_count * sizeof(int));
+                if (files[i].expanded_gaps) {
+                    files[i].gap_count = s->files[j].gap_count;
+                    memcpy(files[i].expanded_gaps, s->files[j].expanded_gaps, (size_t)files[i].gap_count * sizeof(int));
+                }
+            }
+            break;
+        }
+    }
+    int target_file = -1, target_row = 0, best = 2147483647;
+    if (path) for (int i = 0; i < fresh->file_count; i++) if (!strcmp(path, files[i].path)) {
+        target_file = i;
+        for (int j = 0; j < fresh->files[i].row_count; j++) {
+            DiffRow *r = &fresh->files[i].rows[j];
+            if (r->kind == old->kind && r->len == old->len && !memcmp(r->text, old->text, (size_t)r->len)) {
+                int distance = abs(r->new_line - old->new_line) + abs(r->old_line - old->old_line);
+                if (distance < best) { target_row = j; best = distance; }
+            }
+        }
+        if (best == 2147483647) for (int j = 0; j < fresh->files[i].row_count; j++) {
+            DiffRow *r = &fresh->files[i].rows[j];
+            int distance = abs(r->new_line - old->new_line) + abs(r->old_line - old->old_line);
+            if (distance < best) { target_row = j; best = distance; }
+        }
+        break;
+    }
+    float residue = s->scroll_y + ReviewOffset(s, anchor);
+    FreeReviewFiles(s); s->files = files; s->file_count = fresh->file_count;
+    PicoDiffModel_Free(s->model); s->model = fresh;
+    BuildReview(s);
+    if (target_file >= 0) for (int i = 0; i < s->row_count; i++) {
+        ReviewRow *r = &s->rows[i];
+        if (r->file == target_file && (r->row == target_row ||
+            (r->hidden && target_row >= r->row && target_row < r->row + r->hidden))) {
+            s->scroll_y = -ReviewOffset(s, i) + residue; break;
+        }
+    }
+    s->restore_scroll = true;
+}
+
 static void AdoptPending(DiffState *s)
 {
     if (!s || !s->worker)
@@ -244,8 +432,13 @@ static void AdoptPending(DiffState *s)
     }
     if (fresh)
     {
-        PicoDiffModel_Free(s->model);
-        s->model = fresh;
+        AdoptReview(s, fresh);
+        if (s->workspace) {
+            s->workspace->host->ui_relayout_requested = true;
+            pico_host_request_redraw(s->workspace->host);
+        }
+        fresh = s->model;
+        if (!fresh) return;
 
         int max_len = 0;
         for (int fi = 0; fi < fresh->file_count; fi++)
@@ -269,10 +462,6 @@ static void AdoptPending(DiffState *s)
     }
 }
 
-/* Rows are single-line WRAP_NONE text: height is exactly the font px plus
- * the row's 1+1 vertical padding (raylib measures single-line height as the
- * font size). childGap between rows in DiffScroll. */
-#define DIFF_ROW_GAP 2
 /* Extra rows mounted above/below the viewport to cover the one-frame lag of
  * scroll container data and fast scrolls. */
 #define DIFF_ROW_OVERSCAN 8
@@ -348,52 +537,138 @@ void PicoDiff_RenderChip(PicoHost *app)
 }
 
 /* ------------------------------------------------------------------ */
-/* Modal                                                               */
+/* Docked panel                                                        */
 /* ------------------------------------------------------------------ */
 
 bool PicoDiff_IsOpen(const PicoHost *app)
 {
     const PicoWorkspace *ws = PicoHost_SelectedWorkspaceConst(app);
     DiffState *s = (DiffState *)PicoPlugins_WorkspaceState(ws, "diff");
-    return s ? s->open : false;
+    return s && s->open && !PicoSettingsUi_IsOpen(app);
 }
 
-static bool CloseModal(DiffState *s)
+static bool ClosePanel(DiffState *s)
 {
-    if (!s || !s->open)
-    {
-        return true;
+    if (!s) return true;
+    Clay_ScrollContainerData scroll = Clay_GetCurrentContext() ?
+        Clay_GetScrollContainerData(CLAY_ID("DiffScroll")) : (Clay_ScrollContainerData){0};
+    if (s->workspace && PicoHost_SelectedWorkspace(s->workspace->host) == s->workspace &&
+        !s->restore_scroll && PicoDiff_IsOpen(s->workspace->host) && scroll.found && scroll.scrollPosition) {
+        s->scroll_y = scroll.scrollPosition->y; s->scroll_x = scroll.scrollPosition->x;
     }
-    PicoHost *host = s->workspace ? s->workspace->host : NULL;
-    if (host && !pico_ui_modal_pop(host, "diff"))
-    {
-        return false;
-    }
-    s->open = false;
-    if (s->worker)
-    {
-        pthread_mutex_lock(&s->worker->lock);
-        s->worker->active = host && PicoHost_SelectedWorkspace(host) == s->workspace;
-        pthread_mutex_unlock(&s->worker->lock);
-    }
-    memset(&s->scrollbar, 0, sizeof(s->scrollbar));
+    s->open = false; s->focused = false;
+    if (s->resizing && s->workspace) s->workspace->host->ui_drag_active = false;
+    s->resizing = false;
+    if (s->workspace) s->workspace->host->ui_relayout_requested = true;
     return true;
 }
 
-static void OpenModal(DiffState *s, PicoHost *app)
+void PicoDiffUi_Close(PicoHost *host)
 {
-    if (s && !s->open && pico_ui_modal_push(app, "diff"))
-    {
-        s->open = true;
-        if (s->worker)
-        {
-            pthread_mutex_lock(&s->worker->lock);
-            s->worker->active = true;
-            s->worker->refresh_requested = true;
-            pthread_cond_signal(&s->worker->wake);
-            pthread_mutex_unlock(&s->worker->lock);
-        }
+    ClosePanel(PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspace(host), "diff"));
+}
+
+void PicoDiffUi_Open(PicoHost *host)
+{
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspace(host), "diff");
+    if (!s) return;
+    if (!PicoSettingsUi_CloseForChanges(host)) return;
+    s->open = true; s->focused = true; s->restore_scroll = true;
+    host->ui_relayout_requested = true;
+    pico_host_request_redraw(host);
+    if (s->worker) {
+        pthread_mutex_lock(&s->worker->lock);
+        s->worker->active = true; s->worker->refresh_requested = true;
+        pthread_cond_signal(&s->worker->wake);
+        pthread_mutex_unlock(&s->worker->lock);
     }
+}
+
+float PicoDiffUi_ShellWidth(const PicoHost *host)
+{
+    if (!PicoDiff_IsOpen(host)) return 0;
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspaceConst(host), "diff");
+    return fmaxf(0, fminf(PicoHost_RightColumnWidth(host) * 0.65f,
+                         fmaxf(300, s->width > 0 ? s->width : 700)));
+}
+
+static bool ReviewPointerIn(const char *id)
+{
+    Clay_ElementData e = Clay_GetElementData(Clay_GetElementId(CStr(id)));
+    return e.found && CheckCollisionPointRec(GetMousePosition(),
+        (Rectangle){e.boundingBox.x, e.boundingBox.y, e.boundingBox.width, e.boundingBox.height});
+}
+
+bool PicoDiffUi_BlocksKeyboard(const PicoHost *host)
+{
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspaceConst(host), "diff");
+    return s && ((PicoDiff_IsOpen(host) && s->focused) || s->pointer_claimed);
+}
+
+bool PicoDiffUi_BlocksPointer(const PicoHost *host)
+{
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspaceConst(host), "diff");
+    return s && s->pointer_claimed;
+}
+
+bool PicoDiffUi_ResizeHovered(const PicoHost *host)
+{
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspaceConst(host), "diff");
+    return s && PicoDiff_IsOpen(host) && host->window_focused && !host->window_minimized &&
+        !PicoUi_ModalOpen(host) && (s->resizing || (!host->ui_drag_active && ReviewPointerIn("DiffResizeHandle")));
+}
+
+bool PicoDiffUi_ScrollHovered(PicoHost *host, Clay_Vector2 wheel)
+{
+    if (!PicoDiff_IsOpen(host) || PicoUi_ModalOpen(host)) return false;
+    Clay_ElementId id;
+    if (Clay_PointerOver(CLAY_ID("DiffFiles"))) id = CLAY_ID("DiffFiles");
+    else if (Clay_PointerOver(CLAY_ID("DiffScroll"))) id = CLAY_ID("DiffScroll");
+    else return false;
+    /* Filename clipping creates nested horizontal containers. Route the wheel
+     * to the owning list/document rather than letting those labels consume it. */
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(id);
+    if (data.found && data.scrollPosition) {
+        data.scrollPosition->y = fmaxf(-fmaxf(0, data.contentDimensions.height - data.scrollContainerDimensions.height),
+                                      fminf(0, data.scrollPosition->y + wheel.y * 10));
+        if (data.config.horizontal)
+            data.scrollPosition->x = fmaxf(-fmaxf(0, data.contentDimensions.width - data.scrollContainerDimensions.width),
+                                          fminf(0, data.scrollPosition->x + wheel.x * 10));
+        if (wheel.x || wheel.y) pico_host_request_redraw(host);
+    }
+    return true;
+}
+
+void PicoDiffUi_Input(PicoHost *host)
+{
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspace(host), "diff");
+    if (!s) return;
+    bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || click) s->pointer_claimed = false;
+    if (!PicoDiff_IsOpen(host) || !host->window_focused || host->window_minimized || PicoUi_ModalOpen(host)) {
+        if (s->resizing) { s->resizing = false; host->ui_drag_active = false; }
+        return;
+    }
+    if (s->resizing || (click && PicoDiffUi_ResizeHovered(host))) {
+        if (!s->resizing) {
+            s->resizing = true; s->resize_x = GetMousePosition().x;
+            s->resize_width = PicoDiffUi_ShellWidth(host); host->ui_drag_active = true;
+        }
+        s->focused = s->pointer_claimed = true;
+        if (!IsKeyPressed(KEY_ESCAPE)) s->width = fminf(PicoHost_RightColumnWidth(host) * 0.65f,
+            fmaxf(300, s->resize_width + s->resize_x - GetMousePosition().x));
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ESCAPE)) {
+            s->resizing = false; host->ui_drag_active = false;
+        }
+        host->ui_relayout_requested = true; pico_host_request_redraw(host);
+        return;
+    }
+    if (click) {
+        s->focused = ReviewPointerIn("ChangesPane") || ReviewPointerIn("DiffFilesMenu");
+        if (!s->focused) s->files_menu = false;
+    }
+    /* Read-only review owns typing while focused, never the chat draft. */
+    if (s->focused) while (GetCharPressed()) {}
 }
 
 static Clay_Color RowBg(DiffRowKind kind)
@@ -512,284 +787,268 @@ static void RenderRowText(const DiffRow *row, const PicoHlSpan *spans, int span_
     }
 }
 
-static void RenderRow(int index, const DiffFile *f, const DiffRow *row, float min_width)
+static void ReviewText(Clay_String text, Clay_Color color)
 {
-    const char *sign = " ";
-    if (row->kind == ROW_ADD)
-    {
-        sign = "+";
+    CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId=FONT_MONO, .fontSize=PICO_FONT_UI,
+                                    .textColor=color, .wrapMode=CLAY_TEXT_WRAP_NONE}));
+}
+
+static void ReviewLabel(Clay_String text, Clay_Color color)
+{
+    CLAY_TEXT(text, CLAY_TEXT_CONFIG({.fontId=FONT_REGULAR, .fontSize=PICO_FONT_UI,
+                                    .textColor=color, .wrapMode=CLAY_TEXT_WRAP_NONE}));
+}
+
+static void ReviewButton(const char *id, const char *text)
+{
+    CLAY(Clay_GetElementId(CStr(id)), {.layout={.padding={6,6,3,3}},
+         .backgroundColor=COLOR_CODE_BG, .cornerRadius=CLAY_CORNER_RADIUS(4)}) {
+        ReviewLabel(CStr(text), COLOR_TEXT);
     }
-    else if (row->kind == ROW_DEL)
-    {
-        sign = "-";
+}
+
+static void RenderFileIdentity(DiffState *s, int index, bool header)
+{
+    ReviewFile *file = &s->files[index];
+    const char *slash = strrchr(file->path, '/');
+    const char *name = slash ? slash + 1 : file->path;
+    CLAY_AUTO_ID({.layout={.childGap=8, .sizing={.width=CLAY_SIZING_GROW(0)}},
+                  .clip={.horizontal=true}}) {
+        CLAY_TEXT(CStr(name), CLAY_TEXT_CONFIG({.fontId=header ? FONT_BOLD : FONT_REGULAR,
+            .fontSize=PICO_FONT_UI, .textColor=COLOR_TEXT, .wrapMode=CLAY_TEXT_WRAP_NONE}));
+        if (slash) ReviewLabel(Slice(file->path, (int)(slash - file->path)), COLOR_MUTED);
     }
-    /* min_width keeps the horizontal scroll extent anchored to the widest row
-     * in the model; otherwise it would shrink to the widest mounted row while
-     * virtualized. Monospace advance is an estimate: wide glyphs can exceed
-     * it, which only clips horizontal reach slightly. */
-    CLAY(CLAY_IDI("DiffRow", index),
-         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                     .childGap = 6,
-                     .padding = {8, 8, 1, 1},
-                     .sizing = {.width = CLAY_SIZING_GROW((int)min_width)}},
-          .backgroundColor = RowBg(row->kind)})
-    {
-        if (row->kind == ROW_HEADER)
-        {
-            CLAY_TEXT(Slice(row->text, row->len),
-                      CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                        .fontSize = PICO_FONT_UI,
-                                        .textColor = RowFg(row->kind),
-                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
-        }
-        else
-        {
-            CLAY_TEXT(CStr(sign), CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                    .fontSize = PICO_FONT_UI,
-                                                    .textColor = RowSignFg(row->kind),
-                                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
-            const PicoHlSpan *spans = row->kind == ROW_DEL ? f->old_spans : f->new_spans;
-            int span_count = row->kind == ROW_DEL ? f->old_count : f->new_count;
-            RenderRowText(row, spans, span_count, RowFg(row->kind));
+    ReviewLabel(CStr(file->adds), COLOR_DIFF_ADD);
+    ReviewLabel(CStr(file->dels), COLOR_DIFF_DEL);
+}
+
+static void RenderFiles(DiffState *s, float width)
+{
+    CLAY(CLAY_ID("DiffFiles"), {.layout={.layoutDirection=CLAY_TOP_TO_BOTTOM,
+        .sizing={.width=CLAY_SIZING_FIXED(width), .height=CLAY_SIZING_PERCENT(1)}, .childGap=4},
+        .clip={.vertical=true, .childOffset=Clay_GetScrollOffset()}}) {
+        for (int i = 0; i < s->file_count; i++) {
+            CLAY(CLAY_IDI("DiffFileEntry", i), {.layout={.childGap=4, .padding={4,4,4,4},
+                .sizing={.width=CLAY_SIZING_GROW(0)}}}) {
+                CLAY(CLAY_IDI("DiffFileCollapse", i), {.layout={.padding={2,2,0,0}}}) {
+                    ReviewText(s->files[i].collapsed ? CLAY_STRING("▸") : CLAY_STRING("▾"), COLOR_MUTED);
+                }
+                CLAY(CLAY_IDI("DiffFile", i), {.layout={.childGap=4,
+                    .sizing={.width=CLAY_SIZING_GROW(0)}}}) { RenderFileIdentity(s, i, false); }
+            }
         }
     }
 }
 
-static void DiffModalRender(PicoWorkspace *workspace, PicoAgentId selected_agent_id, void *state)
+void PicoDiffUi_Layout(PicoHost *host)
 {
-    (void)selected_agent_id;
-    DiffState *s = (DiffState *)state;
-    if (!s)
-    {
-        s = (DiffState *)PicoPlugins_WorkspaceState(workspace, "diff");
-    }
-    if (!s || !s->open)
-    {
-        return;
-    }
-    float sw = (float)GetScreenWidth();
-    float sh = (float)GetScreenHeight();
-    float card_w = sw - 96.0f;
-    if (card_w < 420.0f)
-    {
-        card_w = sw - 32.0f;
-    }
-    if (card_w > 980.0f)
-    {
-        card_w = 980.0f;
-    }
-    float card_h = sh * 0.8f;
-    if (card_h < 280.0f)
-    {
-        card_h = 280.0f;
-    }
-
-    if (HasChanges(s))
-    {
-        snprintf(s->chip_adds, sizeof(s->chip_adds), "+%d", s->model->adds);
-        snprintf(s->chip_dels, sizeof(s->chip_dels), "-%d", s->model->dels);
-    }
-
-    CLAY(CLAY_ID("DiffModalDim"),
-         {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
-                       .zIndex = 40,
-                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP,
-                                        .parent = CLAY_ATTACH_POINT_LEFT_TOP}},
-          .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                     .sizing = {.width = CLAY_SIZING_FIXED(sw), .height = CLAY_SIZING_FIXED(sh)}},
-          .backgroundColor = {0, 0, 0, 140}})
-    {
-        CLAY(CLAY_ID("DiffModalCard"),
-             {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .padding = {20, 20, 16, 16},
-                         .childGap = 12,
-                         .sizing = {.width = CLAY_SIZING_FIXED(card_w),
-                                    .height = CLAY_SIZING_FIXED(card_h)}},
-              .backgroundColor = COLOR_CONTENT_BG,
-              .cornerRadius = CLAY_CORNER_RADIUS(8)})
-        {
-            CLAY(CLAY_ID("DiffModalTitle"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = 6,
-                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .sizing = {.width = CLAY_SIZING_FIT(0),
-                                        .height = CLAY_SIZING_FIT(0)}}})
-            {
-                CLAY_TEXT(CLAY_STRING("Changes"),
-                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                            .fontSize = PICO_FONT_TITLE,
-                                            .textColor = COLOR_TEXT,
-                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                if (s->model && s->model->partial)
-                {
-                    CLAY_TEXT(CLAY_STRING(" (partial; capture limit reached)"),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = PICO_FONT_CAPTION,
-                                                .textColor = COLOR_MUTED,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
-                if (HasChanges(s))
-                {
-                    CLAY_TEXT(CLAY_STRING("·"),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                .fontSize = PICO_FONT_TITLE,
-                                                .textColor = COLOR_TEXT,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                    CLAY_TEXT(CStr(s->chip_adds),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                .fontSize = PICO_FONT_TITLE,
-                                                .textColor = COLOR_DIFF_ADD_TEXT,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                    CLAY_TEXT(CStr(s->chip_dels),
-                              CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                .fontSize = PICO_FONT_TITLE,
-                                                .textColor = COLOR_DIFF_DEL_TEXT,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspace(host), "diff");
+    if (!s || !PicoDiff_IsOpen(host)) return;
+    float width = PicoDiffUi_ShellWidth(host);
+    bool wide = width >= 700;
+    snprintf(s->summary, sizeof(s->summary), "%d files  +%d −%d%s", s->file_count,
+             s->model ? s->model->adds : 0, s->model ? s->model->dels : 0,
+             s->model && s->model->partial ? " · partial capture" : "");
+    CLAY(CLAY_ID("ChangesPane"), {.layout={.layoutDirection=CLAY_TOP_TO_BOTTOM,
+        .padding={10,10,10,10}, .childGap=8,
+        .sizing={.width=CLAY_SIZING_FIXED(width), .height=CLAY_SIZING_PERCENT(1)}},
+        .backgroundColor=COLOR_CONTENT_BG, .cornerRadius=CLAY_CORNER_RADIUS(6)}) {
+        CLAY(CLAY_ID("DiffResizeHandle"), {
+            .floating={.attachTo=CLAY_ATTACH_TO_PARENT, .offset={-4,0}, .zIndex=8},
+            .layout={.sizing={.width=CLAY_SIZING_FIXED(8), .height=CLAY_SIZING_PERCENT(1)}}}) {}
+        CLAY(CLAY_ID("ChangesToolbar"), {.layout={.childGap=6,
+            .sizing={.width=CLAY_SIZING_GROW(0)}}}) {
+            ReviewLabel(CLAY_STRING("Changes"), COLOR_TEXT);
+            CLAY_AUTO_ID({.layout={.sizing={.width=CLAY_SIZING_GROW(0)}}}) {}
+            ReviewButton("DiffPrevious", "↑"); ReviewButton("DiffNext", "↓");
+            ReviewButton("DiffClose", "×");
+        }
+        ReviewLabel(CLAY_STRING("Workspace vs HEAD"), COLOR_MUTED);
+        CLAY(CLAY_ID("DiffSummary"), {.layout={.sizing={.width=CLAY_SIZING_GROW(0),
+            .height=CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI))}}, .clip={.horizontal=true}}) {
+            ReviewLabel(CStr(s->summary), COLOR_MUTED);
+        }
+        CLAY(CLAY_ID("DiffViewControls"), {.layout={.childGap=8}}) {
+            if (!wide) ReviewButton("DiffFilesToggle", "Files ▾");
+        }
+        CLAY(CLAY_ID("ChangesContent"), {.layout={.childGap=8,
+            .sizing={.width=CLAY_SIZING_GROW(0), .height=CLAY_SIZING_GROW(0)}}}) {
+            if (wide) RenderFiles(s, fminf(320, width * 0.42f));
+            else if (s->files_menu) {
+                CLAY(CLAY_ID("DiffFilesMenu"), {
+                    .floating={.attachTo=CLAY_ATTACH_TO_PARENT, .zIndex=12},
+                    .layout={.sizing={.width=CLAY_SIZING_FIXED(fmaxf(0,width-20)), .height=CLAY_SIZING_FIXED(240)}},
+                    .backgroundColor=COLOR_CODE_BG}) { RenderFiles(s, fmaxf(0,width-20)); }
             }
-
-            CLAY(CLAY_ID("DiffScrollRow"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childGap = SCROLLBAR_GAP,
-                             .sizing = {.width = CLAY_SIZING_GROW(0),
-                                        .height = CLAY_SIZING_GROW(0)}}})
-            {
-                CLAY(CLAY_ID("DiffScroll"),
-                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = DIFF_ROW_GAP,
-                                 .sizing = {.width = CLAY_SIZING_GROW(0),
-                                            .height = CLAY_SIZING_GROW(0)}},
-                      .clip = {.vertical = true,
-                               .horizontal = true,
-                               .childOffset = Clay_GetScrollOffset()}})
-                {
-                    if (!s->model || s->model->file_count == 0)
-                    {
-                        CLAY_TEXT(CLAY_STRING("No changes"),
-                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                    .fontSize = PICO_FONT_UI,
-                                                    .textColor = COLOR_MUTED,
-                                                    .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                    }
-                    else
-                    {
-                        /* Mount only the visible window. ow height is exact (single-line text at a
-                         * fixed px size + 2px row padding), and the pads keep
-                         * total content height identical to a mounted list so
-                         * scroll range and scrollbar thumb do not change. */
-                        int total_rows = 0;
-                        for (int fi = 0; fi < s->model->file_count; fi++)
-                        {
-                            total_rows += s->model->files[fi].row_count;
-                        }
-
-                        Clay_ScrollContainerData scroll =
-                            Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("DiffScroll")));
-                        float viewport_h =
-                            scroll.found ? scroll.scrollContainerDimensions.height : card_h;
-                        float scroll_top =
-                            scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
-
-                        float row_h = Pico_FontPx(PICO_FONT_UI) + 2.0f;
-                        int first, end;
-                        float top_pad, bottom_pad;
-                        PicoDiffWindow_Range(total_rows, scroll_top, viewport_h,
-                                             row_h + (float)DIFF_ROW_GAP, (float)DIFF_ROW_GAP,
-                                             DIFF_ROW_OVERSCAN, &first, &end, &top_pad, &bottom_pad);
-
-                        if (first > 0)
-                        {
-                            CLAY(CLAY_ID("DiffTopPad"),
-                                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
-                                                        .height = CLAY_SIZING_FIXED(top_pad)}}})
-                            {
-                            }
-                        }
-                        int row_index = 0;
-                        for (int fi = 0; fi < s->model->file_count; fi++)
-                        {
-                            DiffFile *f = &s->model->files[fi];
-                            for (int ri = 0; ri < f->row_count; ri++)
-                            {
-                                if (row_index >= first && row_index < end)
-                                {
-                                    RenderRow(row_index, f, &f->rows[ri], s->row_min_width);
-                                }
-                                row_index++;
-                            }
-                        }
-                        if (end < total_rows)
-                        {
-                            CLAY(CLAY_ID("DiffBottomPad"),
-                                 {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
-                                                        .height = CLAY_SIZING_FIXED(bottom_pad)}}})
-                            {
-                            }
-                        }
+            CLAY(CLAY_ID("ChangesDocument"), {.layout={.layoutDirection=CLAY_TOP_TO_BOTTOM,
+                .sizing={.width=CLAY_SIZING_GROW(0), .height=CLAY_SIZING_PERCENT(1)}}}) {
+                Clay_ScrollContainerData scroll = Clay_GetCurrentContext() ?
+        Clay_GetScrollContainerData(CLAY_ID("DiffScroll")) : (Clay_ScrollContainerData){0};
+                float top = scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : -s->scroll_y;
+                int current = ReviewAt(s, top);
+                if (current < 0) current = 0;
+                if (current >= s->row_count) current = s->row_count - 1;
+                CLAY(CLAY_ID("DiffSticky"), {.layout={.padding={10,10,0,0}, .childGap=6,
+                    .childAlignment={.y=CLAY_ALIGN_Y_CENTER},
+                    .sizing={.width=CLAY_SIZING_GROW(0), .height=CLAY_SIZING_FIXED(2 * ReviewStride())}},
+                    .clip={.horizontal=true}, .backgroundColor=COLOR_CODE_BG,
+                    .border={.color=COLOR_TABLE_BORDER, .width={.top=1, .bottom=1}}}) {
+                    if (current >= 0) {
+                        RenderFileIdentity(s, s->rows[current].file, true);
                     }
                 }
-                if (s->overflow)
-                {
-                    PicoScrollbar_Render(CLAY_STRING("DiffScroll"), CLAY_STRING("DiffScrollTrack"),
-                                         CLAY_STRING("DiffScrollHandle"));
+                CLAY(CLAY_ID("DiffScrollRow"), {.layout={.childGap=SCROLLBAR_GAP,
+                    .sizing={.width=CLAY_SIZING_GROW(0), .height=CLAY_SIZING_GROW(0)}}}) {
+                    CLAY(CLAY_ID("DiffScroll"), {.layout={.layoutDirection=CLAY_TOP_TO_BOTTOM,
+                        .sizing={.width=CLAY_SIZING_GROW(0), .height=CLAY_SIZING_GROW(0)}},
+                        .clip={.vertical=true, .horizontal=true, .childOffset=Clay_GetScrollOffset()}}) {
+                        if (!s->row_count) ReviewText(CStr(!s->model ? "Loading changes…" :
+                            s->review_failed ? "Unable to allocate review rows" :
+                            !s->model->is_repo ? "Not a Git repository" : "No changes"), COLOR_MUTED);
+                        int first, end; float before, after;
+                        PicoDiffWindow_Range(s->total_units, top,
+                            scroll.found ? scroll.scrollContainerDimensions.height : 600,
+                            ReviewStride(), 0, DIFF_ROW_OVERSCAN, &first, &end, &before, &after);
+                        first = s->row_count ? ReviewAt(s, first * ReviewStride()) : 0;
+                        end = end > 0 ? ReviewAt(s, (end - 1) * ReviewStride()) + 1 : 0;
+                        before = ReviewOffset(s, first);
+                        after = ReviewOffset(s, s->row_count) - ReviewOffset(s, end);
+                        s->mounted_first = first; s->mounted_end = end;
+                        if (before > 0) CLAY(CLAY_ID("DiffTopPad"), {.layout={.sizing={.height=CLAY_SIZING_FIXED(before)}}}) {}
+                        for (int i = first; i < end; i++) {
+                            ReviewRow *v = &s->rows[i];
+                            DiffFile *f = &s->model->files[v->file]; DiffRow *r = &f->rows[v->row];
+                            bool header = r->kind == ROW_HEADER;
+                            CLAY(CLAY_IDI("DiffReviewRow", i), {.layout={.childGap=6,
+                                .padding=header ? (Clay_Padding){10,10,0,0} : (Clay_Padding){6,6,2,2},
+                                .childAlignment={.y=CLAY_ALIGN_Y_CENTER},
+                                .sizing={.width=CLAY_SIZING_GROW(r->kind == ROW_HEADER ? 0 : s->row_min_width + 110),
+                                         .height=CLAY_SIZING_FIXED((header ? 2 : 1) * ReviewStride())}},
+                                .backgroundColor=header ? COLOR_CODE_BG : RowBg(r->kind),
+                                .border={.color=COLOR_TABLE_BORDER, .width={.top=header ? 1 : 0}}}) {
+                                if (v->hidden) ReviewText(CStr(v->caption), COLOR_MUTED);
+                                else if (r->kind == ROW_HEADER) {
+                                    ReviewText(CStr(v->caption), COLOR_MUTED);
+                                    RenderFileIdentity(s, v->file, true);
+                                } else if (r->kind == ROW_CTX || r->kind == ROW_ADD || r->kind == ROW_DEL) {
+                                    ReviewText(CStr(v->gutter), COLOR_MUTED);
+                                    ReviewText(r->kind == ROW_ADD ? CLAY_STRING("+") :
+                                               r->kind == ROW_DEL ? CLAY_STRING("−") : CLAY_STRING(" "), RowSignFg(r->kind));
+                                    RenderRowText(r, r->kind == ROW_DEL ? f->old_spans : f->new_spans,
+                                                  r->kind == ROW_DEL ? f->old_count : f->new_count, RowFg(r->kind));
+                                } else ReviewText(Slice(r->text, r->len), COLOR_MUTED);
+                            }
+                        }
+                        if (after > 0) CLAY(CLAY_ID("DiffBottomPad"), {.layout={.sizing={.height=CLAY_SIZING_FIXED(after)}}}) {}
+                    }
+                    if (s->overflow) PicoScrollbar_Render(CLAY_STRING("DiffScroll"), CLAY_STRING("DiffScrollTrack"), CLAY_STRING("DiffScrollHandle"));
                 }
             }
         }
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Input                                                               */
-/* ------------------------------------------------------------------ */
-
-static void DiffHostAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
+static void JumpTo(DiffState *s, int index)
 {
-    (void)state;
-    (void)event;
-    if (!app)
-    {
-        return;
-    }
-    PicoWorkspace *workspace = PicoHost_SelectedWorkspace(app);
-    DiffState *s = (DiffState *)PicoPlugins_WorkspaceState(workspace, "diff");
-    if (!s)
-    {
-        return;
-    }
-    if (s->open)
-    {
-        if (!pico_ui_modal_is_top(app, "diff"))
-        {
-            return;
+    s->scroll_y = -ReviewOffset(s, index); s->restore_scroll = true;
+    s->workspace->host->ui_relayout_requested = true;
+}
+
+bool PicoDiffUi_AfterLayout(PicoHost *host)
+{
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspace(host), "diff");
+    if (!s) return false;
+    Clay_ScrollContainerData scroll = Clay_GetCurrentContext() ?
+        Clay_GetScrollContainerData(CLAY_ID("DiffScroll")) : (Clay_ScrollContainerData){0};
+    bool changed = false;
+    if (PicoDiff_IsOpen(host) && scroll.found && scroll.scrollPosition &&
+        scroll.scrollContainerDimensions.height > 0 && Clay_GetElementData(CLAY_ID("DiffScroll")).found) {
+        if (s->restore_scroll) {
+            float max = fmaxf(0, scroll.contentDimensions.height - scroll.scrollContainerDimensions.height);
+            scroll.scrollPosition->y = fmaxf(-max, fminf(0, s->scroll_y));
+            scroll.scrollPosition->x = s->scroll_x;
+            s->restore_scroll = false; changed = true;
         }
+        s->scroll_y = scroll.scrollPosition->y; s->scroll_x = scroll.scrollPosition->x;
         s->overflow = PicoScrollbar_Overflows(CLAY_STRING("DiffScroll"));
-        app->hovered_clickable = false;
-        if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-        {
-            return;
-        }
-        if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("DiffModalCard"))))
-        {
-            return;
-        }
-        if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("DiffModalDim"))))
-        {
-            CloseModal(s);
-        }
-        return;
     }
+    return changed;
+}
 
-    if (!HasChanges(s) || PicoUi_ModalOpen(app))
-    {
-        return;
+static void DiffHostAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)event; (void)state;
+    DiffState *s = PicoPlugins_WorkspaceState(PicoHost_SelectedWorkspace(host), "diff");
+    if (!s) return;
+    if (PicoUi_ModalOpen(host) || !host->window_focused || host->window_minimized) return;
+    bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (Clay_PointerOver(CLAY_ID("FooterDiff"))) {
+        host->hovered_clickable = true;
+        if (click) PicoDiffUi_Open(host);
     }
-    if (Clay_PointerOver(Clay_GetElementId(CLAY_STRING("FooterDiff"))))
-    {
-        app->hovered_clickable = true;
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-        {
-            OpenModal(s, app);
+    if (!PicoDiff_IsOpen(host) || s->pointer_claimed) return;
+    const char *buttons[] = {"DiffClose", "DiffFilesToggle", "DiffPrevious", "DiffNext", "DiffSticky"};
+    for (int b = 0; b < 5; b++) if (Clay_PointerOver(Clay_GetElementId(CStr(buttons[b])))) {
+        host->hovered_clickable = true;
+        if (!click) continue;
+        if (b == 0) PicoDiffUi_Close(host);
+        else if (b == 1) { s->files_menu = !s->files_menu; host->ui_relayout_requested = true; }
+        else if (b == 4) {
+            int at = ReviewAt(s, -s->scroll_y);
+            if (at >= 0 && at < s->row_count) {
+                int fi = s->rows[at].file;
+                s->files[fi].collapsed = !s->files[fi].collapsed;
+                BuildReview(s);
+                for (int i = 0; i < s->row_count; i++) if (s->rows[i].file == fi) { JumpTo(s, i); break; }
+            }
+        } else {
+            int at = ReviewAt(s, -s->scroll_y);
+            if (at < 0) at = 0;
+            if (at >= s->row_count) at = s->row_count - 1;
+            if (at < 0) continue;
+            int fi = s->rows[at].file, ri = s->rows[at].row;
+            int step = b == 2 ? -1 : 1;
+            bool found = false;
+            while (!found && fi >= 0 && fi < s->file_count) {
+                DiffFile *f = &s->model->files[fi];
+                for (ri += step; ri >= 0 && ri < f->row_count; ri += step) {
+                    DiffRowKind kind = f->rows[ri].kind;
+                    DiffRowKind prev = ri ? f->rows[ri-1].kind : ROW_HEADER;
+                    if ((kind == ROW_ADD || kind == ROW_DEL) && prev != ROW_ADD && prev != ROW_DEL) { found = true; break; }
+                }
+                if (!found) { fi += step; if (fi >= 0 && fi < s->file_count) ri = step > 0 ? -1 : s->model->files[fi].row_count; }
+            }
+            if (found) {
+                s->files[fi].collapsed = false; BuildReview(s);
+                for (int i = 0; i < s->row_count; i++) if (s->rows[i].file == fi && s->rows[i].row == ri) { JumpTo(s, i); break; }
+            }
+        }
+    }
+    for (int fi = 0; fi < s->file_count; fi++) if (Clay_PointerOver(CLAY_IDI("DiffFileCollapse", fi))) {
+        host->hovered_clickable = true;
+        if (click) { s->files[fi].collapsed = !s->files[fi].collapsed; BuildReview(s); host->ui_relayout_requested = true; return; }
+    }
+    for (int fi = 0; fi < s->file_count; fi++) if (Clay_PointerOver(CLAY_IDI("DiffFile", fi))) {
+        host->hovered_clickable = true;
+        if (click) {
+            s->files[fi].collapsed = false; s->files_menu = false; BuildReview(s);
+            for (int i = 0; i < s->row_count; i++) if (s->rows[i].file == fi) { JumpTo(s, i); break; }
+            return;
+        }
+    }
+    for (int i = s->mounted_first; i < s->mounted_end && i < s->row_count; i++) if (Clay_PointerOver(CLAY_IDI("DiffReviewRow", i))) {
+        ReviewRow v = s->rows[i];
+        if (!v.hidden && s->model->files[v.file].rows[v.row].kind != ROW_HEADER) continue;
+        host->hovered_clickable = true;
+        if (click) {
+            if (v.hidden) {
+                ReviewFile *file = &s->files[v.file];
+                int *gaps = realloc(file->expanded_gaps, (size_t)(file->gap_count + 1) * sizeof(int));
+                if (!gaps) return;
+                file->expanded_gaps = gaps; gaps[file->gap_count++] = v.gap_line;
+            }
+            else s->files[v.file].collapsed = !s->files[v.file].collapsed;
+            BuildReview(s); JumpTo(s, i); return;
         }
     }
 }
@@ -812,16 +1071,20 @@ static void DiffWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
         s->worker->active = active;
         pthread_mutex_unlock(&s->worker->lock);
     }
+    bool visible = workspace && PicoHost_SelectedWorkspace(workspace->host) == workspace && PicoDiff_IsOpen(workspace->host);
+    if (visible && !s->was_visible) s->restore_scroll = true;
+    s->was_visible = visible;
+    if (!visible) {
+        if (s->resizing) workspace->host->ui_drag_active = false;
+        s->resizing = false; s->pointer_claimed = false;
+    }
     AdoptPending(s);
-    if (!s->open)
+    if (!visible || PicoUi_ModalOpen(workspace->host))
     {
         return;
     }
     PicoScrollbar_UpdateDrag(&s->scrollbar, CLAY_STRING("DiffScroll"), CLAY_STRING("DiffScrollHandle"));
-    if (IsKeyPressed(KEY_ESCAPE))
-    {
-        CloseModal(s);
-    }
+
 }
 
 /* ------------------------------------------------------------------ */
@@ -847,7 +1110,6 @@ static int DiffWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     {
         *state_out = s;
     }
-    pico_workspace_add_view(workspace, PICO_SLOT_OVERLAY, 30, DiffModalRender);
     StartThread(s, workspace ? workspace->path : ".");
     return 0;
 }
@@ -863,7 +1125,9 @@ static void DiffWorkspaceShutdown(PicoWorkspace *workspace, void *state)
     StopThread(s);
     PicoDiffModel_Free(s->model);
     s->model = NULL;
-    (void)CloseModal(s);
+    (void)ClosePanel(s);
+    FreeReviewFiles(s);
+    free(s->rows);
     free(s);
 }
 
@@ -872,7 +1136,7 @@ PicoExt pico_ext_diff(void)
     return (PicoExt){
         .abi = PICO_EXT_ABI,
         .name = "diff",
-        .description = "Git working-tree changes in the footer",
+        .description = "Workspace Changes review panel and footer summary",
         .host_init = DiffHostInit,
         .workspace_init = DiffWorkspaceInit,
         .workspace_shutdown = DiffWorkspaceShutdown,

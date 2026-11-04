@@ -8,5 +8,6 @@ void PicoSettingsUi_Input(PicoHost *host);
 bool PicoSettingsUi_BlocksKeyboard(const PicoHost *host);
 bool PicoSettingsUi_BlocksPointer(const PicoHost *host);
 bool PicoSettingsUi_ResizeHovered(const PicoHost *host);
+bool PicoSettingsUi_CloseForChanges(PicoHost *host);
 bool PicoSettingsUi_CloseForBrowser(PicoHost *host);
 #endif

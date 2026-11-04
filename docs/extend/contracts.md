@@ -698,3 +698,14 @@ and retains retired render data through the current layout lifetime. The IPC and
 DevTools channel are private, with no remote listener. Sandbox protection stays
 enabled. See [browser](browser.md) for schemas, readiness, limits, singleton-root
 ownership, storage, and tests.
+
+### Builtin Changes visibility
+
+`PicoDiff_IsOpen(host)` is a main-thread visibility query for the selected
+workspace's non-modal Changes dock. It does not reserve the overlay slot or
+claim a modal. Chat remains interactive outside the focused panel. Review state
+is workspace-owned and is released on workspace shutdown/reload; opening or
+closing the dock does not change extension registration or tool ownership.
+Git capture and syntax highlighting remain worker-owned until their immutable
+snapshot is adopted on the main thread. Optional context is bounded separately
+so exhausting its budget cannot remove otherwise captured changed hunks.

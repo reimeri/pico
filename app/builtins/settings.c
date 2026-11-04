@@ -5,6 +5,7 @@
 #include "overlay.h"
 #include "settings.h"
 #include "settings_ui.h"
+#include "diff_ui.h"
 #include "browser.h"
 #include "theme_internal.h"
 
@@ -54,6 +55,7 @@ typedef struct SettingsState {
     bool focused, resizing, pointer_claimed;
     float resize_start_x, resize_start_width;
     PicoAgentId pending_browser;
+    PicoWorkspaceId pending_changes;
     int section; /* 0: general/models, 1: subagents */
     PicoSubagentSettings *subagents;
     SettingsSave *save;
@@ -274,8 +276,12 @@ void PicoSettingsUi_Close(PicoHost *host)
     }
     PicoAgentId browser = s->pending_browser;
     s->pending_browser = 0;
+    PicoWorkspaceId changes = s->pending_changes;
+    s->pending_changes = 0;
     (void)Unclaim();
     if (browser && host->selected_agent_id == browser) PicoBrowser_OpenPanel(host);
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(host);
+    if (changes && ws && ws->id == changes) PicoDiffUi_Open(host);
 }
 
 bool PicoSettingsUi_CloseForBrowser(PicoHost *host)
@@ -283,6 +289,7 @@ bool PicoSettingsUi_CloseForBrowser(PicoHost *host)
     if (!SelectHost(host) || !g_open) return true;
     SettingsState *s = s_active_settings_state;
     if (s->save) return false;
+    s->pending_changes = 0;
     s->pending_browser = host->selected_agent_id;
     /* The caller opens immediately if no confirmation is necessary. */
     if (PicoSubagentSettings_RequestLeave(s->subagents)) {
@@ -297,6 +304,21 @@ bool PicoSettingsUi_CloseForBrowser(PicoHost *host)
     return false;
 }
 
+bool PicoSettingsUi_CloseForChanges(PicoHost *host)
+{
+    if (!SelectHost(host) || !g_open) return true;
+    SettingsState *s = s_active_settings_state;
+    PicoWorkspace *ws = PicoHost_SelectedWorkspace(host);
+    if (s->save || !ws) return false;
+    s->pending_browser = 0; s->pending_changes = ws->id;
+    if (PicoSubagentSettings_RequestLeave(s->subagents)) {
+        s->pending_changes = 0; (void)Unclaim(); return true;
+    }
+    s->focused = true; ClearFocus(s); CancelModelDrag(s);
+    host->ui_relayout_requested = true;
+    return false;
+}
+
 void PicoSettingsUi_Open(PicoHost *host)
 {
     if (!SelectHost(host))
@@ -307,6 +329,7 @@ void PicoSettingsUi_Open(PicoHost *host)
     PicoExts_Close(host);
     SelectHost(host);
     if (Claim()) {
+        PicoDiffUi_Close(host);
         s_active_settings_state->focused = true;
         host->ui_relayout_requested = true;
         pico_host_request_redraw(host);
@@ -2269,7 +2292,7 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
     if (!s->focused || s->pointer_claimed) return;
     bool consumed = PicoSubagentSettings_Frame(s->subagents);
     int leave = PicoSubagentSettings_TakeLeaveDecision(s->subagents);
-    if (leave < 0) s->pending_browser = 0;
+    if (leave < 0) { s->pending_browser = 0; s->pending_changes = 0; }
     if (leave > 0)
     {
         PicoSettingsUi_Close(app);

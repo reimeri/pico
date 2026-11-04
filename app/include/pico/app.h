@@ -799,6 +799,8 @@ void PicoComplete_Close(void);
 bool PicoComplete_IsOpen(void);
 void PicoFooter_Render(PicoHost *app, void *state);
 bool PicoFooter_MenuOpen(void);
+/* True when the selected workspace's non-modal Changes panel is visible.
+ * This is not a modal claim and must not be used to block chat interaction. */
 bool PicoDiff_IsOpen(const PicoHost *app);
 void PicoDiff_RenderChip(PicoHost *app);
 void PicoOverlay_Render(PicoHost *app, void *state);

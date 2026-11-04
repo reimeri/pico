@@ -188,9 +188,61 @@ static void TestNonTextCapture(void)
     CHECK(system(cleanup) == 0);
 }
 
+static void TestReviewCapture(void)
+{
+    char root[] = "/tmp/pico-diff-review-XXXXXX";
+    CHECK(mkdtemp(root) != NULL);
+    CHECK(Git(root, "init -q"));
+    WriteBytes(root, "tracked.txt", "one\ntwo\nthree\n", 14);
+    CHECK(Git(root, "add -A"));
+    CHECK(Git(root, "-c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm initial"));
+    WriteBytes(root, "tracked.txt", "one\nstaged\nthree\n", 17);
+    CHECK(Git(root, "add tracked.txt"));
+    WriteBytes(root, "tracked.txt", "one\nstaged\nworking\n", 19);
+    WriteBytes(root, "untracked.txt", "new\n", 4);
+    DiffModel *m = PicoDiffModel_Capture(root);
+    CHECK(m && m->file_count == 2 && m->adds == 3 && m->dels == 2 && m->untracked == 1);
+    if (m) {
+        const DiffFile *f = &m->files[0];
+        int old = 1, new = 1;
+        for (int i = 0; i < f->row_count; i++) {
+            const DiffRow *r = &f->rows[i];
+            if (r->kind == ROW_CTX) CHECK(r->old_line == old++ && r->new_line == new++);
+            if (r->kind == ROW_DEL) CHECK(r->old_line == old++ && r->new_line == 0);
+            if (r->kind == ROW_ADD) CHECK(r->new_line == new++ && r->old_line == 0);
+        }
+    }
+    PicoDiffModel_Free(m);
+    CHECK(Git(root, "reset --hard -q HEAD"));
+    /* A tiny edit at the end of a large text file must survive even when
+     * optional surrounding context cannot fit in a bounded capture. */
+    char path[4096]; snprintf(path, sizeof(path), "%s/large.txt", root);
+    FILE *file = fopen(path, "w"); CHECK(file != NULL);
+    if (file) {
+        char line[4096]; memset(line, 'a', sizeof(line)); line[sizeof(line)-1] = '\n';
+        for (int i = 0; i < 5000; i++) CHECK(fwrite(line, 1, sizeof(line), file) == sizeof(line));
+        fputs("old tail\n", file); fclose(file);
+        CHECK(Git(root, "add large.txt"));
+        CHECK(Git(root, "-c commit.gpgsign=false -c core.hooksPath=/dev/null commit -qm large"));
+        file = fopen(path, "r+"); CHECK(file != NULL);
+        if (file) { fseek(file, -9, SEEK_END); fputs("new tail\n", file); fclose(file); }
+        m = PicoDiffModel_Capture(root);
+        bool tail = false;
+        if (m) for (int fi = 0; fi < m->file_count; fi++) for (int ri = 0; ri < m->files[fi].row_count; ri++) {
+            DiffRow *r = &m->files[fi].rows[ri];
+            if (r->kind == ROW_ADD && r->len == 8 && !memcmp(r->text, "new tail", 8)) tail = true;
+        }
+        CHECK(tail);
+        PicoDiffModel_Free(m);
+    }
+    char command[8192]; snprintf(command, sizeof(command), "rm -rf '%s'", root);
+    CHECK(system(command) == 0);
+}
+
 int main(void)
 {
     TestNonTextCapture();
+    TestReviewCapture();
     const RowSpec rows[] = {
         {ROW_HEADER, "src/main.c"},
         {ROW_HUNK, "@@ -1,3 +1,4 @@"},

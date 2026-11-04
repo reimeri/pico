@@ -145,6 +145,7 @@ struct PicoProjectPreference;
 typedef enum PicoShellIcon {
     PICO_SHELL_ICON_BROWSER,
     PICO_SHELL_ICON_SETTINGS,
+    PICO_SHELL_ICON_CHANGES,
     PICO_SHELL_ICON_COUNT,
 } PicoShellIcon;
 

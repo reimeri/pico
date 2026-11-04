@@ -7,6 +7,8 @@
 
 /* This isolated harness has no settings panel. */
 bool PicoSettingsUi_IsOpen(const PicoHost *host) { (void)host; return false; }
+bool PicoDiff_IsOpen(const PicoHost *host) { (void)host; return false; }
+bool PicoDiffUi_BlocksKeyboard(const PicoHost *host) { (void)host; return false; }
 bool PicoSettingsUi_BlocksKeyboard(const PicoHost *host) { (void)host; return false; }
 
 void PicoChat_ResetBottomSpace(PicoHost *host) { (void)host; }

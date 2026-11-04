@@ -2021,6 +2021,8 @@ void PicoAuth_Free(PicoHost *app)
 }
 
 /* This agent-only harness has no settings panel. */
+bool PicoDiff_IsOpen(const PicoHost *host) { (void)host; return false; }
+float PicoDiffUi_ShellWidth(const PicoHost *host) { (void)host; return 0; }
 bool PicoSettingsUi_IsOpen(const PicoHost *host) { (void)host; return false; }
 float PicoSettingsUi_ShellWidth(const PicoHost *host) { (void)host; return 0; }
 

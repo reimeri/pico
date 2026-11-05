@@ -20954,8 +20954,147 @@ static bool IsolateTestHome(void)
 
 int TestClipboardPaste(void);
 
+static int TestApiKeyDialog(void)
+{
+#ifndef PICO_CLAY_FRAME_FAULT_TESTS
+    return 0;
+#else
+    char dir[] = "/tmp/pico-apikey-XXXXXX", cfg[] = "/tmp/pico-apikey-cfg-XXXXXX";
+    PicoHost *host = NULL;
+    Clay_Context *previous = Clay_GetCurrentContext();
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace;
+    PicoAgentId id;
+    PicoAgentCreateOptions options = {.kind=PICO_AGENT_MAIN, .session_start=PICO_SESSION_NONE, .select=true};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_main_agent_create(host, workspace, &options, &id) != PICO_OK) goto done;
+    PicoAgent *agent = PicoHost_FindAgent(host, id);
+    PicoExt commands = pico_ext_commands();
+    void *state = PicoPlugins_HostState(host, "commands");
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, (Clay_Dimensions){900,800}, (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    g_find_input_test = g_fixed_width_text_measure = g_clay_frame_test = true;
+    g_clay_frame_width = 900;
+    const char *providers[] = {"openai", "hyper", "xai"};
+    for (int i = 0; i < 3; i++)
+    {
+        char command[64];
+        snprintf(command, sizeof(command), "/apikey %s", providers[i]);
+        pico_auth_set_oauth(host, providers[i], "access", "refresh", "account", 0);
+        pico_auth_set_env_key(host, providers[i], i == 2 ? "environment-key" : NULL);
+        PicoComposer_SetText(host, command);
+        PicoHost_Submit(host);
+        if (!pico_ui_modal_has(host, "apikey") || host->composer.length) goto done;
+        g_find_key = 0;
+        commands.host_on_frame(host, state, 0); /* opening submit is not a Save */
+        SetClipboardText("persisted-secret-key");
+        g_find_ctrl = true; g_find_key = KEY_V;
+        commands.host_on_frame(host, state, 0);
+        SetClipboardText("clipboard-sentinel");
+        g_find_key = KEY_A; commands.host_on_frame(host, state, 0);
+        g_find_key = KEY_C; commands.host_on_frame(host, state, 0);
+        g_find_key = KEY_X; commands.host_on_frame(host, state, 0);
+        if (strcmp(GetClipboardText(), "clipboard-sentinel")) goto done;
+        g_find_ctrl = false; g_find_key = 0;
+        Clay_RenderCommandArray rendered = PicoHost_LayoutShell(host, 800, 0);
+        bool masked = false;
+        for (int j = 0; j < rendered.length; j++)
+        {
+            Clay_RenderCommand *cmd = &rendered.internalArray[j];
+            if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+            Clay_StringSlice text = cmd->renderData.text.stringContents;
+            if (memmem(text.chars, (size_t)text.length, "persisted-secret-key", strlen("persisted-secret-key"))) goto done;
+            if (text.length == (int)strlen("persisted-secret-key") && text.chars[0] == '*') masked = true;
+        }
+        if (!masked) goto done;
+        /* A newer modal owns both visible UI and input, not an invisible layer. */
+        if (i == 0)
+        {
+            pico_ui_modal_push(host, "test-above-apikey");
+            (void)PicoHost_LayoutShell(host, 800, 0);
+            if (Clay_GetElementData(CLAY_ID("ApiKeyCard")).found) goto done;
+            g_find_key = KEY_ESCAPE; commands.host_on_frame(host, state, 0); g_find_key = 0;
+            if (!pico_ui_modal_has(host, "apikey")) goto done;
+            pico_ui_modal_pop(host, "test-above-apikey");
+        }
+        g_find_key = KEY_ENTER; commands.host_on_frame(host, state, 0); g_find_key = 0;
+        if (pico_ui_modal_has(host, "apikey")) goto done;
+        PicoAuthEntry e = {0};
+        pico_auth_copy(host, providers[i], &e);
+        bool correct = e.api_key && !strcmp(e.api_key, i == 2 ? "environment-key" : "persisted-secret-key") &&
+                       !strcmp(e.active, PICO_AUTH_OAUTH) && e.refresh_token && !strcmp(e.refresh_token, "refresh");
+        pico_auth_entry_free(&e);
+        if (!correct) goto done;
+    }
+    bool warned = false;
+    for (int i = 0; i < agent->message_count; i++)
+    {
+        const char *text = agent->messages[i].source;
+        if (text && strstr(text, "persisted-secret-key")) goto done;
+        if (text && strstr(text, "environment API key overrides")) warned = true;
+    }
+    if (!warned) goto done;
+    /* Cancel must discard input rather than replacing the persisted key. */
+    PicoComposer_SetText(host, "/apikey openai"); PicoHost_Submit(host);
+    commands.host_on_frame(host, state, 0);
+    SetClipboardText("cancelled-secret"); g_find_ctrl = true; g_find_key = KEY_V;
+    commands.host_on_frame(host, state, 0);
+    g_find_ctrl = false; g_find_key = KEY_ESCAPE; commands.host_on_frame(host, state, 0); g_find_key = 0;
+    if (pico_ui_modal_has(host, "apikey")) goto done;
+    PicoAuth_Load(host); /* Reload only persisted state, dropping environment overlays. */
+    for (int i = 0; i < 3; i++)
+    {
+        PicoAuthEntry e = {0};
+        pico_auth_copy(host, providers[i], &e);
+        bool correct = e.api_key && !strcmp(e.api_key, "persisted-secret-key") && !strcmp(e.active, PICO_AUTH_OAUTH);
+        pico_auth_entry_free(&e);
+        if (!correct) goto done;
+    }
+    char path[4096]; snprintf(path, sizeof(path), "%s/pico/auth.json", cfg);
+    struct stat info;
+    if (stat(path, &info) || (info.st_mode & 0777) != 0600) goto done;
+    /* A failed atomic replace must warn, never claim durable success. */
+    if (unlink(path) || mkdir(path, 0700)) goto done;
+    PicoComposer_SetText(host, "/apikey openai"); PicoHost_Submit(host);
+    commands.host_on_frame(host, state, 0);
+    g_find_key = KEY_ENTER; commands.host_on_frame(host, state, 0); g_find_key = 0;
+    if (!pico_ui_modal_has(host, "apikey")) goto done; /* empty Save is rejected */
+    SetClipboardText("unsaved-secret"); g_find_ctrl = true; g_find_key = KEY_V;
+    commands.host_on_frame(host, state, 0);
+    int before = agent->message_count;
+    g_find_ctrl = false; g_find_key = KEY_ENTER; commands.host_on_frame(host, state, 0); g_find_key = 0;
+    bool failed_notice = false;
+    for (int i = before; i < agent->message_count; i++)
+    {
+        const char *text = agent->messages[i].source;
+        if (text && strstr(text, "unsaved-secret")) goto done;
+        if (text && strstr(text, "Could not persist")) failed_notice = true;
+    }
+    if (!failed_notice) goto done;
+    rc = 0;
+done:
+    g_find_input_test = g_fixed_width_text_measure = g_clay_frame_test = false;
+    g_find_ctrl = false; g_find_key = 0;
+    if (host) pico_host_free(host);
+    Clay_SetCurrentContext(previous);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME"); RmRf(cfg); RmRf(dir);
+    if (rc) Fail("API key dialog must mask secrets, preserve auth selection, warn on overrides, and persist only saved input");
+    return rc;
+#endif
+}
+
 int main(int argc, char **argv)
 {
+
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (argc == 4 && getenv("PICO_TEST_BROWSER_FAILURE")) return BrowserFaultHelper(argc, argv);
 #endif
@@ -20964,6 +21103,8 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestOpenAiBlockedShutdownChild());
 #endif
     if (!IsolateTestHome()) return 1;
+    if (argc == 2 && strcmp(argv[1], "--apikey") == 0) return PICO_TEST_RUN(TestApiKeyDialog());
+    if (PICO_TEST_RUN(TestApiKeyDialog()) != 0) return 1;
 #ifdef PICO_TEST_CLOCK
     if (argc == 2 && strcmp(argv[1], "--session-scroll") == 0)
         return PICO_TEST_RUN(TestSessionScrollBookmarks());
@@ -20978,7 +21119,7 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestSettingsPanelBrowserSwitch()) || PICO_TEST_RUN(RunSettingsPanelShellCase(false)) ||
                PICO_TEST_RUN(RunSettingsPanelShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
-        return PICO_TEST_RUN(TestSettingsTabs()) || PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
+        return PICO_TEST_RUN(TestSettingsTabs()) || PICO_TEST_RUN(TestImageSettingsWorkflow()) || PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
                PICO_TEST_RUN(TestSubagentSettingsPartialApply()) || PICO_TEST_RUN(TestSubagentSettingsRenameDependencies()) ||
                PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
                PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
@@ -21046,7 +21187,7 @@ int main(int argc, char **argv)
     {
         return PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement());
     }
-    if (PICO_TEST_RUN(TestSettingsTabs()) || PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
+    if (PICO_TEST_RUN(TestSettingsTabs()) || PICO_TEST_RUN(TestImageSettingsWorkflow()) || PICO_TEST_RUN(TestSubagentSettingsSharedApply()) || PICO_TEST_RUN(TestSubagentSettingsCancelStagedDelete()) ||
         PICO_TEST_RUN(TestSubagentSettingsPartialApply()) || PICO_TEST_RUN(TestSubagentSettingsRenameDependencies()) ||
         PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
         PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||

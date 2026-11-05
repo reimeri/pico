@@ -20,7 +20,7 @@ A small (~3MB app + 150MB CEF) C99 AI agent harness with a native chat UI. The c
 - Built-in extensions for questionnaires, session titling, and subagents
 - [Embedded Chromium browser](docs/extend/browser.md) in a collapsible dock for smooth web dev
 - Concurrent agents across multiple workspaces in one window
-- [Image generation and editing](docs/extend/image-generation.md) using ChatGPT login
+- [Image generation and editing](docs/extend/image-generation.md) using Codex login or the OpenAI API
 - Hot-reloadable C99 extensions (views, tools, commands, providers). Just ask the agent to build one
 - Slash commands (`/help`, `/docs`, `/reload`, …)
 - Spell checking (uses `enchant`)
@@ -76,7 +76,7 @@ Supports `x86_64-linux` and `aarch64-linux`; the package puts GCC on `PATH` so e
 
 </details>
 
-Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`.
+Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`. Use `/apikey <openai|hyper|xai>` to save a key in a masked dialog for future restarts, then `/login <provider> key` to select it. Saved keys are plaintext in your private `auth.json`; environment keys take precedence.
 
 ## Projects and Inbox
 

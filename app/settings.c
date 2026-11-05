@@ -868,6 +868,48 @@ static bool WorkspaceSettingsPath(const PicoWorkspace *workspace, char *out, siz
     return true;
 }
 
+static bool ImageQualityValid(const char *quality)
+{
+    const char *choices[] = {"auto", "low", "medium", "high", "xhigh", "max"};
+    for (size_t i = 0; i < sizeof(choices) / sizeof(choices[0]); i++)
+        if (!strcmp(quality, choices[i])) return true;
+    return false;
+}
+
+static void ApplyImageSettings(PicoImageSettings *out, const JsonDoc *doc)
+{
+    int obj = JsonObjGet(doc, 0, "images");
+    if (!JsonIsObject(doc, obj)) return;
+    out->use_api = JsonEq(doc, JsonObjGet(doc, obj, "use_api"), "true");
+    const char *keys[] = {"codex_quality", "generation_model", "editing_model", "generation_quality", "editing_quality"};
+    char *values[] = {out->codex_quality, out->generation_model, out->editing_model, out->generation_quality, out->editing_quality};
+    size_t caps[] = {16, 128, 128, 16, 16};
+    for (int i = 0; i < 5; i++) {
+        char *value = JsonObjStr(doc, obj, keys[i]);
+        if (value && value[0] && strlen(value) < caps[i] &&
+            ((i == 1 || i == 2) || ImageQualityValid(value)))
+            snprintf(values[i], caps[i], "%s", value);
+        free(value);
+    }
+}
+
+void PicoImageSettings_Read(PicoImageSettings *out)
+{
+    *out = PicoImageSettings_Default();
+    char path[4096];
+    if (!UserSettingsPath(path, sizeof(path))) return;
+    size_t len = 0;
+    char *src = Pico_ReadFile(path, &len);
+    if (!src) return;
+    JsonStripComments(src, len);
+    JsonDoc doc;
+    if (!JsonParse(&doc, src, len)) {
+        ApplyImageSettings(out, &doc);
+        JsonFree(&doc);
+    }
+    free(src);
+}
+
 void PicoSettings_ReadPreferences(PicoHostPreferences *p)
 {
     if (!p)
@@ -974,6 +1016,11 @@ void PicoHostPreferences_Load(PicoHost *host)
         }
     }
     PicoSettings_ReadPreferences(&host->preferences);
+    PicoImageSettings images;
+    PicoImageSettings_Read(&images);
+    pthread_mutex_lock(&host->settings_mu);
+    host->image_settings = images;
+    pthread_mutex_unlock(&host->settings_mu);
     Pico_SetFontScale((float)host->preferences.font_scale);
 }
 
@@ -2030,6 +2077,7 @@ void PicoSettings_InitUserDraft(PicoUserSettingsDraft *draft)
     draft->font_scale = 1.0;
     draft->chat_width = PICO_CHAT_WIDTH_DEFAULT;
     draft->spell = true;
+    draft->images = PicoImageSettings_Default();
 }
 
 void PicoSettings_FreeUserDraft(PicoUserSettingsDraft *draft)
@@ -2122,6 +2170,7 @@ bool PicoSettings_LoadUserDraft(PicoUserSettingsDraft *draft, char *error, size_
         }
         ApplyWorkspaceObject(&workspace, &doc, 0, NULL);
         ApplyPreferencesObject(&preferences, &doc, 0);
+        ApplyImageSettings(&next.images, &doc);
         if (!ReplaceModels(&next.models, &next.model_count, &doc, 0))
         {
             JsonFree(&doc);
@@ -2213,6 +2262,11 @@ bool PicoSettings_ParseModelContextLimit(const char *text, int *out)
 
 const char *PicoSettings_ValidateUserDraft(const PicoUserSettingsDraft *draft)
 {
+    if (draft && (!draft->images.generation_model[0] || !draft->images.editing_model[0] ||
+        !ImageQualityValid(draft->images.codex_quality) || !ImageQualityValid(draft->images.generation_quality) ||
+        !ImageQualityValid(draft->images.editing_quality)))
+        return "Image model IDs must not be empty and image qualities must be valid.";
+
     int i;
     int j;
     bool default_found = false;
@@ -2755,6 +2809,19 @@ bool PicoSettings_SaveUserDraft(PicoHost *host, const PicoUserSettingsDraft *dra
             goto unlock;
         }
     }
+    JsonBuf image_json; JsonBuf_Init(&image_json);
+    JsonBuf_Puts(&image_json, draft->images.use_api ? "{\"use_api\":true" : "{\"use_api\":false");
+    const char *image_keys[] = {"codex_quality", "generation_model", "editing_model", "generation_quality", "editing_quality"};
+    const char *image_values[] = {draft->images.codex_quality, draft->images.generation_model, draft->images.editing_model,
+                                draft->images.generation_quality, draft->images.editing_quality};
+    for (int i = 0; i < 5; i++) {
+        JsonBuf_Putc(&image_json, ','); JsonBuf_String(&image_json, image_keys[i]);
+        JsonBuf_Putc(&image_json, ':'); JsonBuf_String(&image_json, image_values[i]);
+    }
+    JsonBuf_Putc(&image_json, '}');
+    bool images_ok = !image_json.failed && PatchObjectValue(&src, &len, "images", image_json.data);
+    JsonBuf_Free(&image_json);
+    if (!images_ok) goto unlock;
     if (!PatchObjectValue(&src, &len, "model", model) ||
         !PatchObjectValue(&src, &len, "context_limit", context_buf) ||
         !PatchObjectValue(&src, &len, "max_parallel_tools", parallel_buf) ||

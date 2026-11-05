@@ -28,9 +28,12 @@
 
 #include "raylib.h"
 
+#include "apikey_dialog.h"
+
 static uint64_t s_resume_cache_serial;
 
 typedef struct ResumeListCache {
+    ApiKeyDialog apikey;
     uint64_t serial;
     PicoWorkspaceId workspace_id;
     char workspace_path[4096];
@@ -96,7 +99,7 @@ static void CommandsHostShutdown(PicoHost *host, void *state)
 {
     (void)host;
     ResumeListCache *cache = state;
-    if (cache) { free(cache->items); free(cache); }
+    if (cache) { ApiKeyClose(host, &cache->apikey); free(cache->items); free(cache); }
 }
 
 static void Note(PicoHost *app, PicoAgentId agent_id, PicoNoticeSeverity severity, const char *text)
@@ -792,7 +795,7 @@ static void SplitPrefix(const char *prefix, char *cmd, size_t cmd_cap, const cha
 static bool NeedsArgs(const char *name)
 {
     return FoldEq(name, "model") || FoldEq(name, "effort") || FoldEq(name, "login") ||
-           FoldEq(name, "logout") || FoldEq(name, "docs") || FoldEq(name, "resume") ||
+           FoldEq(name, "logout") || FoldEq(name, "apikey") || FoldEq(name, "docs") || FoldEq(name, "resume") ||
            FoldEq(name, "cd") || FoldEq(name, "skill");
 }
 
@@ -1004,6 +1007,19 @@ static int CommandQuery(PicoHost *app, const char *prefix, PicoCompleteItem *out
         }
         return n;
     }
+    if (FoldEq(cmd, "apikey"))
+    {
+        static const char *providers[] = {"openai", "hyper", "xai"};
+        for (int i = 0; i < 3 && n < max; i++)
+        {
+            if (!FoldPrefix(providers[i], rest)) continue;
+            snprintf(out[n].label, sizeof(out[n].label), "%s", providers[i]);
+            snprintf(out[n].detail, sizeof(out[n].detail), "Save API key in a masked dialog");
+            snprintf(out[n].insert, sizeof(out[n].insert), "/apikey %s", providers[i]);
+            n++;
+        }
+        return n;
+    }
     if (FoldEq(cmd, "login") || FoldEq(cmd, "logout"))
     {
         return AuthQuery(app, FoldEq(cmd, "login"), rest, out, max);
@@ -1150,12 +1166,61 @@ static void CommandsBeforeSubmit(PicoWorkspace *workspace, const PicoHookEvent *
     }
 }
 
+static void CmdApiKey(PicoHost *host, PicoAgentId agent_id, const char *args, void *state)
+{
+    ClearComposer(host);
+    PicoHost_RequestSubmitCancel(host);
+    char provider[64];
+    const char *rest;
+    SplitPrefix(args, provider, sizeof(provider), &rest);
+    if (rest[0] || !(FoldEq(provider, "openai") || FoldEq(provider, "hyper") || FoldEq(provider, "xai")))
+    {
+        Note(host, agent_id, PICO_NOTICE_INFO, "Usage: `/apikey <openai|hyper|xai>`. Enter the key only in the masked dialog, not in chat.");
+        return;
+    }
+    ApiKeyDialog *d = &((ResumeListCache *)state)->apikey;
+    ApiKeyClose(host, d);
+    snprintf(d->provider, sizeof(d->provider), "%s", FoldEq(provider, "openai") ? "openai" : FoldEq(provider, "hyper") ? "hyper" : "xai");
+    snprintf(d->title, sizeof(d->title), "Save %s API key", d->provider);
+    d->agent_id = agent_id;
+    d->opening = true;
+    PicoTextField_Bind(&d->field, d->key, sizeof(d->key));
+    if (!pico_ui_modal_push(host, APIKEY_MODAL)) ApiKeyClose(host, d);
+}
+
+static void CommandsOnFrame(PicoHost *host, void *state, float dt)
+{
+    (void)dt;
+    ApiKeyFrame(host, &((ResumeListCache *)state)->apikey);
+}
+
+static void CommandsOverlay(PicoHost *host, void *state)
+{
+    ApiKeyRender(host, &((ResumeListCache *)state)->apikey);
+}
+
+static void CommandsAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)event;
+    ApiKeyAfterLayout(host, &((ResumeListCache *)state)->apikey);
+}
+
+static void CommandsAfterRender(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    (void)event;
+    ApiKeyAfterRender(host, &((ResumeListCache *)state)->apikey);
+}
+
 static int CommandsHostInit(PicoHost *app, void **state_out)
 {
     ResumeListCache *cache = calloc(1, sizeof(*cache));
     if (!cache) return -1;
     cache->serial = ++s_resume_cache_serial;
     *state_out = cache;
+    pico_host_add_command(app, "apikey", "Save a provider API key using a masked dialog", CmdApiKey);
+    pico_host_add_view(app, PICO_SLOT_OVERLAY, 90, CommandsOverlay);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_LAYOUT, CommandsAfterLayout);
+    pico_host_add_hook(app, PICO_HOOK_AFTER_RENDER, CommandsAfterRender);
     pico_host_add_command(app, "login", "Sign in a provider", CmdLogin);
     pico_host_add_command(app, "logout", "Sign out a provider", CmdLogout);
     pico_host_add_command(app, "quit", "Quit Pico", CmdQuit);
@@ -1190,6 +1255,7 @@ PicoExt pico_ext_commands(void)
         .description = "Slash commands",
         .host_init = CommandsHostInit,
         .host_shutdown = CommandsHostShutdown,
+        .host_on_frame = CommandsOnFrame,
         .workspace_init = CommandsWorkspaceInit,
     };
 }

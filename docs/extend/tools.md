@@ -328,7 +328,7 @@ Reference: [`../../builtins/title.c`](../../builtins/title.c). See
 
 ## Builtin image generation
 
-[`generate_image`](image-generation.md) creates/edits one PNG with ChatGPT OAuth.
+[`generate_image`](image-generation.md) creates/edits one PNG with Codex OAuth or the OpenAI API, selected in Image settings.
 It requires an explicit new output path, never overwrites files, and returns
 image-bearing results when the calling model/provider supports them. Non-vision
 callers receive a saved path without image parts. See that topic for usage,

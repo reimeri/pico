@@ -322,8 +322,8 @@ static int TestSettingsTabs(void)
     bool good = false;
     const char *phase = "setup";
     const int widths[] = {1100, 900};
-    const char *labels[] = {"General & models", "Subagents"};
-    Clay_ElementId ids[] = {CLAY_ID("SettingsGeneralTab"), CLAY_ID("SettingsSubagentsTab")};
+    const char *labels[] = {"General", "Image", "Subagents"};
+    Clay_ElementId ids[] = {CLAY_ID("SettingsGeneralTab"), CLAY_ID("SettingsImageTab"), CLAY_ID("SettingsSubagentsTab")};
     if (!InteractionFixtureInit(&f)) goto done;
     PicoSettingsUi_Open(f.host);
     for (int size = 0; size < 2; size++) {
@@ -331,7 +331,7 @@ static int TestSettingsTabs(void)
         Clay_SetLayoutDimensions((Clay_Dimensions){widths[size], 800});
         pico_host_request_redraw(f.host);
         PicoHost_Frame(f.host);
-        for (int selected = 0; selected < 2; selected++) {
+        for (int selected = 0; selected < 3; selected++) {
             /* The blank outer portion of each tab is also a navigation target. */
             Clay_ElementData target = Clay_GetElementData(ids[selected]);
             target.boundingBox.x += selected ? target.boundingBox.width - 1 : 1;
@@ -343,17 +343,17 @@ static int TestSettingsTabs(void)
             Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
             Clay_ElementData card = Clay_GetElementData(CLAY_ID("SettingsPane"));
             Clay_RenderCommand *title = FindCardText(&commands, "Settings");
-            Clay_ElementData tabs[] = {Clay_GetElementData(ids[0]), Clay_GetElementData(ids[1])};
-            Clay_Color colors[2] = {0};
-            float rules[2];
+            Clay_ElementData tabs[] = {Clay_GetElementData(ids[0]), Clay_GetElementData(ids[1]), Clay_GetElementData(ids[2])};
+            Clay_Color colors[3] = {0};
+            float rules[3];
             phase = "equal-width full-content layout";
             if (!card.found || !title) goto done;
             float content_x = title->boundingBox.x;
             float content_width = card.boundingBox.width - 2 * (content_x - card.boundingBox.x);
-            for (int tab = 0; tab < 2; tab++) {
+            for (int tab = 0; tab < 3; tab++) {
                 phase = "equal-width full-content layout";
-                Clay_BoundingBox expected = {content_x + tab * content_width / 2,
-                    tabs[0].boundingBox.y, content_width / 2, tabs[0].boundingBox.height};
+                Clay_BoundingBox expected = {content_x + tab * content_width / 3,
+                    tabs[0].boundingBox.y, content_width / 3, tabs[0].boundingBox.height};
                 if (!tabs[tab].found || !ShellBoxStable(expected, tabs[tab].boundingBox)) {
                     fprintf(stderr, "tab %d at width %d: expected %g,%g %gx%g; got %g,%g %gx%g\n",
                             tab, widths[size], expected.x, expected.y, expected.width, expected.height,
@@ -376,9 +376,13 @@ static int TestSettingsTabs(void)
                 }
             }
             phase = "selected section underline";
-            if (rules[1 - selected] <= 0 || rules[selected] <= rules[1 - selected] ||
-                (colors[0].r == colors[1].r && colors[0].g == colors[1].g && colors[0].b == colors[1].b) ||
-                Clay_GetElementData(CLAY_ID("SettingsContextLimit")).found != (selected == 0)) goto done;
+            for (int tab = 0; tab < 3; tab++) {
+                if (tab == selected) continue;
+                if (rules[tab] <= 0 || rules[selected] <= rules[tab] ||
+                    (colors[selected].r == colors[tab].r && colors[selected].g == colors[tab].g && colors[selected].b == colors[tab].b)) goto done;
+            }
+            if (Clay_GetElementData(CLAY_ID("SettingsContextLimit")).found != (selected == 0) ||
+                Clay_GetElementData(CLAY_ID("SettingsImageApi")).found != (selected == 1)) goto done;
         }
     }
     good = true;
@@ -660,5 +664,56 @@ done:
     if (!good) fprintf(stderr, "subagent rename batch: %s\n", phase);
     InteractionFixtureFree(&f);
     if (!good) Fail("Shared Apply must order dependent profile renames and reject cycles without overwriting files");
+    return !good;
+}
+
+static int TestImageSettingsWorkflow(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    const char *phase = "setup";
+    if (!InteractionFixtureInit(&f)) goto done;
+    PicoHost *host = f.host;
+    pico_auth_set_env_key(host, "openai", NULL);
+    PicoSettingsUi_Open(host); PicoHost_Frame(host);
+    if (!SubagentSettingsClick(host, CLAY_ID("SettingsImageTab"))) goto done;
+    phase = "missing key disables API and explains why";
+    if (!SubagentSettingsClick(host, CLAY_ID("SettingsImageApi")) ||
+        Clay_GetElementData(CLAY_ID("SettingsImageGeneration")).found) goto done;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+    if (!FindCardText(&commands, "Set an OpenAI API key to enable API image generation.")) goto done;
+    phase = "key enables API controls without reopening settings";
+    pico_auth_set_env_key(host, "openai", "image-test-key");
+    if (!SubagentSettingsClick(host, CLAY_ID("SettingsImageApi")) ||
+        !InteractionReplaceText(host, CLAY_ID("SettingsImageGeneration"), "test-generation") ||
+        !InteractionReplaceText(host, CLAY_ID("SettingsImageEditing"), "test-editing") ||
+        !SubagentSettingsClick(host, CLAY_IDI("SettingsImageQuality", 1 * 6 + 5)) ||
+        !SubagentSettingsClick(host, CLAY_IDI("SettingsImageQuality", 2 * 6 + 4))) goto done;
+    phase = "API edits survive navigating to Codex and back";
+    if (!SubagentSettingsClick(host, CLAY_ID("SettingsImageApi")) ||
+        !SubagentSettingsClick(host, CLAY_IDI("SettingsImageQuality", 3)) ||
+        !SubagentSettingsClick(host, CLAY_ID("SettingsImageApi")) ||
+        !SubagentSettingsClick(host, CLAY_ID("SettingsApply")) || !SubagentSettingsDrain(host)) goto done;
+    phase = "apply publishes global image settings";
+    PicoImageSettings saved;
+    PicoImageSettings_Read(&saved);
+    if (!saved.use_api || strcmp(saved.generation_model, "test-generation") ||
+        strcmp(saved.editing_model, "test-editing") || strcmp(saved.generation_quality, "max") ||
+        strcmp(saved.editing_quality, "xhigh") || strcmp(saved.codex_quality, "high") ||
+        !host->image_settings.use_api || strcmp(host->image_settings.editing_model, saved.editing_model)) goto done;
+    phase = "cancel discards image edits";
+    PicoSettingsUi_Open(host); PicoHost_Frame(host);
+    if (!SubagentSettingsClick(host, CLAY_ID("SettingsImageTab")) ||
+        !InteractionReplaceText(host, CLAY_ID("SettingsImageEditing"), "discard-this") ||
+        !SubagentSettingsClick(host, CLAY_ID("SettingsCancel"))) goto done;
+    PicoSettingsUi_Open(host); PicoHost_Frame(host);
+    if (!SubagentSettingsClick(host, CLAY_ID("SettingsImageTab"))) goto done;
+    commands = PicoHost_LayoutShell(host, 800, 0);
+    if (!FindCardText(&commands, "test-editing") || FindCardText(&commands, "discard-this")) goto done;
+    good = true;
+done:
+    if (!good) fprintf(stderr, "Image settings: %s\n", phase);
+    InteractionFixtureFree(&f);
+    if (!good) Fail("Image settings must gate API credentials and persist only applied provider/model/quality changes");
     return !good;
 }

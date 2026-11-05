@@ -7,6 +7,7 @@
 #include "image_fixtures.h"
 #include "json.h"
 #include "path.h"
+#include "host_internal.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -19,6 +20,10 @@
 #include <unistd.h>
 
 struct PicoAgentContext { const char *workspace; bool vision, cancelled; };
+static PicoHost host;
+static bool has_api_key = true;
+PicoImageSettings PicoImageSettings_CopyContext(const PicoAgentContext *ctx)
+{ (void)ctx; return host.image_settings; }
 static PicoToolFn tool;
 static PicoLlmHookFn filter;
 static int failed, requests, refreshes;
@@ -45,7 +50,7 @@ bool pico_add_tool(PicoWorkspace *ws, const char *name, const char *description,
 bool pico_set_tool_group_title(PicoWorkspace *ws, const char *name, const char *one, const char *many)
 { (void)ws; (void)name; (void)one; (void)many; return true; }
 void pico_add_llm_hook(PicoWorkspace *ws, PicoLlmHookFn hook) { (void)ws; filter = hook; }
-PicoHost *pico_workspace_host(PicoWorkspace *ws) { (void)ws; return NULL; }
+PicoHost *pico_workspace_host(PicoWorkspace *ws) { (void)ws; return &host; }
 const char *pico_agent_context_workspace(const PicoAgentContext *ctx) { return ctx->workspace; }
 bool pico_agent_context_accepts_tool_images(const PicoAgentContext *ctx) { return ctx->vision; }
 bool pico_agent_context_cancelled(const PicoAgentContext *ctx) { return ctx->cancelled; }
@@ -61,7 +66,7 @@ bool pico_auth_copy(PicoHost *host, const char *provider, PicoAuthEntry *out)
     memset(out, 0, sizeof(*out));
     snprintf(out->active, sizeof(out->active), "%s", oauth ? PICO_AUTH_OAUTH : PICO_AUTH_API_KEY);
     out->access_token = JsonDup("test-access"); out->refresh_token = JsonDup("test-refresh");
-    out->account_id = JsonDup("test-account"); out->api_key = JsonDup("never-use-api-key");
+    out->account_id = JsonDup("test-account"); out->api_key = has_api_key ? JsonDup("never-use-api-key") : NULL;
     out->expires_at = time(NULL) + (expired ? -60 : 3600);
     return true;
 }
@@ -105,7 +110,9 @@ int PicoHttp_PostOnce(const PicoHttpReq *req, long timeout, size_t limit, long *
         originator |= !strcmp(req->headers[i], "originator: pico");
         turn |= !strncmp(req->headers[i], "x-codex-image-turn-id: ", 23);
     }
-    Check(account && originator && turn && !strstr(bearer, "never-use-api-key"), "Codex request has OAuth/account/client headers, never the API key");
+    if (host.image_settings.use_api)
+        Check(!account && !originator && !turn && strstr(bearer, "never-use-api-key"), "API requests use only API credentials, without Codex headers");
+    else Check(account && originator && turn && !strstr(bearer, "never-use-api-key"), "Codex request has OAuth/account/client headers, never the API key");
     if (race_destination) Check(Write(race_destination, "racing writer", 13), "simulate destination appearing while request runs");
     if (cancel_on_response) ((PicoAgentContext *)req->user)->cancelled = true;
     *http = always_401 || (first_401 && requests == 1) ? 401 : status;
@@ -123,6 +130,7 @@ static void Fixture(const void *bytes, size_t size)
 }
 static void Reset(PicoAgentContext *ctx)
 {
+    host.image_settings = PicoImageSettings_Default(); has_api_key = true;
     requests = refreshes = 0; oauth = true; expired = refresh_fails = cancel_on_response = false;
     ctx->cancelled = false; ctx->vision = true;
     status = 200; transport = PICO_HTTP_OK; first_401 = always_401 = false; race_destination = NULL;
@@ -190,6 +198,44 @@ int main(void)
     Check(excluded[0] && !excluded[1] && out.is_error && requests == 0, "API-key selection hides and refuses subscription tool even when OAuth tokens remain");
     Free(&out); oauth = true; excluded[0] = false; filter(NULL, 0, &event, NULL);
     Check(!excluded[0], "login makes tool available on the next catalog without reload");
+
+    Reset(&ctx); host.image_settings.use_api = true;
+    snprintf(host.image_settings.generation_model, sizeof(host.image_settings.generation_model), "custom-generation");
+    snprintf(host.image_settings.editing_model, sizeof(host.image_settings.editing_model), "custom-editing");
+    snprintf(host.image_settings.generation_quality, sizeof(host.image_settings.generation_quality), "max");
+    snprintf(host.image_settings.editing_quality, sizeof(host.image_settings.editing_quality), "xhigh");
+    out = Run(&ctx, args);
+    parsed = !JsonParse(&doc, request_body, strlen(request_body));
+    Check(!out.is_error && !strcmp(url, "https://api.openai.com/v1/images/generations") && parsed &&
+        JsonEq(&doc, JsonObjGet(&doc, 0, "model"), "custom-generation") &&
+        JsonEq(&doc, JsonObjGet(&doc, 0, "quality"), "max") && refreshes == 0,
+        "API generation uses configured model/quality even with OAuth active");
+    if (parsed) JsonFree(&doc);
+    Free(&out);
+    out = Run(&ctx, "{\"prompt\":\"edit\",\"output_path\":\"edited.png\",\"referenced_image_paths\":[\"result.png\"]}");
+    parsed = !JsonParse(&doc, request_body, strlen(request_body));
+    Check(!out.is_error && !strcmp(url, "https://api.openai.com/v1/images/edits") && parsed &&
+        JsonEq(&doc, JsonObjGet(&doc, 0, "model"), "custom-editing") &&
+        JsonEq(&doc, JsonObjGet(&doc, 0, "quality"), "xhigh") &&
+        JsonArrayLen(&doc, JsonObjGet(&doc, 0, "images")) == 1,
+        "API editing uses independent settings and uploads explicit references");
+    if (parsed) JsonFree(&doc);
+    Free(&out); unlink(path); unlink(other);
+    requests = 0; always_401 = true;
+    out = Run(&ctx, args);
+    Check(out.is_error && requests == 1 && refreshes == 0, "API authorization failure never refreshes OAuth or retries");
+    Free(&out);
+    has_api_key = false; requests = 0; excluded[0] = false;
+    filter(NULL, 0, &event, NULL); out = Run(&ctx, args);
+    Check(excluded[0] && out.is_error && requests == 0, "missing API key hides and refuses API tool without OAuth fallback");
+    Free(&out);
+    Reset(&ctx);
+    snprintf(host.image_settings.codex_quality, sizeof(host.image_settings.codex_quality), "high");
+    out = Run(&ctx, args);
+    parsed = !JsonParse(&doc, request_body, strlen(request_body));
+    Check(!out.is_error && parsed && JsonEq(&doc, JsonObjGet(&doc, 0, "quality"), "high"), "Codex sends selected quality");
+    if (parsed) JsonFree(&doc);
+    Free(&out); unlink(path);
 
     const char *bad[] = {
         "{}", "{\"prompt\":\"x\",\"output_path\":42}",

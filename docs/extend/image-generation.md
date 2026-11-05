@@ -1,18 +1,35 @@
-# ChatGPT image generation
+# Image generation
 
 The builtin `generate_image` tool generates one PNG from a prompt, or edits using
-explicitly supplied local reference images. It uses the **ChatGPT subscription
-login** selected by `/login openai`, not an OpenAI API key. Requests consume the
-account's image/Codex usage allowance and require backend access to the image
-models. An API key, custom provider base URL, or a non-OpenAI chat model does not
-change the image backend or its authentication.
+explicitly supplied local reference images. **Settings → Image** selects the
+global backend, independently of the chat model/provider:
+
+- **Codex** (default): uses the ChatGPT subscription login selected by
+  `/login openai`, consuming image/Codex usage. Generation uses
+  `gpt-image-2.5-flare`; editing uses `gpt-image-2.5-sunburst`. A shared quality
+  control applies to both operations.
+- **OpenAI API**: uses the existing effective OpenAI API key (including an
+  environment override), even when OAuth is the active chat authentication mode.
+  Requests use the official `https://api.openai.com/v1/images/` endpoint;
+  chat provider base URLs do not override it. API usage is billed separately.
+  Generation and editing each have a free-text model ID and a separate quality
+  control. Both model IDs default to `gpt-image-2.6-sunburst`.
+
+Quality choices are `auto` (default), `low`, `medium`, `high`, `xhigh`, and `max`.
+They are passed through to the selected backend/model; unsupported combinations
+return an error rather than silently changing quality or models. Size is automatic.
+The API switch is disabled without an effective OpenAI API key; hovering explains
+that a key is required. Settings are global, staged until Apply, and retained when
+switching providers. Cancel discards edits.
 
 The OpenAI workspace builtin registers the tool. A per-request hook offers it
-only while OpenAI OAuth is selected and access/refresh credentials are present;
-the worker checks again at execution time. Login/logout and auth-mode changes
-update availability on the next request without an extension reload. Agent and
-subagent profile tool restrictions still apply. An agent using another chat
-provider can use this tool when the separate OpenAI OAuth login is active.
+only when the selected backend's credentials are available. The worker copies
+current applied image settings under the host settings lock at execution start,
+then checks credentials again; later settings changes do not mutate that call.
+Login/logout and applied settings changes update availability on the next request
+without an extension reload. There is no automatic fallback between API and
+Codex. Agent and subagent profile tool restrictions still apply. An agent using
+another chat provider can use the configured image backend.
 
 ## Generate
 
@@ -45,8 +62,7 @@ required. There is no implicit output directory or generated filename.
   the reference format, not its extension. Bytes are not resized or converted.
   Animated WebP acceptance/interpretation depends on the backend.
 - `transparent_background` defaults to false (opaque); true requests transparency.
-- Size and quality are automatic. Each call requests one image. Generation
-  requests `gpt-image-2.5-flare`; editing requests `gpt-image-2.5-sunburst`.
+- Each call requests one PNG image, with model and quality from Image settings.
   The result reports the **requested** model, not a verified effective server
   model. There is no automatic model fallback.
 
@@ -85,22 +101,24 @@ may run concurrently. It runs entirely on the core tool worker with callback-
 local request state, no UI calls, and no background job that outlives its callback.
 Normal tool cancellation, reload quiescence, and result ownership apply.
 
-The image request uses the fixed ChatGPT Codex `images/generations` or
+Codex image requests use the fixed ChatGPT Codex `images/generations` or
 `images/edits` endpoint. This is a Codex backend integration, **not a versioned
 public Images API guarantee**; account entitlement and backend availability can
 change. Tokens and raw server responses are not returned to the agent or saved
 in tool details. Public extension auth/HTTP APIs are unchanged.
 
-Expiry and a definite HTTP 401 use the same synchronized OAuth refresh mechanism
+For Codex, expiry and a definite HTTP 401 use the same synchronized OAuth refresh mechanism
 as the OpenAI provider. A rejected request is retried once after refresh; a
-second 401 is an error. Image POSTs otherwise make one attempt, do not follow
+second 401 is an error. API requests never refresh OAuth or retry a 401.
+API generation and editing use JSON requests to the official Images endpoints,
+with explicit references encoded as data URLs. Image POSTs otherwise make one attempt, do not follow
 redirects, bound the buffered response size, and allow up to ten minutes per
 attempt. Quota errors, other HTTP errors, timeouts, and uncertain transport
 outcomes do not trigger automatic retries or model fallback.
 
 Cancellation cooperatively stops HTTP and prevents file publication when observed
 before the final publish. It cannot undo backend work or restore usage already
-consumed. Cancellation after publication does not delete the caller-owned file,
+consumed or API charges incurred. Cancellation after publication does not delete the caller-owned file,
 even if core subsequently discards the tool result. Check for the requested
 output before deciding whether to repeat an interrupted call.
 

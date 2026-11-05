@@ -1030,6 +1030,12 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     draft.models[0].effort_count = 1;
     snprintf(draft.models[0].default_effort, sizeof(draft.models[0].default_effort), "high");
     snprintf(draft.models[0].base_url, sizeof(draft.models[0].base_url), "https://example.test/v1");
+    draft.images.use_api = true;
+    snprintf(draft.images.codex_quality, sizeof(draft.images.codex_quality), "high");
+    snprintf(draft.images.generation_model, sizeof(draft.images.generation_model), "test-generation");
+    snprintf(draft.images.editing_model, sizeof(draft.images.editing_model), "test-editing");
+    snprintf(draft.images.generation_quality, sizeof(draft.images.generation_quality), "max");
+    snprintf(draft.images.editing_quality, sizeof(draft.images.editing_quality), "xhigh");
     draft.max_parallel_tools = 2;
     draft.font_scale = 1.5;
     draft.chat_width = 100;
@@ -1063,6 +1069,9 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
          loaded.models[0].context_limit != 64000 || strcmp(loaded.models[0].base_url, "https://example.test/v1") != 0 ||
          loaded.max_parallel_tools != draft.max_parallel_tools || loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
          loaded.spell || strcmp(loaded.spell_lang, "de_DE") != 0 ||
+         !loaded.images.use_api || strcmp(loaded.images.codex_quality, "high") ||
+         strcmp(loaded.images.generation_model, "test-generation") || strcmp(loaded.images.editing_model, "test-editing") ||
+         strcmp(loaded.images.generation_quality, "max") || strcmp(loaded.images.editing_quality, "xhigh") ||
          strcmp(loaded.models[0].default_effort, "high") != 0))
     {
         failed = 1;

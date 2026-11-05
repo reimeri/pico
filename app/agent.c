@@ -5718,6 +5718,16 @@ PicoWorkspaceId pico_agent_context_workspace_id(const PicoAgentContext *ctx)
     return AgentContextActive(ctx) ? ctx->workspace_id : 0;
 }
 
+PicoImageSettings PicoImageSettings_CopyContext(const PicoAgentContext *ctx)
+{
+    if (!ctx || !ctx->workspace_owner) return PicoImageSettings_Default();
+    PicoHost *host = pico_workspace_host(ctx->workspace_owner);
+    pthread_mutex_lock(&host->settings_mu);
+    PicoImageSettings settings = host->image_settings;
+    pthread_mutex_unlock(&host->settings_mu);
+    return settings;
+}
+
 const char *pico_agent_context_workspace(const PicoAgentContext *ctx)
 {
     return AgentContextActive(ctx) ? ctx->workspace : "";

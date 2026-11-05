@@ -507,11 +507,16 @@ and [providers](providers.md#image-bearing-tool-results).
 ## Image generation
 
 The OpenAI workspace builtin registers `generate_image`; its per-request auth
-filter and execution-time guard require selected OpenAI OAuth credentials.
+filter and execution-time guard require credentials for the backend selected in
+global Image settings: selected OpenAI OAuth for Codex, or the effective OpenAI
+API key for API (independent of active chat auth). The tool copies applied settings
+under the host settings lock when execution starts; Apply does not mutate an
+in-flight call. API requests use only the official Images endpoint, never a chat
+base URL or Codex credentials. Missing credentials never trigger backend fallback.
 Agent/profile tool restrictions remain authoritative. It is a sequential,
 callback-local tool worker, not a background task. Different agents may overlap;
-it shares the provider's single-flight OAuth refresh coordinator and retries a
-definite 401 once. Other image outcomes are not automatically replayed, and image
+Codex shares the provider's single-flight OAuth refresh coordinator and retries a
+definite 401 once; API requests do neither. Other image outcomes are not automatically replayed, and image
 POSTs do not redirect credentials. No public registration/auth/HTTP ABI changes
 are introduced.
 
@@ -711,3 +716,14 @@ closing the dock does not change extension registration or tool ownership.
 Git capture and syntax highlighting remain worker-owned until their immutable
 snapshot is adopted on the main thread. Optional context is bounded separately
 so exhausting its budget cannot remove otherwise captured changed hunks.
+
+### Builtin API-key entry
+
+`/apikey <openai|hyper|xai>` opens a host-owned masked dialog, not an inline secret
+argument. Save replaces the persisted key without changing active authentication
+or OAuth credentials; existing environment-key precedence and first-use auth
+defaulting remain intact. Save failures and environment overrides produce warnings
+for the originating agent. Cancel/Escape and host-extension shutdown discard the
+input. Secrets are not rendered, copied/cut, or added to transcript notices. The
+auth store uses its existing mutex and owner-only atomic file replacement. No
+public auth ABI is added. See [auth](auth.md#saving-api-keys-in-pico).

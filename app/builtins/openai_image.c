@@ -5,6 +5,8 @@
 #include "pico/auth.h"
 #include "http_internal.h"
 #include "image.h"
+#include "image_settings.h"
+#include "host_internal.h"
 #include "json.h"
 #include "path.h"
 
@@ -187,15 +189,16 @@ static bool HeaderValue(const char *text)
     return true;
 }
 
-static int Post(PicoAgentContext *ctx, const PicoAuthEntry *auth, bool edit, const char *body,
+static int Post(PicoAgentContext *ctx, const PicoAuthEntry *auth, bool api, bool edit, const char *body,
                 const char *turn, long *http, char **response)
 {
     if (Cancelled(ctx)) return PICO_HTTP_CANCEL;
-    if (!HeaderValue(auth->access_token) || (auth->account_id && auth->account_id[0] && !HeaderValue(auth->account_id)))
+    const char *token = api ? auth->api_key : auth->access_token;
+    if (!HeaderValue(token) || (!api && auth->account_id && auth->account_id[0] && !HeaderValue(auth->account_id)))
         return PICO_HTTP_FAIL;
     JsonBuf bearer, account; JsonBuf_Init(&bearer); JsonBuf_Init(&account);
-    JsonBuf_Puts(&bearer, "Authorization: Bearer "); JsonBuf_Puts(&bearer, auth->access_token);
-    if (auth->account_id && auth->account_id[0]) {
+    JsonBuf_Puts(&bearer, "Authorization: Bearer "); JsonBuf_Puts(&bearer, token);
+    if (!api && auth->account_id && auth->account_id[0]) {
         JsonBuf_Puts(&account, "ChatGPT-Account-Id: "); JsonBuf_Puts(&account, auth->account_id);
     }
     char turn_header[80]; snprintf(turn_header, sizeof(turn_header), "x-codex-image-turn-id: %s", turn);
@@ -207,6 +210,11 @@ static int Post(PicoAgentContext *ctx, const PicoAuthEntry *auth, bool edit, con
                     bearer.data, turn_header},
         .header_count = 5, .cancel = Cancelled, .user = ctx,
     };
+    if (api) {
+        req.url = edit ? "https://api.openai.com/v1/images/edits" : "https://api.openai.com/v1/images/generations";
+        req.headers[2] = bearer.data;
+        req.header_count = 3;
+    }
     if (account.len) req.headers[req.header_count++] = account.data;
     /* Generation is not idempotent: do not follow redirects or replay an unknown
      * outcome. The caller retries only a definite 401, once, after refresh. */
@@ -257,13 +265,18 @@ static void Generate(PicoAgentContext *ctx, const char *args, PicoToolResult *ou
     (void)state;
     const char *failure = NULL;
     JsonDoc doc = {0}; JsonBuf body; JsonBuf_Init(&body);
+    PicoImageSettings settings = PicoImageSettings_CopyContext(ctx);
+    bool api = settings.use_api;
     PicoAuthEntry auth = {0}; ImageOutput output = {.directory = -1};
     char *prompt = NULL, *path = NULL, *response = NULL;
     unsigned char *image = NULL;
     PicoToolImage *preview = NULL;
     if (Cancelled(ctx)) { failure = "cancelled."; goto done; }
     pico_auth_copy_ctx(ctx, "openai", &auth);
-    if (!HasOAuth(&auth)) { failure = "requires ChatGPT login. Run `/login openai`; API keys are not used."; goto done; }
+    if (api ? (!auth.api_key || !auth.api_key[0]) : !HasOAuth(&auth)) {
+        failure = api ? "requires an OpenAI API key. Configure one or select Codex in Image settings." :
+            "requires ChatGPT login. Run `/login openai` or select API in Image settings."; goto done;
+    }
     if (!args || !JsonValidSyntax(args, strlen(args)) || JsonParse(&doc, args, strlen(args)) || !JsonIsObject(&doc, 0)) {
         failure = "invalid arguments."; goto done;
     }
@@ -282,38 +295,41 @@ static void Generate(PicoAgentContext *ctx, const char *args, PicoToolResult *ou
         failure = "output_path must name a new .png file in an existing directory, outside Pico-owned .pico/media. Existing files and symlinks are never overwritten."; goto done;
     }
     bool edit = count > 0;
-    const char *model = edit ? kEditModel : kGenerateModel;
+    const char *model = api ? (edit ? settings.editing_model : settings.generation_model) : (edit ? kEditModel : kGenerateModel);
+    const char *quality = api ? (edit ? settings.editing_quality : settings.generation_quality) : settings.codex_quality;
     JsonBuf_Puts(&body, "{\"model\":"); JsonBuf_String(&body, model);
     JsonBuf_Puts(&body, ",\"prompt\":"); JsonBuf_String(&body, prompt);
-    JsonBuf_Puts(&body, ",\"quality\":\"auto\",\"size\":\"auto\",\"background\":");
+    JsonBuf_Puts(&body, ",\"quality\":"); JsonBuf_String(&body, quality);
+    if (api) JsonBuf_Puts(&body, ",\"output_format\":\"png\"");
+    JsonBuf_Puts(&body, ",\"size\":\"auto\",\"background\":");
     JsonBuf_String(&body, JsonEq(&doc, transparent, "true") ? "transparent" : "opaque");
     if (!AddReferences(ctx, &doc, references, count, &body)) {
         failure = "reference images must be readable regular PNG/JPEG/WebP files, at most 4096 x 4096 and 64 MiB combined."; goto done;
     }
     JsonBuf_Putc(&body, '}');
     if (body.failed) { failure = "out of memory building the image request."; goto done; }
-    if ((!auth.access_token || !auth.access_token[0] || (auth.expires_at > 0 && time(NULL) + 60 >= auth.expires_at)) &&
+    if (!api && (!auth.access_token || !auth.access_token[0] || (auth.expires_at > 0 && time(NULL) + 60 >= auth.expires_at)) &&
         !pico_openai_refresh_oauth(ctx, &auth, Cancelled, ctx, false)) {
         failure = "ChatGPT login expired. Run `/login openai`."; goto done;
     }
     char turn[33];
     if (!RandomName(turn)) { failure = "could not initialize the image request."; goto done; }
     long http = 0;
-    int rc = Post(ctx, &auth, edit, body.data, turn, &http, &response);
-    if (rc == PICO_HTTP_OK && http == 401 && !Cancelled(ctx)) {
+    int rc = Post(ctx, &auth, api, edit, body.data, turn, &http, &response);
+    if (!api && rc == PICO_HTTP_OK && http == 401 && !Cancelled(ctx)) {
         free(response); response = NULL;
         if (!pico_openai_refresh_oauth(ctx, &auth, Cancelled, ctx, true)) {
             failure = "ChatGPT login expired. Run `/login openai`."; goto done;
         }
-        rc = Post(ctx, &auth, edit, body.data, turn, &http, &response);
+        rc = Post(ctx, &auth, api, edit, body.data, turn, &http, &response);
     }
     if (rc != PICO_HTTP_OK) {
-        failure = "image request failed, timed out, or exceeded the response limit. No output file was saved. The request was not automatically replayed; subscription usage may have been consumed."; goto done;
+        failure = "image request failed, timed out, or exceeded the response limit. No output file was saved. The request was not automatically replayed; usage or API charges may have been incurred."; goto done;
     }
     if (http < 200 || http >= 300) {
         char message[256];
-        snprintf(message, sizeof(message), "ChatGPT image backend returned HTTP %ld. %s No output file was saved.", http,
-            http == 401 ? "Run `/login openai`." : http == 403 ? "Image access was denied for this account." :
+        snprintf(message, sizeof(message), "%s image backend returned HTTP %ld. %s No output file was saved.", api ? "OpenAI API" : "ChatGPT", http,
+            http == 401 ? (api ? "Check your OpenAI API key." : "Run `/login openai`.") : http == 403 ? "Image access was denied for this account." :
             http == 429 ? "Usage or rate limit reached; try later." : "The requested image model or operation may be unavailable.");
         Fail(out, message); goto done;
     }
@@ -339,7 +355,7 @@ static void Generate(PicoAgentContext *ctx, const char *args, PicoToolResult *ou
         out->images = preview; preview = NULL; out->image_count = 1;
     }
 done:
-    if (failure) Fail(out, Cancelled(ctx) ? "cancelled. Subscription usage may have been consumed." : failure);
+    if (failure) Fail(out, Cancelled(ctx) ? "cancelled. Usage or API charges may have been incurred." : failure);
     free(preview); free(image); free(response); free(prompt); free(path);
     if (output.directory >= 0) close(output.directory);
     JsonFree(&doc); JsonBuf_Free(&body); pico_auth_entry_free(&auth);
@@ -350,7 +366,10 @@ static void Filter(PicoWorkspace *workspace, PicoAgentId agent, PicoLlmEvent *ev
     (void)agent; (void)state;
     if (!event || !event->include_tools || !event->exclude) return;
     PicoAuthEntry auth = {0}; pico_auth_copy(pico_workspace_host(workspace), "openai", &auth);
-    bool available = HasOAuth(&auth); pico_auth_entry_free(&auth);
+    PicoHost *host = pico_workspace_host(workspace);
+    bool api = host && host->image_settings.use_api;
+    bool available = api ? (auth.api_key && auth.api_key[0]) : HasOAuth(&auth);
+    pico_auth_entry_free(&auth);
     if (!available) for (int i = 0; i < event->tool_count; i++)
         if (!strcmp(event->tools[i].name, "generate_image")) event->exclude[i] = true;
 }
@@ -358,7 +377,7 @@ static void Filter(PicoWorkspace *workspace, PicoAgentId agent, PicoLlmEvent *ev
 int pico_openai_image_init(PicoWorkspace *workspace)
 {
     if (!pico_add_tool(workspace, "generate_image",
-        "Generate one PNG image, or edit using supplied local reference images, with ChatGPT subscription login (consumes usage). Requires a new explicit .png output path in an existing directory; never overwrites files or writes Pico-owned .pico/media. Relative paths use the calling workspace; absolute paths are allowed. Uses Image 2.5 flare for generation and sunburst for editing with automatic size/quality. Returns a visual preview when supported, otherwise the saved path. Up to five PNG/JPEG/WebP references, 64 MiB combined, 4096 x 4096 each. Requests can take several minutes; do not blindly retry an uncertain outcome.",
+        "Generate one PNG image, or edit using supplied local reference images, with the provider selected in Image settings (Codex subscription usage or OpenAI API billing). Requires a new explicit .png output path in an existing directory; never overwrites files or writes Pico-owned .pico/media. Relative paths use the calling workspace; absolute paths are allowed. Uses configured quality and API model IDs; Codex uses Image 2.5 flare for generation and sunburst for editing. Size is automatic. Returns a visual preview when supported, otherwise the saved path. Up to five PNG/JPEG/WebP references, 64 MiB combined, 4096 x 4096 each. Requests can take several minutes; do not blindly retry an uncertain outcome.",
         "{\"type\":\"object\",\"properties\":{"
         "\"prompt\":{\"type\":\"string\",\"description\":\"What to generate, or how to edit the reference images\"},"
         "\"output_path\":{\"type\":\"string\",\"description\":\"Required workspace-relative or absolute new .png file path; parent directory must exist\"},"

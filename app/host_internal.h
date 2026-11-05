@@ -3,6 +3,7 @@
 
 #include "pico/app.h"
 #include "chat_find.h"
+#include "image_settings.h"
 #include "pico/host.h"
 #include "pico/plugin.h"
 #include "workspace_internal.h"
@@ -167,6 +168,7 @@ struct PicoHost {
     PicoComposer clarification_parked_composer;
     PicoChatFind find;
     PicoHostPreferences preferences;
+    PicoImageSettings image_settings; /* guarded by settings_mu for worker reads */
     bool sidebar_inbox_mode;
     bool sidebar_mode_loaded;
     bool subagent_settings_reload_blocked; /* profile draft/confirmation or persistence owns Settings */

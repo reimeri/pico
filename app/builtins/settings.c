@@ -1,4 +1,5 @@
 #include "pico/plugin.h"
+#include "pico/auth.h"
 #include "pico_build_info.h"
 #include "scrollbar.h"
 #include "host_internal.h"
@@ -22,6 +23,8 @@
 
 enum {
     FOCUS_NONE = 0,
+    FOCUS_IMAGE_GENERATION,
+    FOCUS_IMAGE_EDITING,
     FOCUS_CONTEXT_LIMIT,
     FOCUS_MAX_PARALLEL_TOOLS,
     FOCUS_COMPACT_AT,
@@ -56,7 +59,7 @@ typedef struct SettingsState {
     float resize_start_x, resize_start_width;
     PicoAgentId pending_browser;
     PicoWorkspaceId pending_changes;
-    int section; /* 0: general/models, 1: subagents */
+    int section; /* 0: general/models, 1: subagents, 2: images */
     PicoSubagentSettings *subagents;
     SettingsSave *save;
     bool overflow;
@@ -604,6 +607,9 @@ static void SettingsSaveCompleted(PicoHost *host, void *arg)
     }
     if (save->saved && save->prepared)
     {
+        pthread_mutex_lock(&host->settings_mu);
+        host->image_settings = save->draft.images;
+        pthread_mutex_unlock(&host->settings_mu);
         host->preferences.font_scale = save->preferences.font_scale;
         host->preferences.chat_width = save->preferences.chat_width;
         host->preferences.spell = save->preferences.spell;
@@ -1007,6 +1013,12 @@ static char *FocusBuf(SettingsState *s, size_t *cap)
     }
     switch (s->focus_kind)
     {
+    case FOCUS_IMAGE_GENERATION:
+        *cap = sizeof(s->draft.images.generation_model);
+        return s->draft.images.generation_model;
+    case FOCUS_IMAGE_EDITING:
+        *cap = sizeof(s->draft.images.editing_model);
+        return s->draft.images.editing_model;
     case FOCUS_CONTEXT_LIMIT:
         *cap = sizeof(s->context_limit);
         return s->context_limit;
@@ -1134,6 +1146,10 @@ static Clay_ElementId FocusElementId(const SettingsState *s)
 {
     switch (s->focus_kind)
     {
+    case FOCUS_IMAGE_GENERATION:
+        return CLAY_ID("SettingsImageGeneration");
+    case FOCUS_IMAGE_EDITING:
+        return CLAY_ID("SettingsImageEditing");
     case FOCUS_CONTEXT_LIMIT:
         return CLAY_ID("SettingsContextLimit");
     case FOCUS_MAX_PARALLEL_TOOLS:
@@ -1195,7 +1211,7 @@ static void RenderTab(Clay_ElementId id, const char *label, bool selected)
     bool hover = Clay_PointerOver(id);
     CLAY(id, {.layout = {.padding = {8, 8, 0, 0},
                          .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
-                         .sizing = {.width = CLAY_SIZING_PERCENT(0.5f), .height = CLAY_SIZING_PERCENT(1)}},
+                         .sizing = {.width = CLAY_SIZING_PERCENT(1.0f / 3.0f), .height = CLAY_SIZING_PERCENT(1)}},
               .backgroundColor = hover ? COLOR_CODE_BG : (Clay_Color){0},
               .border = {.width = {.bottom = selected ? 3 : 1},
                          .color = selected ? COLOR_LINK : COLOR_HR}})
@@ -1497,6 +1513,64 @@ static void RenderDefaultModelPicker(SettingsState *s)
     }
 }
 
+static const char *kImageQualities[] = {"auto", "low", "medium", "high", "xhigh", "max"};
+
+static bool ImageApiKeyAvailable(SettingsState *s)
+{
+    PicoAuthEntry auth = {0};
+    pico_auth_copy(s->host, "openai", &auth);
+    bool available = auth.api_key && auth.api_key[0];
+    pico_auth_entry_free(&auth);
+    return available;
+}
+
+static void RenderImageQuality(const char *label, int index, const char *value)
+{
+    SETTINGS_ROW_BEGIN
+        RenderLabel(label);
+        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 6,
+                                  .sizing = {.width = CLAY_SIZING_GROW(0)}}}) {
+            for (int i = 0; i < 6; i++)
+                RenderChip(CLAY_IDI("SettingsImageQuality", index * 6 + i), kImageQualities[i], !strcmp(value, kImageQualities[i]));
+        }
+    }
+}
+
+static void RenderImages(SettingsState *s)
+{
+    PicoImageSettings *images = &s->draft.images;
+    bool available = ImageApiKeyAvailable(s);
+    CLAY_TEXT(CLAY_STRING("Image"), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD, .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+    SETTINGS_ROW_BEGIN
+        PicoSettingsControl_ToggleEnabled(CLAY_ID("SettingsImageApi"), "Use OpenAI API instead of Codex", images->use_api, available);
+        if (!available && Clay_PointerOver(CLAY_ID("SettingsImageApi"))) {
+            CLAY(CLAY_ID("SettingsImageApiTip"), {
+                .floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .zIndex = 44,
+                    .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+                    .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_BOTTOM}},
+                .layout = {.padding = {8, 8, 6, 6}}, .backgroundColor = COLOR_CONTENT_BG,
+                .cornerRadius = CLAY_CORNER_RADIUS(4)}) {
+                CLAY_TEXT(CLAY_STRING("Set an OpenAI API key to enable API image generation."),
+                    CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_TEXT}));
+            }
+        }
+    }
+    if (!images->use_api) {
+        RenderImageQuality("Codex quality", 0, images->codex_quality);
+    } else {
+        SETTINGS_ROW_BEGIN
+            RenderLabel("Generation model");
+            RenderField(s, CLAY_ID("SettingsImageGeneration"), images->generation_model, "Model ID", s->focus_kind == FOCUS_IMAGE_GENERATION);
+        }
+        RenderImageQuality("Generation quality", 1, images->generation_quality);
+        SETTINGS_ROW_BEGIN
+            RenderLabel("Editing model");
+            RenderField(s, CLAY_ID("SettingsImageEditing"), images->editing_model, "Model ID", s->focus_kind == FOCUS_IMAGE_EDITING);
+        }
+        RenderImageQuality("Editing quality", 2, images->editing_quality);
+    }
+}
+
 static void RenderGeneral(SettingsState *s)
 {
     CLAY_TEXT(CLAY_STRING("General"),
@@ -1793,7 +1867,8 @@ void PicoSettingsUi_Layout(PicoHost *app)
              {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
                                    .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI_LINE) + 16)}}})
         {
-            RenderTab(CLAY_ID("SettingsGeneralTab"), "General & models", s_active_settings_state->section == 0);
+            RenderTab(CLAY_ID("SettingsGeneralTab"), "General", s_active_settings_state->section == 0);
+            RenderTab(CLAY_ID("SettingsImageTab"), "Image", s_active_settings_state->section == 2);
             RenderTab(CLAY_ID("SettingsSubagentsTab"), "Subagents", s_active_settings_state->section == 1);
         }
         CLAY(CLAY_ID("SettingsPanelScrollRow"),
@@ -1809,6 +1884,8 @@ void PicoSettingsUi_Layout(PicoHost *app)
             {
                 if (s_active_settings_state->section == 1) {
                     PicoSubagentSettings_Render(s_active_settings_state->subagents);
+                } else if (s_active_settings_state->section == 2) {
+                    RenderImages(s_active_settings_state);
                 } else {
                     RenderGeneral(s_active_settings_state);
                     CLAY_TEXT(CLAY_STRING("Models"), CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
@@ -1942,6 +2019,14 @@ static bool HoveredTextField(SettingsState *s)
 
 static bool HoveredClickable(SettingsState *s)
 {
+    if (s->section == 2) {
+        if (ImageApiKeyAvailable(s) && OverId(CLAY_STRING("SettingsImageApi"))) return true;
+        for (int row = s->draft.images.use_api ? 1 : 0; row < (s->draft.images.use_api ? 3 : 1); row++)
+            for (int q = 0; q < 6; q++)
+                if (Clay_PointerOver(CLAY_IDI("SettingsImageQuality", row * 6 + q))) return true;
+        return OverId(CLAY_STRING("SettingsCancel")) || OverId(CLAY_STRING("SettingsApply"));
+    }
+
     int i;
     int p;
     const PicoWorkspace *ws;
@@ -2025,7 +2110,8 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
         s_active_settings_state->model_dropdown_ensure_visible = false;
     }
     PicoSubagentSettings_AfterLayout(s_active_settings_state->subagents);
-    if (s_active_settings_state->section == 0 && HoveredTextField(s_active_settings_state))
+    if ((s_active_settings_state->section == 0 && HoveredTextField(s_active_settings_state)) ||
+        (s_active_settings_state->section == 2 && (OverId(CLAY_STRING("SettingsImageGeneration")) || OverId(CLAY_STRING("SettingsImageEditing")))))
     {
         app->hovered_text = true;
     }
@@ -2033,7 +2119,7 @@ static void SettingsAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     {
         app->hovered_drag = true;
     }
-    if (Clay_PointerOver(CLAY_ID("SettingsGeneralTab")) || Clay_PointerOver(CLAY_ID("SettingsSubagentsTab")) ||
+    if (Clay_PointerOver(CLAY_ID("SettingsGeneralTab")) || Clay_PointerOver(CLAY_ID("SettingsImageTab")) || Clay_PointerOver(CLAY_ID("SettingsSubagentsTab")) ||
         HoveredClickable(s_active_settings_state))
     {
         app->hovered_clickable = true;
@@ -2090,6 +2176,27 @@ static bool HandleClicks(SettingsState *s)
     {
         (void)ApplyDraft(s);
         return true;
+    }
+    if (s->section == 2) {
+        if (OverId(CLAY_STRING("SettingsImageApi"))) {
+            SetFocus(s, FOCUS_NONE, -1);
+            if (ImageApiKeyAvailable(s)) s->draft.images.use_api = !s->draft.images.use_api;
+            return true;
+        }
+        if (s->draft.images.use_api && OverId(CLAY_STRING("SettingsImageGeneration"))) {
+            FocusField(s, FOCUS_IMAGE_GENERATION, -1, CLAY_ID("SettingsImageGeneration")); return true;
+        }
+        if (s->draft.images.use_api && OverId(CLAY_STRING("SettingsImageEditing"))) {
+            FocusField(s, FOCUS_IMAGE_EDITING, -1, CLAY_ID("SettingsImageEditing")); return true;
+        }
+        char *values[] = {s->draft.images.codex_quality, s->draft.images.generation_quality, s->draft.images.editing_quality};
+        for (int row = s->draft.images.use_api ? 1 : 0; row < (s->draft.images.use_api ? 3 : 1); row++)
+            for (int q = 0; q < 6; q++)
+                if (Clay_PointerOver(CLAY_IDI("SettingsImageQuality", row * 6 + q))) {
+                    snprintf(values[row], 16, "%s", kImageQualities[q]); return true;
+                }
+        SetFocus(s, FOCUS_NONE, -1);
+        return false;
     }
     if (OverId(CLAY_STRING("SettingsAddModel")))
     {
@@ -2308,12 +2415,24 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
         return;
     }
     if (consumed) return;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsImageTab"))) {
+        PicoSubagentSettings_Blur(s->subagents);
+        SetFocus(s, FOCUS_NONE, -1);
+        CloseModelDropdown(s);
+        CancelModelDrag(s);
+        s->section = 2;
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
+        if (scroll.found && scroll.scrollPosition) scroll.scrollPosition->y = 0;
+        s->host->ui_relayout_requested = true;
+        return;
+    }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsSubagentsTab"))) {
         OpenSubagents(s);
         return;
     }
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsGeneralTab")) && s->section == 1) {
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SettingsGeneralTab")) && s->section != 0) {
         PicoSubagentSettings_Blur(s->subagents);
+        SetFocus(s, FOCUS_NONE, -1);
         s->section = 0;
         Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SettingsPanelScroll"));
         if (scroll.found && scroll.scrollPosition) scroll.scrollPosition->y = 0;

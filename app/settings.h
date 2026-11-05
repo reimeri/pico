@@ -3,6 +3,7 @@
 
 #include "agent_internal.h"
 #include "config.h"
+#include "image_settings.h"
 
 #include <stddef.h>
 
@@ -88,6 +89,7 @@ bool PicoSettings_WriteExtension(const char *name, bool disabled);
 #define PICO_SETTINGS_ERROR_MAX 4608
 
 typedef struct PicoUserSettingsDraft {
+    PicoImageSettings images;
     char default_model[128];
     int context_limit_fallback;
     int max_parallel_tools;

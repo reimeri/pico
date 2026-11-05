@@ -588,6 +588,29 @@ bool pico_auth_set_oauth_ctx(PicoAgentContext *ctx, const char *provider, const 
     return saved;
 }
 
+bool PicoAuth_SetApiKey(PicoHost *app, const char *provider, const char *key, bool *env_override)
+{
+    if (env_override) *env_override = false;
+    if (!app || !app->auth_store || !provider || !provider[0] || !key || !key[0]) return false;
+    /* Allocate before replacing so allocation failure preserves the old key. */
+    char *copy = JsonDup(key);
+    if (!copy) return false;
+    pthread_mutex_lock(&app->auth_store->mu);
+    StoredAuth *e = Ensure(app->auth_store, provider);
+    bool saved = false;
+    if (e)
+    {
+        free(e->api_key);
+        e->api_key = copy;
+        copy = NULL;
+        if (env_override) *env_override = e->env_api_key && e->env_api_key[0];
+        saved = SaveLocked(app->auth_store);
+    }
+    pthread_mutex_unlock(&app->auth_store->mu);
+    free(copy);
+    return saved;
+}
+
 bool pico_auth_set_active(PicoHost *app, const char *provider, const char *active)
 {
     if (!app || !app->auth_store || !provider || !provider[0] || !active)

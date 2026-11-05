@@ -78,9 +78,9 @@ static inline void PicoSettingsControl_Button(Clay_ElementId id, const char *lab
     }
 }
 
-static inline void PicoSettingsControl_Toggle(Clay_ElementId id, const char *label, bool on)
+static inline void PicoSettingsControl_ToggleEnabled(Clay_ElementId id, const char *label, bool on, bool enabled)
 {
-    bool hover = Clay_PointerOver(id);
+    bool hover = enabled && Clay_PointerOver(id);
     CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                          .childGap = 8,
                          .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
@@ -91,12 +91,17 @@ static inline void PicoSettingsControl_Toggle(Clay_ElementId id, const char *lab
     {
         CLAY_TEXT(PicoSettingsControl_String(label),
                   CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
-                                    .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                    .textColor = enabled ? COLOR_TEXT : COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(10), .height = CLAY_SIZING_FIXED(10)}},
-                      .backgroundColor = on ? COLOR_STATUS_ON : COLOR_STATUS_OFF,
+                      .backgroundColor = enabled && on ? COLOR_STATUS_ON : COLOR_STATUS_OFF,
                       .cornerRadius = CLAY_CORNER_RADIUS(5)}) {}
     }
+}
+
+static inline void PicoSettingsControl_Toggle(Clay_ElementId id, const char *label, bool on)
+{
+    PicoSettingsControl_ToggleEnabled(id, label, on, true);
 }
 
 #endif

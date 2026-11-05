@@ -22,7 +22,7 @@ Read the page that matches the work (`/docs <name>` or the file next to this REA
 - `workspace` — canonical path, lifecycle, `/cd`, per-workspace reload and close, limits and capacity eviction
 - `agents` — agent/session identity, copied snapshots, callback context, concurrency and lifecycle
 - `images` — local `view_image`, native formats, unchanged bytes, limits, and animated WebP
-- `image-generation` — ChatGPT-login image generation/editing, explicit output paths, previews, and usage
+- `image-generation` — Codex/API image generation/editing, settings, explicit output paths, previews, and usage
 - `browser` — embedded per-main-session browser, lazy lifecycle, control ownership, model-visible observations, agent input, developer inspection, evaluation, and viewport control
 - `views` — UI in a slot (sidebar, chat, footer, …), named overlay modals, and the chat empty-state
 - `hooks` — submit, layout, compact, successful LLM responses, session reset, turn end/cancel/error, ask/ask end; tool, tool-row, and LLM interceptors
@@ -71,7 +71,7 @@ These are the in-app implementations, shipped for reading. They are not loaded f
 
 - [`../../builtins/title.c`](../../builtins/title.c) — `set_title` (calling-agent session title)
 - [`../../builtins/image.c`](../../builtins/image.c) — `view_image` (compiled builtin, not an extension template)
-- [`../../builtins/openai_image.c`](../../builtins/openai_image.c) — `generate_image` using ChatGPT OAuth (compiled builtin)
+- [`../../builtins/openai_image.c`](../../builtins/openai_image.c) — `generate_image` using Codex OAuth or the OpenAI API (compiled builtin)
 - [`../../builtins/shell.c`](../../builtins/shell.c) — `sh`
 - [`../../builtins/background.c`](../../builtins/background.c) — `run_background` / `kill_background` / `list_background` / `log_background` (uses [`../../builtins/background_model.c`](../../builtins/background_model.c))
 - [`../../builtins/openai.c`](../../builtins/openai.c) — OpenAI-compatible provider (uses [`../../builtins/responses.c`](../../builtins/responses.c) and [`../../builtins/openai_auth.c`](../../builtins/openai_auth.c))

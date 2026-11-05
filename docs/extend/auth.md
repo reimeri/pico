@@ -39,6 +39,30 @@ static int MyInit(PicoHost *host, void **state_out)
 
 `/login myllm` and `/logout myllm` dispatch by `.provider`. With one auth registration, `/login` needs no name. With `openai`, `hyper`, and `xai` loaded, name the provider: `/login openai`, `/login hyper`, or `/login xai`. `.verbs` is a space-separated list offered as completions and passed through in `args`.
 
+## Saving API keys in Pico
+
+Use `/apikey openai`, `/apikey hyper`, or `/apikey xai` to open a masked key-entry
+modal. Paste or type a key, then click **Save** or press Enter. The field starts
+empty and never reveals the previous key. Copy/cut are disabled. Cancel or Escape
+leaves credentials unchanged; saving replaces the stored key for that provider.
+Keys are never passed through the composer, transcript, or provider requests as
+part of this command. Saving does not validate the key with the provider.
+
+Keys are stored in plaintext in `$XDG_CONFIG_HOME/pico/auth.json` (default
+`~/.config/pico/auth.json`), using owner-only file permissions. Saving leaves the
+selected authentication method and OAuth credentials unchanged. Use
+`/login <provider> key` to select API-key authentication separately. Existing
+first-use auth defaulting still applies when there is no selected method.
+
+Environment keys still override saved keys; Pico warns when this happens. Unset
+the environment variable and restart to use the stored key. A file-write failure
+is reported as a warning: the in-memory key may have changed, but persistence is
+not guaranteed. The modal is host-owned and clears its input when closed or when
+host extensions reload. Notices target the agent that opened it.
+
+This is a builtin command, not a new public extension auth setter. Extension
+`pico_auth_set_env_key` remains process-only.
+
 ## Builtin OpenAI login
 
 - `/login openai` or `/login openai browser` starts local browser OAuth with PKCE
@@ -51,7 +75,7 @@ static int MyInit(PicoHost *host, void **state_out)
   available, login fails with instructions to retry or choose device login.
 - `/login openai device` retains device-code login for remote/headless use. There
   is no automatic fallback, SSH forwarding, pasted callback, or credential import.
-- `/login openai key` selects the environment API key; `/login openai cancel`
+- `/login openai key` selects the effective API key (environment override or saved key); `/login openai cancel`
   cancels either flow. `/logout openai` cancels login and removes OAuth credentials.
 - A replacement login, key selection, logout, or host-extension replacement also
   cancels the old attempt. Cancelling a pending login leaves existing credentials
@@ -71,9 +95,11 @@ This builtin mechanism is private; it does **not** permit user `.so` auth
 extensions to leave their own threads running across frames. See
 [contracts](contracts.md#threads).
 
-The builtin [`generate_image`](image-generation.md) also uses the selected OpenAI
-OAuth login, including coordinated expiry/401 refresh. It never falls back to an
-API key and makes separate subscription-backed image requests.
+The builtin [`generate_image`](image-generation.md) uses the backend selected in
+Settings → Image. Codex uses the selected OpenAI OAuth login, including coordinated
+expiry/401 refresh, for subscription-backed image requests. API uses the effective
+OpenAI API key independently of active chat auth, with separate API billing and
+no OAuth refresh. Neither backend automatically falls back to the other.
 
 ## Store
 

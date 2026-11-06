@@ -1250,6 +1250,23 @@ static int TestUserDraftDoesNotWriteWorkspaceSettings(void)
     return failed ? Fail("saving user settings wrote workspace .pico/settings.json") : 0;
 }
 
+static int TestSidebarModeDefaultsToInbox(void)
+{
+    char temp[] = "/tmp/pico-settings-sidebar-default-XXXXXX";
+    if (!mkdtemp(temp)) return Fail("could not create sidebar defaults directory");
+    char pico[sizeof(temp) + 8], path[sizeof(temp) + 32];
+    snprintf(pico, sizeof(pico), "%s/pico", temp);
+    snprintf(path, sizeof(path), "%s/settings.json", pico);
+    Pico_MkdirP(pico);
+    setenv("XDG_CONFIG_HOME", temp, 1);
+    int failed = !PicoSettings_ReadSidebarInboxMode();
+    if (WriteFile(path, "{\"model\": \"gpt-test\"}\n") ||
+        !PicoSettings_ReadSidebarInboxMode()) failed = 1;
+    unsetenv("XDG_CONFIG_HOME");
+    CleanupDraftTemp(path, pico, temp);
+    return failed ? Fail("missing settings or sidebar preference must default to Inbox") : 0;
+}
+
 static int TestSidebarModeSavesValidJson(void)
 {
     char temp[] = "/tmp/pico-settings-sidebar-XXXXXX";
@@ -1799,6 +1816,7 @@ static int TestParallelSettingsResolution(void)
 
 int main(void)
 {
+    if (PICO_TEST_RUN(TestSidebarModeDefaultsToInbox())) return 1;
     if (PICO_TEST_RUN(TestSidebarModeSavesValidJson())) return 1;
     if (PICO_TEST_RUN(TestFreshUserSettingsCanSave())) return 1;
     if (PICO_TEST_RUN(TestUserDraftSavesCommentsOnlyObject())) return 1;

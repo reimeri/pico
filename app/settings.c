@@ -972,16 +972,16 @@ void PicoSettings_ReadPreferences(PicoHostPreferences *p)
 bool PicoSettings_ReadSidebarInboxMode(void)
 {
     char path[4096];
-    if (!UserSettingsPath(path, sizeof(path))) return false;
+    if (!UserSettingsPath(path, sizeof(path))) return true;
     size_t len = 0;
     char *src = Pico_ReadFile(path, &len);
-    if (!src) return false;
+    if (!src) return true;
     JsonStripComments(src, len);
     JsonDoc doc;
-    bool inbox = false;
+    bool inbox = true;
     if (JsonParse(&doc, src, len) == 0)
     {
-        inbox = JsonEq(&doc, JsonObjGet(&doc, 0, "sidebar_mode"), "inbox");
+        inbox = !JsonEq(&doc, JsonObjGet(&doc, 0, "sidebar_mode"), "projects");
         JsonFree(&doc);
     }
     free(src);

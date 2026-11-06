@@ -5,6 +5,7 @@
 #include "pico/http.h"
 #include "json.h"
 #include "stream_guard.h"
+#include "provider_retry.h"
 
 /* Internal Chat Completions helper. Hyper uses it; other OpenAI-compat
  * providers can pass PicoCompletionsBuildOpts rather than forking the wire format. */
@@ -30,6 +31,8 @@ typedef struct PicoCompletionsOutput {
 
 typedef struct PicoCompletionsCtx {
     PicoStreamGuard guard;
+    PicoProviderRetry *recovery;
+    bool permanent_error;
     PicoLlmCancelFn cancel;
     PicoLlmDeltaFn on_delta;
     void *user;
@@ -44,7 +47,9 @@ typedef struct PicoCompletionsCtx {
     char service_tier[32];
     char *error;
     bool failed;
-    bool capacity_error; /* explicit overload/capacity error or HTTP 429/503 */
+    bool completed;
+    bool malformed;
+    bool capacity_error; /* recognized transient provider error (capacity/rate-limit/internal) */
     bool saw_text;
     long http;
 } PicoCompletionsCtx;
@@ -69,7 +74,7 @@ void pico_completions_ctx_init(PicoCompletionsCtx *c);
 bool pico_completions_feed(PicoCompletionsCtx *c, const char *json, size_t len);
 int pico_completions_post(const char *url, const char *body, const char *bearer,
                           const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
-                          PicoLlmDeltaFn on_delta, void *user, PicoCompletionsCtx *ctx);
+                          PicoLlmDeltaFn on_delta, void *user, PicoCompletionsCtx *ctx, PicoProviderRetry *recovery);
 void pico_completions_fill_result(PicoCompletionsCtx *c, PicoLlmResult *out);
 void pico_completions_ctx_free(PicoCompletionsCtx *c);
 

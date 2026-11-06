@@ -5,12 +5,15 @@
 #include "pico/http.h"
 #include "json.h"
 #include "stream_guard.h"
+#include "provider_retry.h"
 
 /* Internal Responses-API helper used by the openai builtin. Completions
  * helpers for Hyper live in completions.c. */
 
 typedef struct PicoResponsesCtx {
     PicoStreamGuard guard;
+    PicoProviderRetry *recovery;
+    bool permanent_error;
     PicoLlmCancelFn cancel;
     PicoLlmDeltaFn on_delta;
     void *user;
@@ -25,7 +28,7 @@ typedef struct PicoResponsesCtx {
     char service_tier[32];
     char *error;
     bool failed;
-    bool capacity_error; /* explicit overload/capacity error or HTTP 429/503 */
+    bool capacity_error; /* recognized transient provider error (capacity/rate-limit/internal) */
     bool completed; /* successful terminal response observed */
     bool malformed;
     char *completed_response; /* complete terminal object; authoritative native output */
@@ -51,7 +54,7 @@ char *pico_responses_body_without_reasoning(const char *body);
 bool pico_responses_feed(PicoResponsesCtx *c, const char *json, size_t len);
 int pico_responses_post(const char *url, const char *body, const char *bearer,
                         const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
-                        PicoLlmDeltaFn on_delta, void *user, char **turn_state, PicoResponsesCtx *ctx);
+                        PicoLlmDeltaFn on_delta, void *user, char **turn_state, PicoResponsesCtx *ctx, PicoProviderRetry *recovery);
 void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out);
 void pico_responses_ctx_free(PicoResponsesCtx *c);
 /* Checks scope before request construction; NULL on success, malloc'd error otherwise. */

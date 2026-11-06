@@ -20,21 +20,35 @@ typedef struct Attempt {
     const char *chunks[5];
     const char *event;
     const char *headers;
+    PicoHttpFailure failure;
+    bool stall;
+    int elapsed;
 } Attempt;
 
 static Attempt attempts[8];
-static int attempt_count, requests, resets, announced, max_retries, delay;
+static int attempt_count, requests, resets, announced, delay;
+static long long fake_ns;
+static double first_failure;
 static double slept;
 static bool cancel_wait, cancelled;
 static JsonBuf visible;
 static bool routing_test;
 static char *routing_state;
 
+int clock_gettime(clockid_t clock, struct timespec *ts)
+{
+    (void)clock;
+    ts->tv_sec = fake_ns / 1000000000;
+    ts->tv_nsec = fake_ns % 1000000000;
+    return 0;
+}
+
 /* Replace only the wait boundary, keeping the production retry/cancellation loop. */
 int nanosleep(const struct timespec *duration, struct timespec *remaining)
 {
     (void)remaining;
     slept += duration->tv_sec + duration->tv_nsec / 1000000000.0;
+    fake_ns += duration->tv_sec * 1000000000LL + duration->tv_nsec;
     if (cancel_wait) cancelled = true;
     return 0;
 }
@@ -53,13 +67,12 @@ static void Delta(void *user, const PicoLlmDelta *delta)
         JsonBuf_Append(&visible, delta->text, delta->len);
     else if (delta->kind == PICO_LLM_DELTA_STATUS)
     {
-        int retry, maximum, seconds;
+        unsigned retry;
+        int seconds;
         const char *pending = strstr(delta->text, "retry ");
-        if (pending && sscanf(pending, "retry %d/%d in %ds", &retry, &maximum, &seconds) == 3)
+        if (pending && sscanf(pending, "retry %u in %ds", &retry, &seconds) == 2)
         {
-            Check(retry == ++announced && seconds > 0, "retry status gives the pending attempt and nonzero delay");
-            Check(seconds >= delay, "capacity retry delays do not decrease");
-            max_retries = maximum;
+            Check(retry == (unsigned)++announced && seconds > 0, "retry status gives pending attempt and delay");
             delay = seconds;
             slept = 0;
         }
@@ -76,9 +89,9 @@ int pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
     }
     Check(strcmp(req->body, "{\"request\":true}") == 0 && auth && session,
           "capacity retries replay the original body and headers");
-    if (requests) Check(slept + 0.001 >= delay && resets == requests,
-                        "each replay follows a reset and the full advertised wait");
-    if (requests > 32) { Check(false, "retry loop is bounded"); *http = 400; return PICO_HTTP_OK; }
+    if (requests) Check(slept + 1.01 >= delay,
+                        "each replay follows the advertised wait");
+    if (requests > 100) { Check(false, "retry loop is bounded"); *http = 400; return PICO_HTTP_OK; }
     const Attempt *a = &attempts[requests < attempt_count ? requests : attempt_count - 1];
     if (routing_test) {
         bool found = false;
@@ -98,12 +111,31 @@ int pico_http_post_sse(const PicoHttpPost *req, long *http, char **error)
             if (a->headers) req->on_headers(req->user, a->http, a->headers, strlen(a->headers));
         }
     }
+    Check(req->provider_managed_retry, "provider owns a single retry budget, without nested HTTP retries");
+    if (requests) Check(req->fresh_connection, "recovery avoids the suspect connection");
+    if (!requests) first_failure = fake_ns / 1e9;
+    if (req->on_headers && a->headers && !routing_test)
+        req->on_headers(req->user, a->http, a->headers, strlen(a->headers));
     requests++;
+    fake_ns += (long long)a->elapsed * 1000000000LL;
     *http = a->http;
     *error = NULL;
     if (req->cancel && req->cancel(req->user)) return PICO_HTTP_CANCEL;
     for (int i = 0; a->chunks[i]; i++)
         if (!req->on_json(req->user, a->event, a->chunks[i], strlen(a->chunks[i]))) break;
+    if (a->stall) {
+        /* A healthy initial request can be slow; only retry requests have a recovery deadline. */
+        for (int tick = 0; tick < 10000; ++tick) {
+            fake_ns += 1000000000LL;
+            if (req->cancel && req->cancel(req->user)) return PICO_HTTP_CANCEL;
+        }
+        Check(false, "in-flight recovery request must be bounded");
+    }
+    if (req->failure) *req->failure = a->failure;
+    if (a->failure != PICO_HTTP_FAILURE_NONE) {
+        *error = JsonDup("simulated transport failure");
+        return PICO_HTTP_FAIL;
+    }
     return PICO_HTTP_OK;
 }
 
@@ -111,31 +143,37 @@ static void Reset(void)
 {
     free(routing_state); routing_state = NULL; routing_test = false;
     memset(attempts, 0, sizeof(attempts));
-    attempt_count = requests = resets = announced = max_retries = delay = 0;
+    attempt_count = requests = resets = announced = delay = 0;
+    fake_ns = 1000000000LL;
     slept = 0;
     cancel_wait = cancelled = false;
     JsonBuf_Free(&visible);
     JsonBuf_Init(&visible);
 }
 
-static int Post(bool responses, PicoLlmResult *out)
+static int PostWithRecovery(bool responses, PicoLlmResult *out, PicoProviderRetry *recovery)
 {
     const char *extras[] = {"session-id: stable"};
     if (responses)
     {
         PicoResponsesCtx ctx;
         int rc = pico_responses_post("https://provider.invalid", "{\"request\":true}", "test-token",
-                                     extras, 1, Cancel, Delta, NULL, routing_test ? &routing_state : NULL, &ctx);
+                                     extras, 1, Cancel, Delta, NULL, routing_test ? &routing_state : NULL, &ctx, recovery);
         if (rc != PICO_LLM_CANCEL) pico_responses_fill_result(&ctx, out);
         pico_responses_ctx_free(&ctx);
         return rc;
     }
     PicoCompletionsCtx ctx;
     int rc = pico_completions_post("https://provider.invalid", "{\"request\":true}", "test-token",
-                                   extras, 1, Cancel, Delta, NULL, &ctx);
+                                   extras, 1, Cancel, Delta, NULL, &ctx, recovery);
     if (rc != PICO_LLM_CANCEL) pico_completions_fill_result(&ctx, out);
     pico_completions_ctx_free(&ctx);
     return rc;
+}
+
+static int Post(bool responses, PicoLlmResult *out)
+{
+    return PostWithRecovery(responses, out, NULL);
 }
 
 static Attempt Success(bool responses)
@@ -160,7 +198,8 @@ static void CheckRecovered(int rc, const PicoLlmResult *out)
 static void TestHttpRecovery(bool responses, long status)
 {
     Reset();
-    attempts[0].http = status; /* No JSON body: an HTML or empty capacity response. */
+    attempts[0].http = status;
+    attempts[0].chunks[0] = "<html>Gateway temporarily unavailable</html>";
     attempts[1] = Success(responses);
     attempt_count = 2;
     PicoLlmResult out = {0};
@@ -236,10 +275,9 @@ static void TestExhaustion(bool responses)
     attempt_count = 1; /* Repeat until the provider stops retrying. */
     PicoLlmResult out = {0};
     int rc = Post(responses, &out);
-    Check(rc == PICO_LLM_FAIL && max_retries > 0 && requests == max_retries + 1 &&
-          announced == max_retries && resets == max_retries && out.error &&
-          strcmp(out.error, "Server at capacity") == 0,
-          "capacity exhaustion stops at the advertised retry limit and preserves the last error");
+    Check(rc == PICO_LLM_FAIL && requests > 2 && out.error && strstr(out.error, "recovery timed out") &&
+          fake_ns / 1e9 - first_failure > 0 && fake_ns / 1e9 - first_failure < 601,
+          "repeated transient failures exhaust a bounded elapsed-time budget");
     pico_llm_result_free(&out);
 }
 
@@ -260,7 +298,7 @@ static void TestCapacityTextIsNotAnError(bool responses)
 {
     Reset();
     attempts[0] = responses ? (Attempt){200, {
-        "{\"type\":\"response\",\"error\":null,\"output\":[{\"type\":\"message\",\"role\":\"assistant\","
+        "{\"type\":\"response\",\"status\":\"completed\",\"error\":null,\"output\":[{\"type\":\"message\",\"role\":\"assistant\","
         "\"content\":[{\"type\":\"output_text\",\"text\":\"The servers are overloaded\"}]}]}"
     }, NULL} : (Attempt){200, {
         "{\"error\":null,\"choices\":[{\"message\":{\"content\":\"The servers are overloaded\"},\"finish_reason\":\"stop\"}]}"
@@ -356,10 +394,125 @@ static void TestRoutingAcrossCapacityRetry(void)
     Reset();
 }
 
+static void TestInterruptedStream(bool responses, bool transport)
+{
+    Reset();
+    attempts[0] = responses ? (Attempt){200, {
+        "{\"type\":\"response.output_text.delta\",\"delta\":\"discarded\"}",
+        "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"stale\",\"name\":\"sh\",\"arguments\":\"{}\"}}"
+    }, NULL} : (Attempt){200, {
+        "{\"choices\":[{\"delta\":{\"content\":\"discarded\",\"tool_calls\":[{\"index\":0,\"id\":\"stale\",\"function\":{\"name\":\"sh\",\"arguments\":\"{\"}}]}}]}"
+    }, NULL};
+    attempts[0].failure = transport ? PICO_HTTP_FAILURE_TRANSIENT : PICO_HTTP_FAILURE_NONE;
+    attempts[1] = Success(responses); attempt_count = 2;
+    PicoLlmResult out = {0};
+    CheckRecovered(Post(responses, &out), &out);
+    pico_llm_result_free(&out);
+}
+
+static void TestPermanentTransport(bool responses)
+{
+    Reset(); attempts[0].failure = PICO_HTTP_FAILURE_PERMANENT; attempt_count = 1;
+    PicoLlmResult out = {0};
+    Check(Post(responses, &out) == PICO_LLM_FAIL && requests == 1 && !resets,
+          "certificate/configuration transport failures are never replayed");
+    pico_llm_result_free(&out);
+}
+
+static void TestQuota(bool responses)
+{
+    Reset(); attempts[0] = (Attempt){429, {"{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"Quota exhausted\"}}"}, NULL};
+    attempt_count = 1; PicoLlmResult out = {0};
+    Check(Post(responses, &out) == PICO_LLM_FAIL && requests == 1 && !resets,
+          "permanent quota error overrides a retryable HTTP status");
+    pico_llm_result_free(&out);
+}
+
+static void TestRetryAfter(bool responses, bool beyond_budget)
+{
+    Reset(); attempts[0].http = 503;
+    attempts[0].headers = beyond_budget ? "HTTP/1.1 503 Busy\r\nRetry-After: 3600\r\n\r\n" :
+                                         "HTTP/1.1 503 Busy\r\nRetry-After: 20\r\n\r\n";
+    attempts[1] = Success(responses); attempt_count = 2;
+    PicoLlmResult out = {0}; int rc = Post(responses, &out);
+    if (beyond_budget) Check(rc == PICO_LLM_FAIL && requests == 1 && out.error,
+                             "Retry-After beyond recovery budget stops without an early replay");
+    else Check(rc == PICO_LLM_OK && requests == 2 && slept >= 20,
+               "server Retry-After is a minimum delay");
+    pico_llm_result_free(&out);
+}
+
+static void TestInFlightDeadline(bool responses, bool first_attempt)
+{
+    Reset(); attempts[0].http = 503; attempts[1].stall = true; attempts[1].http = 200;
+    if (first_attempt) {
+        attempts[0].stall = true;
+        attempts[0].headers = "HTTP/1.1 503 Busy\r\n\r\n";
+    }
+    attempt_count = 2; PicoLlmResult out = {0};
+    Check(Post(responses, &out) == PICO_LLM_FAIL && requests == (first_attempt ? 1 : 2) && out.error &&
+          strstr(out.error, "recovery timed out"), "deadline aborts an in-flight retry as failure, not user cancellation");
+    pico_llm_result_free(&out);
+}
+
+static void TestHealthyInitialRequest(bool responses)
+{
+    Reset(); attempts[0] = Success(responses); attempts[0].elapsed = 1200; attempt_count = 1;
+    PicoLlmResult out = {0};
+    Check(Post(responses, &out) == PICO_LLM_OK && requests == 1 && !resets,
+          "healthy initial inference is not limited by the recovery window");
+    pico_llm_result_free(&out);
+}
+
+static void TestSharedBudget(bool responses)
+{
+    Reset();
+    PicoProviderRetry recovery = {.cancel = Cancel, .on_delta = Delta};
+    attempts[0].http = 503;
+    attempts[0].headers = "HTTP/1.1 503 Busy\r\nRetry-After: 500\r\n\r\n";
+    attempts[1].http = 401;
+    attempt_count = 2;
+    PicoLlmResult out = {0};
+    Check(PostWithRecovery(responses, &out, &recovery) == PICO_LLM_FAIL && requests == 2,
+          "authentication rejection exits recovery for the bounded refresh path");
+    pico_llm_result_free(&out);
+    /* The outer adapter refreshes credentials then invokes the helper again. */
+    attempts[2] = Success(responses); attempts[2].elapsed = 120; attempt_count = 3;
+    Check(PostWithRecovery(responses, &out, &recovery) == PICO_LLM_FAIL && requests == 3 &&
+          out.error && strstr(out.error, "recovery timed out"),
+          "authentication/request-shape reentry cannot restart an existing recovery window");
+    pico_llm_result_free(&out);
+}
+
+static void TestInternalError(bool responses)
+{
+    Reset();
+    attempts[0] = (Attempt){200, {"{\"error\":{\"code\":\"internal_error\",\"message\":\"Temporary failure\"}}"}, NULL};
+    attempts[1] = Success(responses); attempt_count = 2;
+    PicoLlmResult out = {0};
+    CheckRecovered(Post(responses, &out), &out);
+    pico_llm_result_free(&out);
+}
+
 int main(void)
 {
     for (int responses = 0; responses <= 1; responses++)
     {
+        TestHealthyInitialRequest(responses);
+        TestSharedBudget(responses);
+        TestInternalError(responses);
+        TestInterruptedStream(responses, true);
+        TestInterruptedStream(responses, false);
+        TestPermanentTransport(responses);
+        TestQuota(responses);
+        TestRetryAfter(responses, false);
+        TestRetryAfter(responses, true);
+        TestInFlightDeadline(responses, false);
+        TestInFlightDeadline(responses, true);
+        TestHttpRecovery(responses, 408);
+        TestHttpRecovery(responses, 500);
+        TestHttpRecovery(responses, 502);
+        TestHttpRecovery(responses, 504);
         TestGuardRetryPolicy(responses);
         TestHttpRecovery(responses, 429);
         TestHttpRecovery(responses, 503);

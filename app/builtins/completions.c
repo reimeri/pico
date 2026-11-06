@@ -1156,11 +1156,14 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
         return true;
     }
     JsonDoc doc;
+    if (!JsonValidSyntax(json, len)) c->malformed = true;
     if (JsonParse(&doc, json, len) != 0)
     {
+        c->malformed = true;
         return true;
     }
     int err = JsonObjGet(&doc, 0, "error");
+    c->permanent_error |= pico_provider_permanent_error(&doc, err) || pico_provider_permanent_error(&doc, 0);
     bool capacity_event = pico_provider_capacity_message(event);
     c->capacity_error |= capacity_event || pico_provider_capacity_error(&doc, err);
     if (capacity_event || (err >= 0 && !JsonIsNull(&doc, err)))
@@ -1259,6 +1262,7 @@ static bool HandleJson(void *user, const char *event, const char *json, size_t l
             SetError(c, "Response truncated at the token limit. Partial text was retained; no tools were executed.");
         else if (finish && strcmp(finish, "content_filter") == 0)
             SetError(c, "Response stopped by the provider's content filter; no tools were executed.");
+        if (finish && (!strcmp(finish, "stop") || !strcmp(finish, "tool_calls"))) c->completed = true;
         free(finish);
     }
     JsonFree(&doc);
@@ -1277,7 +1281,7 @@ bool pico_completions_feed(PicoCompletionsCtx *c, const char *json, size_t len)
 static bool HandleCancel(void *user)
 {
     PicoCompletionsCtx *c = (PicoCompletionsCtx *)user;
-    return c->cancel && c->cancel(c->user);
+    return (c->cancel && c->cancel(c->user)) || pico_provider_retry_expired(c->recovery);
 }
 
 void pico_completions_ctx_init(PicoCompletionsCtx *c)
@@ -1441,25 +1445,19 @@ void pico_completions_ctx_free(PicoCompletionsCtx *c)
     c->call_count = 0;
 }
 
-static void HandleRetry(void *user, int retry, int max_retries, int delay, const char *error)
+
+static void HandleHeaders(void *user, long status, const char *headers, size_t len)
 {
-    (void)error;
-    PicoCompletionsCtx *c = user;
-    if (!c->on_delta) return;
-    char status[128];
-    if (delay)
-        snprintf(status, sizeof(status), "Connection failed — retry %d/%d in %ds", retry, max_retries, delay);
-    else
-        snprintf(status, sizeof(status), "Connecting — retry %d/%d…", retry, max_retries);
-    PicoLlmDelta delta = {.kind = PICO_LLM_DELTA_STATUS, .text = status,
-                          .len = strlen(status), .call_index = -1};
-    c->on_delta(c->user, &delta);
+    PicoCompletionsCtx *ctx = user;
+    pico_provider_retry_headers(ctx->recovery, status, headers, len);
 }
 
 int pico_completions_post(const char *url, const char *body, const char *bearer,
                           const char *const extra_headers[], int extra_count, PicoLlmCancelFn cancel,
-                          PicoLlmDeltaFn on_delta, void *user, PicoCompletionsCtx *ctx)
+                          PicoLlmDeltaFn on_delta, void *user, PicoCompletionsCtx *ctx, PicoProviderRetry *recovery)
 {
+    PicoProviderRetry local = {.cancel = cancel, .on_delta = on_delta, .user = user};
+    if (!recovery) recovery = &local;
     char *auth = NULL;
     PicoHttpPost req;
     memset(&req, 0, sizeof(req));
@@ -1467,7 +1465,8 @@ int pico_completions_post(const char *url, const char *body, const char *bearer,
     req.body = body;
     req.cancel = HandleCancel;
     req.on_json = HandleJson;
-    req.on_retry = HandleRetry;
+    req.provider_managed_retry = true;
+    req.on_headers = HandleHeaders;
     req.user = ctx;
     req.headers[req.header_count++] = "Content-Type: application/json";
     req.headers[req.header_count++] = "Accept: text/event-stream";
@@ -1489,19 +1488,37 @@ int pico_completions_post(const char *url, const char *body, const char *bearer,
         }
     }
 
-    for (int retry = 0;; retry++)
+    for (;;)
     {
         pico_completions_ctx_init(ctx);
+        ctx->recovery = recovery;
         ctx->cancel = cancel;
         ctx->on_delta = on_delta;
         ctx->user = user;
         long http = 0;
         char *err = NULL;
+        PicoHttpFailure failure = PICO_HTTP_FAILURE_NONE;
+        req.failure = &failure;
+        req.fresh_connection = recovery->attempts > 0;
+        recovery->retry_after = 0;
         int rc = pico_http_post_sse(&req, &http, &err);
         ctx->http = http;
-        ctx->capacity_error |= http == 429 || http == 503;
+        bool interrupted = rc == PICO_HTTP_OK && http < 400 && !ctx->error && !ctx->completed;
+        bool retryable = failure == PICO_HTTP_FAILURE_TRANSIENT || pico_provider_retry_http(http) ||
+                         ctx->capacity_error || interrupted;
+        if (http >= 400 && !pico_provider_retry_http(http)) retryable = false;
+        if (ctx->permanent_error || ctx->guard.error || (ctx->malformed && http < 400)) retryable = false;
+        if (pico_provider_retry_expired(recovery) && !(recovery->cancel && recovery->cancel(recovery->user))) {
+            free(err);
+            free(ctx->error); ctx->error = NULL;
+            SetError(ctx, PICO_PROVIDER_RECOVERY_ERROR);
+            free(auth);
+            return PICO_LLM_FAIL;
+        }
         if (rc != PICO_HTTP_CANCEL)
         {
+            if (ctx->malformed && !ctx->error) SetError(ctx, "Malformed provider stream");
+            if (interrupted && !ctx->error) SetError(ctx, "Provider stream ended before a valid completion marker");
             if (rc != PICO_HTTP_OK && !ctx->error)
                 SetError(ctx, err ? err : "LLM request failed");
             if (!ctx->error && http >= 400)
@@ -1525,15 +1542,21 @@ int pico_completions_post(const char *url, const char *body, const char *bearer,
             free(auth);
             return PICO_LLM_OK;
         }
-        if (retry >= PICO_PROVIDER_MAX_RETRIES || !ctx->capacity_error || ctx->guard.error)
+        if (!retryable)
         {
+            free(auth);
+            return PICO_LLM_FAIL;
+        }
+        int wait = pico_provider_retry_wait(recovery);
+        if (wait == PICO_LLM_FAIL) {
+            free(ctx->error); ctx->error = NULL;
+            SetError(ctx, PICO_PROVIDER_RECOVERY_ERROR);
             free(auth);
             return PICO_LLM_FAIL;
         }
         pico_completions_ctx_free(ctx);
         memset(ctx, 0, sizeof(*ctx));
-        if (!pico_provider_retry_wait(retry + 1, cancel, on_delta, user))
-        {
+        if (wait == PICO_LLM_CANCEL) {
             free(auth);
             return PICO_LLM_CANCEL;
         }

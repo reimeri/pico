@@ -14,8 +14,8 @@ body, header strings, and callback context must stay valid until the helper retu
 
 HTTP status is returned separately from transport success: completed HTTP 4xx/5xx
 responses can return `PICO_HTTP_OK`. Check both. Cancellation returns
-`PICO_HTTP_CANCEL`. Transport retries are limited to failures before any response
-headers/body. Providers implement semantic capacity retries themselves; see
+`PICO_HTTP_CANCEL`. Default transport retries are limited to failures before any response
+headers/body. Builtin providers manage bounded request recovery themselves; see
 [providers](providers.md). See `pico/http.h` for deadline and retry details.
 
 ## Response headers
@@ -54,3 +54,30 @@ token, preserves it across retries/continuations within one turn and account, an
 never sends it to an API-key/custom-gateway route. See
 [`../../builtins/openai.c`](../../builtins/openai.c) and
 [`../../builtins/responses.c`](../../builtins/responses.c).
+
+## Provider-managed recovery (ABI 30)
+
+`PicoHttpPost.provider_managed_retry = true` makes the helper perform **one**
+transfer, without its default connection-establishment retry loop. It does not
+make a request safe to replay. In this mode an SSE EOF inside an unfinished
+event is a transient partial-transfer failure, even for an EOF-delimited HTTP
+body; only blank-line-terminated events are complete. `fresh_connection = true` bypasses cached
+connections for that transfer. Other HTTP callers retain the default policy;
+these options are not added to buffered POST/GET requests.
+
+The optional borrowed `PicoHttpPost.failure` output points to a `PicoHttpFailure`.
+It is initialized on every call and distinguishes `NONE` (completed transport or
+provider callback abort), `TRANSIENT` (DNS/connect/handshake, HTTP/2 connection or
+stream errors, send/receive errors, empty/partial transfers, timeouts), and
+`PERMANENT` (other failures, including certificate verification and local errors).
+Always check the function return and HTTP status as well: cancellation is not a
+retry instruction, and a completed HTTP 503 has no transport failure. The pointer
+must remain valid until the call returns; Pico never retains it. Failure text is
+still malloc'd and caller-owned. Interrupted transfers do not flush an unfinished
+SSE event or partial bare JSON body into `on_json`; complete events already
+received have been delivered normally.
+
+A caller opting into recovery owns replay safety, attempt cleanup, cancellation,
+and a shared elapsed-time budget. Do not use this to blindly retry tools, image
+generation, or arbitrary side-effecting POSTs. See
+[provider recovery](providers.md#connection-retries-and-live-status).

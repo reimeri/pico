@@ -396,8 +396,19 @@ static int OnXfer(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_
     return Cancelled(c) || StreamDeadlineExpired(c) ? 1 : 0;
 }
 
+static bool TransientTransport(CURLcode rc)
+{
+    return rc == CURLE_COULDNT_RESOLVE_HOST || rc == CURLE_COULDNT_RESOLVE_PROXY ||
+           rc == CURLE_COULDNT_CONNECT || rc == CURLE_SSL_CONNECT_ERROR ||
+           rc == CURLE_HTTP2 || rc == CURLE_HTTP2_STREAM || rc == CURLE_SEND_ERROR ||
+           rc == CURLE_RECV_ERROR || rc == CURLE_GOT_NOTHING ||
+           rc == CURLE_PARTIAL_FILE || rc == CURLE_OPERATION_TIMEDOUT;
+}
+
 int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error)
 {
+    if (req && req->failure) *req->failure = PICO_HTTP_FAILURE_PERMANENT;
+
     if (out_http)
     {
         *out_http = 0;
@@ -467,8 +478,16 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
 
     char error[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
-    CURLcode rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
-                                     req->user, error, BeginStreamAttempt, &ctx);
+    if (req->fresh_connection) curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+    CURLcode rc;
+    if (req->provider_managed_retry) {
+        BeginStreamAttempt(&ctx);
+        rc = req->cancel && req->cancel(req->user) ? CURLE_ABORTED_BY_CALLBACK : curl_easy_perform(curl);
+    } else {
+        rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
+                                req->user, error, BeginStreamAttempt, &ctx);
+    }
+    if (rc != CURLE_OK) curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
@@ -489,7 +508,17 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
         snprintf(error, sizeof(error), "%s", ctx.deadline_error);
     }
     bool cancelled = req->cancel && req->cancel(req->user);
-    if (!cancelled && !ctx.json_abort && !ctx.deadline_error)
+    /* SSE dispatch requires a blank-line boundary. An EOF-delimited HTTP body
+     * can otherwise report transport success halfway through an event. Recovery
+     * callers must not accept that tail as a complete provider message. */
+    if (req->provider_managed_retry && rc == CURLE_OK && ctx.saw_sse &&
+        (ctx.acc.len || ctx.have_data)) {
+        rc = CURLE_PARTIAL_FILE;
+        snprintf(error, sizeof(error), "Provider stream ended inside an SSE event");
+    }
+    /* A failed transfer may end mid-event. Never promote its unfinished tail
+     * into a malformed provider event; complete events were already delivered. */
+    if (rc == CURLE_OK && !cancelled && !ctx.json_abort && !ctx.deadline_error)
     {
         DrainSse(&ctx, true);
     }
@@ -515,6 +544,10 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     JsonBuf_Free(&ctx.acc);
     JsonBuf_Free(&ctx.data);
     JsonBuf_Free(&ctx.headers);
+
+    if (req->failure)
+        *req->failure = ctx.json_abort || rc == CURLE_OK ? PICO_HTTP_FAILURE_NONE :
+            TransientTransport(rc) ? PICO_HTTP_FAILURE_TRANSIENT : PICO_HTTP_FAILURE_PERMANENT;
 
     /* An aborting callback already recorded why it stopped, so report success
      * and let the caller surface its own error. */

@@ -28,6 +28,13 @@ typedef void (*PicoHttpRetryFn)(void *user, int retry, int max_retries,
  * not necessarily NUL-terminated. Never persist authentication/routing headers. */
 typedef void (*PicoHttpHeadersFn)(void *user, long status, const char *headers, size_t len);
 
+/* Structured transport outcome; HTTP status remains separate. */
+typedef enum PicoHttpFailure {
+    PICO_HTTP_FAILURE_NONE,
+    PICO_HTTP_FAILURE_TRANSIENT,
+    PICO_HTTP_FAILURE_PERMANENT,
+} PicoHttpFailure;
+
 typedef struct PicoHttpPost {
     const char *url;
     const char *body;
@@ -38,6 +45,9 @@ typedef struct PicoHttpPost {
     PicoHttpJsonFn on_json;
     PicoHttpHeadersFn on_headers;
     void *user; /* passed to all callbacks */
+    bool provider_managed_retry; /* one transfer only; caller owns replay safety/budget */
+    bool fresh_connection; /* bypass the pooled connection for this transfer */
+    PicoHttpFailure *failure; /* optional borrowed output, initialized on every call */
 } PicoHttpPost;
 
 /* Buffered JSON/form request. `body` may be empty; GET ignores it. Header strings and
@@ -63,7 +73,11 @@ typedef struct PicoHttpReq {
  * Buffered GET/POST requests use a 30-second total timeout per attempt.
  * Transient handshake/DNS/connect failures before any headers/body are retried up to
  * five times with cancellable 1/2/4/8/16-second waits. HTTP errors, certificate
- * verification failures, timeouts and partial responses are not retried. */
+ * verification failures, timeouts and partial responses are not retried by default.
+ * Streaming provider_managed_retry disables that retry loop and rejects SSE EOF
+ * inside an unterminated event as a transient partial transfer. Its optional failure
+ * output classifies transport failures, not HTTP status or replay safety; check
+ * cancellation separately. Failed transfers discard incomplete framing tails. */
 int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error);
 int pico_http_post(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error);
 int pico_http_get(const PicoHttpReq *req, long *out_http, char **out_body, char **out_error);

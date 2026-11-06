@@ -777,8 +777,8 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
     return auth->api_key;
 }
 
-static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                     PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
+static int XaiStreamImpl(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                     PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state, PicoProviderRetry *recovery)
 {
     (void)state;
     if (out)
@@ -848,7 +848,7 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
         extras[extra_count++] = conv_hdr;
     }
     PicoCompletionsCtx ctx;
-    int rc = pico_completions_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, &ctx);
+    int rc = pico_completions_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, &ctx, recovery);
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
         pico_completions_ctx_free(&ctx);
@@ -865,7 +865,7 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
             return PICO_LLM_FAIL;
         }
         bearer = BearerOf(&auth, true);
-        rc = pico_completions_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, &ctx);
+        rc = pico_completions_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, &ctx, recovery);
     }
     free(body);
     pico_auth_entry_free(&auth);
@@ -892,6 +892,20 @@ static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoL
         return PICO_LLM_FAIL;
     }
     return PICO_LLM_OK;
+}
+
+static int XaiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
+{
+    PicoProviderRetry recovery = {.cancel = cancel, .on_delta = on_delta, .user = user};
+    int rc = XaiStreamImpl(agent_ctx, turn, pico_provider_retry_cancel,
+                             pico_provider_retry_delta, &recovery, out, state, &recovery);
+    if (pico_provider_retry_expired(&recovery) && !(cancel && cancel(user))) {
+        pico_llm_result_free(out);
+        out->error = JsonDup(PICO_PROVIDER_RECOVERY_ERROR);
+        return PICO_LLM_FAIL;
+    }
+    return rc;
 }
 
 static int XaiHostInit(PicoHost *app, void **state_out)

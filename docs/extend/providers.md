@@ -316,9 +316,50 @@ validation; non-strict generation does not guarantee correct arguments.
 
 Shared HTTP helpers retry transient TLS handshake, host/proxy DNS resolution, and connection failures up to five times after the initial attempt, waiting 1, 2, 4, 8, and 16 seconds. They never retry after receiving any response headers or body, including interim and redirect headers. Certificate verification failures, timeouts, HTTP errors, and interrupted streams are not retried. Deadlines reset for each attempt, not the entire retry sequence: SSE uses 600-second byte inactivity, a 3600-second total limit, and a 600-second connection limit; buffered requests retain a 30-second total limit. Cancellation is checked before attempts and throughout waits (approximately every 100 ms).
 
-Builtin streaming providers (OpenAI, Hyper, and xAI) additionally retry capacity failures at the provider layer: HTTP 429/503 and explicit overload/capacity error messages or codes, including OpenAI's “Our servers are currently overloaded. Please try again later.” This includes JSON error bodies and SSE error events (including nested Responses `response.failed` errors). They allow five retries after the initial attempt, waiting 5, 10, 20, 40, then 60 seconds. Each retry publishes a `RESET` delta to discard partial output and provisional tool calls, followed by ephemeral status showing the attempt and delay. Waits are cancellable approximately every 100 ms. The same request body, selected tier, and headers are replayed; a failed attempt never executes tools or contributes usage. After exhaustion, the last error and any final-attempt partial output follow the ordinary failed-turn behavior. Other provider errors are not capacity retries. This policy does not change the shared HTTP helpers' transport-only retry contract or add retries to authentication requests.
+Builtin streaming providers (OpenAI, Hyper, and xAI) explicitly select a single
+HTTP transfer per attempt and own one recovery budget per logical model request.
+The window begins at the **first recognized transient failure** (including a
+retryable final HTTP status received before its body) and lasts approximately ten
+minutes. It includes backoff, subsequent requests in flight, and existing bounded
+OAuth refresh/request-shape fallbacks; those paths do not reset the budget.
+Healthy initial requests retain the normal streaming deadlines. This is not a
+limit on an entire agent turn: a later model request after completed tools gets a
+new budget. No recovery state is persisted across application restarts.
 
-Both request structs accept an optional `on_retry(user, retry, max_retries, delay_seconds, error)` callback. It runs synchronously on the calling thread before each wait and again before the corresponding attempt with `delay_seconds == 0`; retry numbers are one-based. `error` is borrowed only for the callback. The callback must return promptly and must not mutate the request or access UI from a worker. All request data remains borrowed across waits until the helper returns. Builtin streaming providers bridge this callback to ephemeral activity; other callers can supply their own observer.
+Recoverable failures include transient transport failures (HTTP/2 stream resets,
+connection/send/receive errors, interrupted transfers and timeouts), HTTP
+408/429/500/502/503/504, recognized overload/capacity/internal-server/rate-limit
+errors, and a stream ending without its required completion marker. Responses
+requires a completed response; Chat Completions requires a successful `stop` or
+`tool_calls` finish reason. HTTP errors with HTML/plain-text bodies remain
+retryable. Structured permanent quota/auth/request errors override retryable HTTP
+status; certificate/configuration errors, malformed successful streams, stream
+guard failures, token-limit termination and content filters are not retried.
+The existing one-time rejected-credential refresh policy remains bounded; generic
+authentication POSTs do not gain a new retry loop.
+
+Retries use exponential backoff with jitter, capped at about sixty seconds,
+respecting `Retry-After` seconds or an HTTP-date as a minimum delay. If the server's
+wait exceeds the remaining window, Pico waits only to the deadline and fails
+without retrying early. Transport recovery uses a fresh connection. Waits poll
+cancellation approximately every 100 ms; in-flight transfers use the transport's
+progress callbacks. User cancellation remains cancellation; budget expiry is a
+failure with an explicit recovery-timeout explanation.
+
+Before waiting, a `RESET` discards provisional text, reasoning, tool calls and
+usage from the failed attempt. Ephemeral status reports the retry/delay and
+remaining recovery time. Retries replay the same logical request and retain
+committed history, previous tool results, selected tier, and account-scoped
+routing state. Failed attempts never execute local tools. Only accepted output
+is eligible for tool execution and usage accounting. This does not guarantee
+exactly-once provider inference/billing or remote server-side effects. After
+exhaustion, the existing error UI and ordinary failed-turn partial-output rules
+apply; no manual Retry action or crash-resumption feature is introduced.
+
+This policy belongs to builtin model adapters, not arbitrary HTTP calls or tools.
+Extension providers must explicitly implement their own replay safety and budget.
+
+Both request structs accept an optional `on_retry(user, retry, max_retries, delay_seconds, error)` callback. It runs synchronously on the calling thread before each wait and again before the corresponding attempt with `delay_seconds == 0`; retry numbers are one-based. `error` is borrowed only for the callback. The callback must return promptly and must not mutate the request or access UI from a worker. All request data remains borrowed across waits until the helper returns. Builtin streaming providers publish their own recovery activity instead; other HTTP callers can supply this observer.
 
 `PICO_LLM_DELTA_STATUS` replaces ephemeral provider activity using `text`/`len` and `call_index = -1`; an empty status restores the normal thinking or compaction label. The host copies the text during `on_delta` and publishes it on the main thread. It is never assistant output, thinking history, or persisted session content. Subsequent output clears the status; completion, failure, cancellation, and the next request do not retain it. The live chat indicator and delegated-agent activity display it. Providers must use deltas, not UI mutation, for worker-side status.
 

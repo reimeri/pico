@@ -1026,7 +1026,7 @@ static char *RoutingHint(const PicoLlmTurn *turn)
 
 static int PostOnce(const char *url, const char *bearer, const char *account_id, bool oauth,
                     const char *body, const PicoLlmTurn *turn, char **turn_state, PicoResponsesCtx *ctx,
-                    PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta, void *user)
+                    PicoLlmCancelFn cancel, PicoLlmDeltaFn on_delta, void *user, PicoProviderRetry *recovery)
 {
     char *acct = NULL, *routing_hint = NULL;
     char session_hdr[80];
@@ -1054,7 +1054,7 @@ static int PostOnce(const char *url, const char *bearer, const char *account_id,
         snprintf(session_hdr, sizeof(session_hdr), "session-id: %s", turn->cache_key);
         extras[extra_count++] = session_hdr;
     }
-    int rc = pico_responses_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, turn_state, ctx);
+    int rc = pico_responses_post(url, body, bearer, extras, extra_count, cancel, on_delta, user, turn_state, ctx, recovery);
     free(acct);
     free(routing_hint);
     return rc;
@@ -1138,8 +1138,8 @@ static bool CompactCancel(void *user)
     return forward->cancel && forward->cancel(forward->user);
 }
 
-static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
+static int OpenAiStreamImpl(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state, PicoProviderRetry *recovery)
 {
     (void)state;
     if (out)
@@ -1214,7 +1214,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
     char *routing_token = oauth ? ReadRoutingState(turn->turn_state, scope) : NULL;
     PicoResponsesCtx ctx;
     int rc = PostOnce(url, bearer, auth.account_id, oauth, body, turn, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
-                      user);
+                      user, recovery);
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
         pico_responses_ctx_free(&ctx);
@@ -1240,7 +1240,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         if (out->error) { free(routing_token); free(scope); free(body); pico_auth_entry_free(&auth); return PICO_LLM_FAIL; }
         bearer = BearerOf(&auth, true);
         rc = PostOnce(url, bearer, auth.account_id, true, body, turn, oauth ? &routing_token : NULL, &ctx, cancel, on_delta,
-                      user);
+                      user, recovery);
     }
     if (rc == PICO_LLM_FAIL && !turn->native_compact && !ctx.capacity_error && ctx.http != 401 &&
         ctx.error && strstr(ctx.error, "easoning"))
@@ -1250,7 +1250,7 @@ static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pi
         {
             pico_responses_ctx_free(&ctx);
             rc = PostOnce(url, BearerOf(&auth, oauth), auth.account_id, oauth, stripped, turn, oauth ? &routing_token : NULL,
-                          &ctx, cancel, on_delta, user);
+                          &ctx, cancel, on_delta, user, recovery);
             free(stripped);
         }
     }
@@ -1307,6 +1307,20 @@ static const char *FirstEnv(const char *a, const char *b)
     }
     v = getenv(b);
     return (v && v[0]) ? v : NULL;
+}
+
+static int OpenAiStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
+{
+    PicoProviderRetry recovery = {.cancel = cancel, .on_delta = on_delta, .user = user};
+    int rc = OpenAiStreamImpl(agent_ctx, turn, pico_provider_retry_cancel,
+                             pico_provider_retry_delta, &recovery, out, state, &recovery);
+    if (pico_provider_retry_expired(&recovery) && !(cancel && cancel(user))) {
+        pico_llm_result_free(out);
+        out->error = JsonDup(PICO_PROVIDER_RECOVERY_ERROR);
+        return PICO_LLM_FAIL;
+    }
+    return rc;
 }
 
 static int OpenAiHostInit(PicoHost *app, void **state_out)

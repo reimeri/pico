@@ -91,6 +91,33 @@ static int Request(const char *type, const char *body, Result *r)
     return RequestHeaders(type, body, NULL, r);
 }
 
+static int InterruptedStreamTail(bool declared_length)
+{
+    const char *body = "data: {\"complete\":true}\n\ndata: {\"cut\":";
+    Server s = {.fd = socket(AF_INET, SOCK_STREAM, 0), .body = body,
+        .header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n"};
+    if (!declared_length)
+        s.header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof(addr);
+    if (s.fd < 0 || bind(s.fd, (void *)&addr, sizeof(addr)) || listen(s.fd, 1) ||
+        getsockname(s.fd, (void *)&addr, &size)) return 1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, Serve, &s)) { close(s.fd); return 1; }
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", ntohs(addr.sin_port));
+    Result result = {0};
+    PicoHttpFailure failure = PICO_HTTP_FAILURE_NONE;
+    PicoHttpPost req = {.url = url, .body = "{}", .on_json = Got, .user = &result,
+                        .provider_managed_retry = true, .failure = &failure};
+    int rc = pico_http_post_sse(&req, NULL, NULL);
+    pthread_join(thread, NULL); close(s.fd);
+    bool ok = rc == PICO_HTTP_FAIL && failure == PICO_HTTP_FAILURE_TRANSIENT &&
+              result.count == 1 && !strcmp(result.json[0], "{\"complete\":true}");
+    if (!ok) fprintf(stderr, "Interrupted stream emitted an unfinished event or lost its transport classification\n");
+    return !ok;
+}
+
 static int ResponseHeaderBlocks(void)
 {
     Result result = {0};
@@ -599,6 +626,8 @@ int main(void)
     fail |= PICO_TEST_RUN(RetryRequest(false, true, false));
     fail |= PICO_TEST_RUN(RetryRequest(true, false, true));
     fail |= PICO_TEST_RUN(RetryRequest(false, false, false));
+    fail |= PICO_TEST_RUN(InterruptedStreamTail(true));
+    fail |= PICO_TEST_RUN(InterruptedStreamTail(false));
     fail |= PICO_TEST_RUN(NoReplayAfterHeaders());
     fail |= PICO_TEST_RUN(RetryTlsHandshake());
     fail |= PICO_TEST_RUN(KeepAliveReuse());

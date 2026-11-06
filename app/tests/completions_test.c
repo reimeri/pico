@@ -697,7 +697,7 @@ static void TestTruncatedCompletion(void)
     JsonBuf text; JsonBuf_Init(&text);
     PicoCompletionsCtx ctx;
     int rc = pico_completions_post("https://provider.invalid", "{}", "test", NULL, 0,
-                                   NULL, CapturePartialText, &text, &ctx);
+                                   NULL, CapturePartialText, &text, &ctx, NULL);
     PicoLlmResult out = {0};
     pico_completions_fill_result(&ctx, &out);
     Check(rc == PICO_LLM_FAIL && out.error && strstr(out.error, "token limit") &&
@@ -719,7 +719,7 @@ static void TestInvalidCompletedArguments(void)
         post_chunks[0] = chunk.data; post_chunks[1] = NULL;
         PicoCompletionsCtx ctx;
         int rc = pico_completions_post("https://provider.invalid", "{}", "test", NULL, 0,
-                                       NULL, NULL, NULL, &ctx);
+                                       NULL, NULL, NULL, &ctx, NULL);
         PicoLlmResult out = {0};
         pico_completions_fill_result(&ctx, &out);
         Check(rc == PICO_LLM_FAIL && out.error && out.item_count == 0,

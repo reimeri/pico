@@ -897,8 +897,8 @@ static const char *BearerOf(const PicoAuthEntry *auth, bool oauth)
     return auth->api_key;
 }
 
-static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
-                       PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
+static int HyperStreamImpl(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                       PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state, PicoProviderRetry *recovery)
 {
     (void)state;
     if (out)
@@ -955,7 +955,7 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
 
     const char *bearer = BearerOf(&auth, oauth);
     PicoCompletionsCtx ctx;
-    int rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
+    int rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx, recovery);
     if (rc == PICO_LLM_FAIL && oauth && ctx.http == 401)
     {
         pico_completions_ctx_free(&ctx);
@@ -972,7 +972,7 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
             return PICO_LLM_FAIL;
         }
         bearer = BearerOf(&auth, true);
-        rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx);
+        rc = pico_completions_post(url, body, bearer, NULL, 0, cancel, on_delta, user, &ctx, recovery);
     }
     if (rc == PICO_LLM_FAIL && !ctx.capacity_error && ctx.error && strstr(ctx.error, "easoning"))
     {
@@ -981,7 +981,7 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
         {
             pico_completions_ctx_free(&ctx);
             rc = pico_completions_post(url, stripped, BearerOf(&auth, oauth), NULL, 0, cancel, on_delta,
-                                       user, &ctx);
+                                       user, &ctx, recovery);
             free(stripped);
         }
     }
@@ -1010,6 +1010,20 @@ static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, Pic
         return PICO_LLM_FAIL;
     }
     return PICO_LLM_OK;
+}
+
+static int HyperStream(PicoAgentContext *agent_ctx, const PicoLlmTurn *turn, PicoLlmCancelFn cancel,
+                        PicoLlmDeltaFn on_delta, void *user, PicoLlmResult *out, void *state)
+{
+    PicoProviderRetry recovery = {.cancel = cancel, .on_delta = on_delta, .user = user};
+    int rc = HyperStreamImpl(agent_ctx, turn, pico_provider_retry_cancel,
+                             pico_provider_retry_delta, &recovery, out, state, &recovery);
+    if (pico_provider_retry_expired(&recovery) && !(cancel && cancel(user))) {
+        pico_llm_result_free(out);
+        out->error = JsonDup(PICO_PROVIDER_RECOVERY_ERROR);
+        return PICO_LLM_FAIL;
+    }
+    return rc;
 }
 
 static int HyperHostInit(PicoHost *app, void **state_out)

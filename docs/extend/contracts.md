@@ -727,3 +727,11 @@ for the originating agent. Cancel/Escape and host-extension shutdown discard the
 input. Secrets are not rendered, copied/cut, or added to transcript notices. The
 auth store uses its existing mutex and owner-only atomic file replacement. No
 public auth ABI is added. See [auth](auth.md#saving-api-keys-in-pico).
+
+## Theme fonts
+
+`pico/theme.h` provides `FONT_MONO` (Roboto Mono Medium) and `FONT_MONO_BOLD`
+(Roboto Mono Bold), alongside the proportional faces. Both use the host font
+cache and Unicode fallback; selecting a face does not opt into badge-specific
+ink centering. `Pico_FontAt` returns borrowed, host-owned font data: do not unload
+or mutate its glyphs, atlas, or images. See [Views: Fonts](views.md#fonts).

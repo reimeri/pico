@@ -1,6 +1,7 @@
 #include "raylib.h"
 #include "raymath.h"
 #include "render_scale.h"
+#include "text_ink.h"
 #include "stdint.h"
 #include "string.h"
 #include "stdio.h"
@@ -276,9 +277,10 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 memcpy(temp_render_buffer, textData->stringContents.chars, textData->stringContents.length);
                 temp_render_buffer[textData->stringContents.length] = '\0';
                 float device_scale = Pico_DeviceScale();
+                Vector2 origin = Pico_TextDrawOrigin(renderCommand, fontToUse);
                 DrawTextEx(fontToUse, temp_render_buffer,
-                           (Vector2){Pico_RoundToPhysical(boundingBox.x, device_scale),
-                                     Pico_RoundToPhysical(boundingBox.y, device_scale)},
+                           (Vector2){Pico_RoundToPhysical(origin.x, device_scale),
+                                     Pico_RoundToPhysical(origin.y, device_scale)},
                            Pico_FontPx(textData->fontSize), Pico_FontPx(textData->letterSpacing),
                            CLAY_COLOR_TO_RAYLIB_COLOR(textData->textColor));
     

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pico/theme.h"
+#include "text_ink.h"
 #include "docs_path.h"
 
 #include <stdio.h>
@@ -165,6 +166,28 @@ static int TestSymbolMeasurements(void)
     return 0;
 }
 
+static int TestBadgeFontAndOrdinaryText(void)
+{
+    /* Narrow and wide letters must occupy the same monospace advance. */
+    Clay_Dimensions narrow = MeasureSlice("UI", FONT_MONO_BOLD, PICO_FONT_UI);
+    Clay_Dimensions wide = MeasureSlice("MW", FONT_MONO_BOLD, PICO_FONT_UI);
+    if (narrow.width <= 0 || narrow.width != wide.width)
+        return Fail("bold monospace face must give narrow and wide initials equal advances");
+
+    /* Non-badge labels may carry extension-owned userData; none of it opts
+     * into ink centering or changes their established baseline origin. */
+    int extension_data = 42;
+    Clay_RenderCommand command = {
+        .boundingBox = {12.25f, 23.5f, 40, 18}, .userData = &extension_data,
+        .renderData.text = {.stringContents = {.chars = "UI", .length = 2},
+                            .fontId = FONT_BOLD, .fontSize = PICO_FONT_UI},
+    };
+    Vector2 origin = Pico_TextDrawOrigin(&command, Pico_FontAt(FONT_BOLD, PICO_FONT_UI));
+    if (origin.x != command.boundingBox.x || origin.y != command.boundingBox.y)
+        return Fail("ordinary text must retain its unadjusted draw origin");
+    return 0;
+}
+
 static int TestFontLifecycle(void)
 {
     Font fonts[FONT_COUNT];
@@ -213,5 +236,6 @@ int main(void)
     {
         return rc;
     }
+    if (TestBadgeFontAndOrdinaryText()) return 1;
     return TestFontLifecycle();
 }

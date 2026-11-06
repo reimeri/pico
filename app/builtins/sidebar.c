@@ -15,6 +15,7 @@
 #include "builtins/sidebar.h"
 #include "tinyfiledialogs.h"
 #include "text_range.h"
+#include "text_ink.h"
 #include "text_field_ui.h"
 
 #include "clay/clay.h"
@@ -152,8 +153,6 @@ typedef struct SidebarState
     SidebarScanWorker *scan_worker;
     SidebarCollapseEdit *collapse_edits;
     SidebarCollapseSave *collapse_save;
-    Texture2D folder_collapsed;
-    Texture2D folder_expanded;
     Texture2D archive_open;
     Texture2D archive_closed;
     Texture2D pen_icon;
@@ -1209,8 +1208,6 @@ static void EnsureFolderIcons(SidebarState *s)
         return;
     }
     s->icons_tried = true;
-    s->folder_collapsed = LoadFolderIcon("resources/folder-collapsed.png", COLOR_MUTED);
-    s->folder_expanded = LoadFolderIcon("resources/folder-expanded.png", COLOR_MUTED);
     s->pen_icon = LoadFolderIcon("resources/pen.png", COLOR_TEXT);
     s->pin_icon = LoadFolderIcon("resources/pin.png", COLOR_MUTED);
     s->worktree_icon = LoadFolderIcon("resources/worktree.png", COLOR_MUTED);
@@ -1223,16 +1220,6 @@ static void UnloadFolderIcons(SidebarState *s)
     if (!s)
     {
         return;
-    }
-    if (s->folder_collapsed.id != 0)
-    {
-        UnloadTexture(s->folder_collapsed);
-        memset(&s->folder_collapsed, 0, sizeof(s->folder_collapsed));
-    }
-    if (s->folder_expanded.id != 0)
-    {
-        UnloadTexture(s->folder_expanded);
-        memset(&s->folder_expanded, 0, sizeof(s->folder_expanded));
     }
     if (s->pen_icon.id != 0)
         UnloadTexture(s->pen_icon);
@@ -1279,6 +1266,126 @@ static void RenderFolderIcon(Texture2D *tex, const char *fallback)
         return;
     }
     RenderGlyph(fallback, COLOR_MUTED);
+}
+
+/* Project identity is presentation-only: names drive initials, canonical
+ * project paths drive colors (never checkout paths or editable names). */
+static void ProjectBadgeInitials(const char *name, char out[SIDEBAR_LABEL_CAPACITY])
+{
+    utf8proc_uint8_t *normalized = utf8proc_NFC((const utf8proc_uint8_t *)(name ? name : ""));
+    const char *text = normalized ? (const char *)normalized : name ? name : "";
+    int length = (int)strlen(text);
+    Clay_String first = {0}, last = {0}, second = {0};
+    bool in_word = false;
+    for (int pos = 0; pos < length;)
+    {
+        utf8proc_int32_t cp;
+        int step = (int)utf8proc_iterate((const utf8proc_uint8_t *)text + pos, length - pos, &cp);
+        if (step <= 0)
+        {
+            pos++;
+            in_word = false;
+            continue;
+        }
+        int start = pos;
+        pos += step;
+        utf8proc_category_t category = utf8proc_category(cp);
+        bool usable = (category >= UTF8PROC_CATEGORY_LU && category <= UTF8PROC_CATEGORY_LO) ||
+                      (category >= UTF8PROC_CATEGORY_ND && category <= UTF8PROC_CATEGORY_NO);
+        /* Keep marks and joined letters attached to the written character. */
+        utf8proc_int32_t state = 0;
+        while (pos < length)
+        {
+            utf8proc_int32_t next;
+            step = (int)utf8proc_iterate((const utf8proc_uint8_t *)text + pos, length - pos, &next);
+            if (step <= 0 || utf8proc_grapheme_break_stateful(cp, next, &state)) break;
+            cp = next;
+            pos += step;
+        }
+        if (!usable)
+        {
+            in_word = false;
+            continue;
+        }
+        Clay_String character = {.chars = text + start, .length = pos - start};
+        if (!first.length) first = character;
+        else if (!in_word)
+        {
+            second = character;
+            break;
+        }
+        last = character;
+        in_word = true;
+    }
+    Clay_String initials[] = {first, second.length ? second : last.chars != first.chars ? last : (Clay_String){0}};
+    int used = 0;
+    for (int i = 0; i < 2; i++)
+    {
+        for (int pos = 0; pos < initials[i].length;)
+        {
+            utf8proc_int32_t cp;
+            int step = (int)utf8proc_iterate((const utf8proc_uint8_t *)initials[i].chars + pos,
+                                            initials[i].length - pos, &cp);
+            if (step <= 0) break;
+            char encoded[4];
+            int bytes = (int)utf8proc_encode_char(utf8proc_toupper(cp), (utf8proc_uint8_t *)encoded);
+            if (used + bytes >= SIDEBAR_LABEL_CAPACITY) break;
+            memcpy(out + used, encoded, (size_t)bytes);
+            used += bytes;
+            pos += step;
+        }
+    }
+    free(normalized);
+    if (!used) out[used++] = '?';
+    out[used] = '\0';
+}
+
+static Clay_Color ProjectBadgeColor(const char *project_path)
+{
+    static const Clay_Color palette[] = {
+        {238, 133, 153, 255}, {230, 169, 99, 255}, {214, 191, 111, 255},
+        {136, 193, 144, 255}, {109, 194, 186, 255}, {129, 174, 235, 255},
+        {174, 153, 230, 255}, {213, 147, 206, 255},
+        {235, 148, 124, 255}, {207, 179, 145, 255}, {183, 199, 115, 255},
+        {109, 203, 163, 255}, {113, 191, 215, 255}, {146, 157, 239, 255},
+        {201, 153, 235, 255}, {188, 190, 207, 255},
+    };
+    uint32_t hash = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)project_path; p && *p; p++)
+        hash = (hash ^ *p) * 16777619u;
+    return palette[hash % (sizeof(palette) / sizeof(palette[0]))];
+}
+
+static void RenderProjectBadge(SidebarState *s, const PicoCatalogWorkspace *ws)
+{
+    char *initials = SidebarNextLabel(s);
+    if (initials) ProjectBadgeInitials(ws->name, initials);
+    Clay_Color ink = ProjectBadgeColor(ws->project_path);
+    Clay_Color base = COLOR_CONTENT_BG;
+    Clay_Color fill = {base.r + (ink.r - base.r) * 0.16f,
+                       base.g + (ink.g - base.g) * 0.16f,
+                       base.b + (ink.b - base.b) * 0.16f, 255};
+    float size = Pico_FontPx(SIDEBAR_FOLDER_ICON);
+    Clay_String label = CStr(initials ? initials : "?");
+    Clay_TextElementConfig text = {.fontId = FONT_MONO_BOLD, .fontSize = 11,
+                                  .userData = (void *)&Pico_TextInkCentered,
+                                  .textColor = ink, .wrapMode = CLAY_TEXT_WRAP_NONE};
+    /* Fit the visible glyphs, including accents and fallback glyphs, rather
+     * than their advances. The renderer centers this ink in Clay's text box. */
+    while (text.fontSize > 1)
+    {
+        Rectangle bounds = Pico_TextInkBounds(Pico_FontAt(text.fontId, text.fontSize),
+            (Clay_StringSlice){.chars = label.chars, .length = label.length}, Pico_FontPx(text.fontSize), 0);
+        if (bounds.width <= size - Pico_FontPx(2) && bounds.height <= size - Pico_FontPx(2)) break;
+        text.fontSize--;
+    }
+    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                       .height = CLAY_SIZING_FIXED(size)},
+                            .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+                  .backgroundColor = fill, .cornerRadius = CLAY_CORNER_RADIUS(Pico_FontPx(4))})
+    {
+        CLAY_TEXT(label, text);
+    }
 }
 
 typedef enum SidebarDotKind
@@ -1663,10 +1770,10 @@ static void RenderWorkspaceRow(PicoHost *host, SidebarState *s, const PicoCatalo
         CLAY(edit_id, {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON)),
                                              .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}}})
         {
-            RenderFolderIcon(edit_hovered ? &s->pen_icon : ws->collapsed ? &s->folder_collapsed
-                                                                         : &s->folder_expanded,
-                             edit_hovered ? "*" : ws->collapsed ? ">"
-                                                                : "v");
+            if (edit_hovered)
+                RenderFolderIcon(&s->pen_icon, "*");
+            else
+                RenderProjectBadge(s, ws);
         }
         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
@@ -2166,9 +2273,12 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
     float width = SidebarLabelWidth(s->row_width, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0);
     Clay_String title = SidebarDisplayTitle(s, row->title, width);
     Clay_String age = InboxAgeLabel(s, row->last_user_action);
-    float age_width = age.length ? SidebarTextWidth(age.chars, age.length) + SIDEBAR_ROW_GAP : 0;
-    Clay_String project = SidebarDisplayTitle(s, s->workspaces[row->ws_index].name, width - age_width);
-    float height = Pico_FontPx(PICO_FONT_UI) + Pico_FontPx(PICO_FONT_CAPTION) + 14;
+    float age_width = age.length ? SidebarTextWidth(age.chars, age.length) + 2 * SIDEBAR_ROW_GAP : 0;
+    float badge_width = Pico_FontPx(SIDEBAR_FOLDER_ICON);
+    Clay_String project = SidebarDisplayTitle(s, s->workspaces[row->ws_index].name,
+                                              width - age_width - badge_width - SIDEBAR_ROW_GAP);
+    float subtitle_height = fmaxf(Pico_FontPx(PICO_FONT_CAPTION), badge_width);
+    float height = Pico_FontPx(PICO_FONT_UI) + subtitle_height + 14;
     const char *loading_path = NULL, *loading_id = NULL;
     bool loading = PicoSession_LoadTarget(host, &loading_path, &loading_id) &&
                    !strcmp(loading_path, row->path) && !strcmp(loading_id, row->session_id);
@@ -2199,9 +2309,12 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                 CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
                     .textColor = row->missing ? COLOR_STATUS_ERR : COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = SIDEBAR_ROW_GAP,
+                    .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                     .sizing = {.width = CLAY_SIZING_GROW(0),
-                               .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_CAPTION))}}})
+                               .height = CLAY_SIZING_FIXED(subtitle_height)}}})
                 {
+                    RenderProjectBadge(s, &s->workspaces[row->ws_index]);
                     CLAY_TEXT(project, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
                         .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
                     if (age.length)
@@ -2403,7 +2516,7 @@ bool PicoSidebar_RenderProjectPicker(PicoHost *host)
                                      .sizing = {.width = CLAY_SIZING_GROW(0)}},
                           .backgroundColor = RowFill(false, Clay_PointerOver(id)), .cornerRadius = CLAY_CORNER_RADIUS(8)})
                 {
-                    RenderFolderIcon(&s->folder_collapsed, ">");
+                    RenderProjectBadge(s, ws);
                     CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
                     {
                         CLAY_TEXT(CStr(ws->name), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
@@ -2575,8 +2688,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                   .cornerRadius = CLAY_CORNER_RADIUS(6),
                   .border = {.width = {1, 1, 1, 1}, .color = (Clay_Color){80, 140, 255, 200}}})
             {
-                RenderFolderIcon(drag_ws->collapsed ? &s->folder_collapsed : &s->folder_expanded,
-                                 drag_ws->collapsed ? ">" : "v");
+                RenderProjectBadge(s, drag_ws);
                 CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
                 {
                     CLAY_TEXT(preview,

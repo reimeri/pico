@@ -12,6 +12,7 @@ enum {
     FONT_ITALIC,
     FONT_BOLD_ITALIC,
     FONT_MONO,
+    FONT_MONO_BOLD,
     FONT_COUNT,
 };
 

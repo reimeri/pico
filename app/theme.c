@@ -1,4 +1,5 @@
 #include "theme_internal.h"
+#include "text_ink.h"
 #include "docs_path.h"
 
 #include <math.h>
@@ -25,6 +26,7 @@ static const char *kFontPaths[FONT_COUNT] = {
     "resources/Roboto-Italic.ttf",
     "resources/Roboto-BoldItalic.ttf",
     "resources/RobotoMono-Medium.ttf",
+    "resources/RobotoMono-Bold.ttf",
 };
 
 static int *g_codepoints = NULL;
@@ -508,6 +510,71 @@ void Pico_SetDeviceFontScale(float scale)
 float Pico_DeviceFontScale(void)
 {
     return g_device_font_scale;
+}
+
+const char Pico_TextInkCentered = 0;
+
+Rectangle Pico_TextInkBounds(Font font, Clay_StringSlice text, float size, float spacing)
+{
+    Rectangle bounds = {0};
+    if (!font.glyphs || !font.recs || font.baseSize <= 0) return bounds;
+    float scale = size / font.baseSize;
+    float pen = 0;
+    bool found = false;
+    for (int pos = 0; pos < text.length;)
+    {
+        /* Raylib's decoder expects a terminated string, unlike Clay slices. */
+        char bytes[5] = {0};
+        int available = text.length - pos;
+        if (available > 4) available = 4;
+        memcpy(bytes, text.chars + pos, (size_t)available);
+        int count = 0;
+        int cp = GetCodepointNext(bytes, &count);
+        if (count <= 0 || count > available) count = 1;
+        pos += count;
+        int index = GetGlyphIndex(font, cp);
+        GlyphInfo glyph = font.glyphs[index];
+        Rectangle ink = glyph.image.data ? GetImageAlphaBorder(glyph.image, 0.0f) :
+                                          (Rectangle){0, 0, font.recs[index].width, font.recs[index].height};
+        if (cp != ' ' && cp != '\t' && ink.width > 0 && ink.height > 0)
+        {
+            ink.x = pen + (glyph.offsetX + ink.x) * scale;
+            ink.y = (glyph.offsetY + ink.y) * scale;
+            ink.width *= scale;
+            ink.height *= scale;
+            if (!found) bounds = ink;
+            else
+            {
+                float right = fmaxf(bounds.x + bounds.width, ink.x + ink.width);
+                float bottom = fmaxf(bounds.y + bounds.height, ink.y + ink.height);
+                bounds.x = fminf(bounds.x, ink.x);
+                bounds.y = fminf(bounds.y, ink.y);
+                bounds.width = right - bounds.x;
+                bounds.height = bottom - bounds.y;
+            }
+            found = true;
+        }
+        pen += (glyph.advanceX ? glyph.advanceX : font.recs[index].width) * scale + spacing;
+    }
+    return bounds;
+}
+
+Vector2 Pico_TextDrawOrigin(const Clay_RenderCommand *command, Font font)
+{
+    Clay_BoundingBox box = command->boundingBox;
+    Vector2 origin = {box.x, box.y};
+    if (command->userData == &Pico_TextInkCentered)
+    {
+        const Clay_TextRenderData *text = &command->renderData.text;
+        Rectangle ink = Pico_TextInkBounds(font, text->stringContents,
+                                          Pico_FontPx(text->fontSize), Pico_FontPx(text->letterSpacing));
+        if (ink.width > 0 && ink.height > 0)
+        {
+            origin.x += (box.width - ink.width) * 0.5f - ink.x;
+            origin.y += (box.height - ink.height) * 0.5f - ink.y;
+        }
+    }
+    return origin;
 }
 
 static Clay_Dimensions MeasureWithFont(const char *text, int32_t length,

@@ -5,6 +5,8 @@
 #include "test_io.h"
 #endif
 #include "theme_internal.h"
+#include "text_ink.h"
+#include "render_scale.h"
 #include "pico/host.h"
 #include "pico/plugin.h"
 #include "pico/auth.h"
@@ -18215,6 +18217,150 @@ done:
     return !good;
 }
 
+static bool BadgeColorEqual(Clay_Color a, Clay_Color b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+/* Inspect the painted glyph pixels independently of the production ink-bounds
+ * calculation. The text command must place that ink at the badge's center,
+ * within half a physical pixel of unavoidable draw-origin snapping. */
+static bool BadgeInkCentered(const Clay_RenderCommand *command, Clay_BoundingBox badge)
+{
+    if (!command || command->renderData.text.fontId != FONT_MONO_BOLD) return false;
+    const Clay_TextRenderData *text = &command->renderData.text;
+    Font font = Pico_FontAt(text->fontId, text->fontSize);
+    Vector2 origin = Pico_TextDrawOrigin(command, font);
+    float device = Pico_DeviceFontScale();
+    origin.x = Pico_RoundToPhysical(origin.x, device);
+    origin.y = Pico_RoundToPhysical(origin.y, device);
+    float scale = Pico_FontPx(text->fontSize) / font.baseSize;
+    float pen = 0, left = INFINITY, top = INFINITY, right = -INFINITY, bottom = -INFINITY;
+    for (int pos = 0; pos < text->stringContents.length;)
+    {
+        utf8proc_int32_t cp;
+        int bytes = (int)utf8proc_iterate((const utf8proc_uint8_t *)text->stringContents.chars + pos,
+                                         text->stringContents.length - pos, &cp);
+        if (bytes <= 0) return false;
+        pos += bytes;
+        int index = GetGlyphIndex(font, cp);
+        GlyphInfo glyph = font.glyphs[index];
+        Color *pixels = LoadImageColors(glyph.image);
+        if (!pixels) return false;
+        for (int y = 0; y < glyph.image.height; y++)
+            for (int x = 0; x < glyph.image.width; x++)
+            {
+                if (!pixels[y * glyph.image.width + x].a) continue;
+                float px = origin.x + pen + (glyph.offsetX + x) * scale;
+                float py = origin.y + (glyph.offsetY + y) * scale;
+                left = fminf(left, px); top = fminf(top, py);
+                right = fmaxf(right, px + scale); bottom = fmaxf(bottom, py + scale);
+            }
+        UnloadImageColors(pixels);
+        pen += (glyph.advanceX ? glyph.advanceX : font.recs[index].width) * scale +
+               Pico_FontPx(text->letterSpacing);
+    }
+    return isfinite(left) && left >= badge.x && top >= badge.y &&
+           right <= badge.x + badge.width && bottom <= badge.y + badge.height &&
+           fabsf((left + right) * 0.5f - (badge.x + badge.width * 0.5f)) * device <= 0.501f &&
+           fabsf((top + bottom) * 0.5f - (badge.y + badge.height * 0.5f)) * device <= 0.501f;
+}
+
+static int TestSidebarProjectBadges(void)
+{
+    static const struct { const char *name, *initials; } cases[] = {
+        {"u-i", "UI"}, {"m-w", "MW"}, {"Ω-Ж", "ΩЖ"},
+        {"clay-app", "CA"}, {"scratch", "SH"}, {"toor", "TR"},
+        {"my cool project", "MC"}, {"a", "A"}, {"api_v2", "AV"},
+        {"9.tools", "9T"}, {"...", "?"}, {"école été", "ÉÉ"},
+        {"東京開発", "東発"}, {"कि-test", "किT"}, {"e\xCC\x81" "cole", "ÉE"},
+    };
+    InteractionFixture f = {0};
+    bool good = false;
+    Clay_Color color = {0};
+    float original_scale = Pico_FontScale();
+    float original_device_scale = Pico_DeviceFontScale();
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f)) goto done;
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    Clay_SetPointerState((Clay_Vector2){0}, false);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        phase = cases[i].name;
+        if (PicoCatalog_SetProjectName(f.dir, cases[i].name)) goto done;
+        g_sidebar_poll_due = true;
+        if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+        Clay_RenderCommand *badge = FindCardText(&commands, cases[i].initials);
+        Clay_RenderCommand *name = FindCardText(&commands, cases[i].name);
+        Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarWs", 0));
+        if (!badge || !name || !row.found || !SidebarTextValidUtf8(badge) ||
+            badge->boundingBox.x + badge->boundingBox.width > name->boundingBox.x ||
+            badge->boundingBox.y < row.boundingBox.y ||
+            badge->boundingBox.y + badge->boundingBox.height > row.boundingBox.y + row.boundingBox.height)
+            goto done;
+        if (!i) color = badge->renderData.text.textColor;
+        else if (!BadgeColorEqual(color, badge->renderData.text.textColor)) goto done;
+        const float scales[] = {0.75f, 1.0f, 2.0f};
+        const float devices[] = {1.0f, 1.25f, 2.0f};
+        for (size_t scale = 0; scale < sizeof(scales) / sizeof(scales[0]); scale++)
+            for (size_t device = 0; device < sizeof(devices) / sizeof(devices[0]); device++)
+            {
+                Pico_SetFontScale(scales[scale]);
+                Pico_SetDeviceFontScale(devices[device]);
+                Clay_ResetMeasureTextCache();
+                commands = PicoHost_LayoutShell(f.host, 800, 0);
+                badge = FindCardText(&commands, cases[i].initials);
+                Clay_ElementData icon = Clay_GetElementData(CLAY_IDI("SidebarEdit", 0));
+                if (!icon.found || !BadgeInkCentered(badge, icon.boundingBox))
+                {
+                    fprintf(stderr, "ink center fail name=%s scale=%f device=%f\n",
+                            cases[i].name, scales[scale], devices[device]);
+                    goto done;
+                }
+            }
+        Pico_SetFontScale(original_scale);
+        Pico_SetDeviceFontScale(original_device_scale);
+        Clay_ResetMeasureTextCache();
+    }
+    Pico_SetFontScale(original_scale);
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    phase = "drag preview";
+    Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarWs", 0));
+    g_find_pointer = (Vector2){row.boundingBox.x + row.boundingBox.width / 2,
+                              row.boundingBox.y + row.boundingBox.height / 2};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    g_find_press = g_find_down = true;
+    pico_run_hooks(f.host, PICO_HOOK_AFTER_LAYOUT, 0);
+    g_find_press = false;
+    g_find_pointer.y += row.boundingBox.height * 2;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(f.host, PICO_HOOK_AFTER_LAYOUT, 0);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    Clay_ElementData preview = Clay_GetElementData(CLAY_ID("SidebarDragPreview"));
+    if (!preview.found) goto done;
+    int badges = 0;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+        if (command->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+        Clay_StringSlice label = command->renderData.text.stringContents;
+        if (label.length != (int)strlen("ÉE") || memcmp(label.chars, "ÉE", (size_t)label.length)) continue;
+        if (!BadgeColorEqual(color, command->renderData.text.textColor)) goto done;
+        badges++;
+    }
+    if (badges != 2) goto done;
+    good = true;
+done:
+    Pico_SetFontScale(original_scale);
+    Pico_SetDeviceFontScale(original_device_scale);
+    Clay_ResetMeasureTextCache();
+    if (!good) fprintf(stderr, "project badge phase: %s\n", phase);
+    InteractionFixtureFree(&f);
+    if (!good) Fail("project badges must render name-derived Unicode initials and keep their tint across renames");
+    return !good;
+}
+
 static int TestSidebarModesAndPicker(void)
 {
     InteractionFixture f = {0};
@@ -18224,6 +18370,9 @@ static int TestSidebarModesAndPicker(void)
     if (!InteractionFixtureInit(&f) || !mkdtemp(stashed)) goto done;
     Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
     if (!SidebarCommandsContain(&commands, "Projects")) goto done;
+    Clay_RenderCommand *badge = FindCardText(&commands, "OL");
+    if (!badge) goto done;
+    Clay_Color badge_color = badge->renderData.text.textColor;
     if (PicoCatalog_Ensure(stashed) || PicoCatalog_SetProjectStashed(stashed, true) ||
         PicoCatalog_SetProjectName(stashed, "Hidden project")) goto done;
     g_sidebar_poll_due = true;
@@ -18234,6 +18383,18 @@ static int TestSidebarModesAndPicker(void)
     phase = "switch while working";
     (void)PicoHost_LayoutShell(f.host, 800, 0);
     if (!ClickSidebarId(f.host, CLAY_ID("SidebarMode")) || pico_agent_active(f.host) != f.agent) goto done;
+    phase = "inbox project subtitle badge";
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    badge = FindCardText(&commands, "OL");
+    Clay_RenderCommand *inbox_project = FindCardText(&commands, "Original");
+    Clay_ElementData inbox_row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0));
+    if (!badge || !inbox_project || !inbox_row.found ||
+        !BadgeColorEqual(badge_color, badge->renderData.text.textColor) ||
+        badge->boundingBox.x + badge->boundingBox.width > inbox_project->boundingBox.x ||
+        fabsf((badge->boundingBox.y + badge->boundingBox.height * 0.5f) -
+              (inbox_project->boundingBox.y + inbox_project->boundingBox.height * 0.5f)) > 0.01f ||
+        badge->boundingBox.y + badge->boundingBox.height > inbox_row.boundingBox.y + inbox_row.boundingBox.height)
+        goto done;
     phase = "picker leaves background work alone";
     int agent_count = pico_agent_count(f.host);
     if (!ClickSidebarId(f.host, CLAY_ID("SidebarAddWs"))) goto done;
@@ -18246,6 +18407,8 @@ static int TestSidebarModesAndPicker(void)
         Clay_GetElementData(CLAY_ID("ComposerAlign")).found ||
         fabsf(picker.boundingBox.y + picker.boundingBox.height / 2 -
               (chat.boundingBox.y + chat.boundingBox.height / 2)) > 1) goto done;
+    badge = FindCardText(&commands, "OL");
+    if (!badge || !BadgeColorEqual(badge_color, badge->renderData.text.textColor)) goto done;
     phase = "compact picker rows";
     Clay_ElementData project = Clay_GetElementData(CLAY_IDI("InboxProject", 0));
     Clay_ElementData add = Clay_GetElementData(CLAY_ID("InboxAddProject"));
@@ -18274,9 +18437,12 @@ static int TestSidebarModesAndPicker(void)
     f.host = NULL;
     if (pico_host_init(&f.host, NULL, true) != PICO_OK) goto done;
     WaitPluginLoad(f.host);
+    if (!WaitCatalogScanDone(f.host, g_catalog_scan_done_calls + 1)) goto done;
     InteractionOmitDrawHooks(f.host);
     commands = PicoHost_LayoutShell(f.host, 800, 0);
     if (!SidebarCommandsContain(&commands, "Inbox") || !Clay_GetElementData(CLAY_ID("InboxProjectPicker")).found) goto done;
+    badge = FindCardText(&commands, "OL");
+    if (!badge || !BadgeColorEqual(badge_color, badge->renderData.text.textColor)) goto done;
     good = true;
 done:
     if (!good) fprintf(stderr, "sidebar modes phase: %s\n", phase);
@@ -18298,6 +18464,7 @@ static int RunSidebarModeShellCase(bool with_sidebar)
     bool good = false;
     ChatStabilitySnapshot expected, current;
     Clay_BoundingBox sidebar_root = {0};
+    Clay_Color project_color = {0};
     if (!InteractionFixtureInit(&f)) goto done;
     if (!with_sidebar) f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
     PicoAgent *selected = PicoHost_FindAgent(f.host, f.agent);
@@ -18331,7 +18498,18 @@ static int RunSidebarModeShellCase(bool with_sidebar)
         if (!scroll.found || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
         PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height,
                                    &scroll.scrollPosition->y);
-        (void)PicoHost_LayoutShell(f.host, 360, 0);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 360, 0);
+        /* The real Inbox subtitle now includes the same fixed-size badge as
+         * Projects. Its extra height must never feed shell bottom-follow. */
+        if (with_sidebar && (frame == 20 || frame == 40))
+        {
+            Clay_RenderCommand *badge = FindCardText(&commands, "OL");
+            Clay_RenderCommand *project = FindCardText(&commands, "Original");
+            if (!badge || !project ||
+                badge->boundingBox.x + badge->boundingBox.width > project->boundingBox.x) goto done;
+            if (frame == 20) project_color = badge->renderData.text.textColor;
+            else if (!BadgeColorEqual(project_color, badge->renderData.text.textColor)) goto done;
+        }
         if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
         if (with_sidebar && frame == 40)
         {
@@ -19062,7 +19240,8 @@ static int TestSidebarInboxAge(void)
         commands = PicoHost_LayoutShell(f.host, 800, 0);
         Clay_RenderCommand *age = FindSidebarSessionTitle(&commands, cases[i].label);
         Clay_RenderCommand *project = FindSidebarSessionTitle(&commands, "Original");
-        if (!age || !project || fabsf(age->boundingBox.y - project->boundingBox.y) > 0.01f ||
+        if (!age || !project || fabsf((age->boundingBox.y + age->boundingBox.height * 0.5f) -
+                  (project->boundingBox.y + project->boundingBox.height * 0.5f)) > 0.01f ||
             project->boundingBox.x + project->boundingBox.width >= age->boundingBox.x ||
             memcmp(&age->renderData.text.textColor, &project->renderData.text.textColor, sizeof(Clay_Color))) goto done;
         float edge = age->boundingBox.x + age->boundingBox.width;
@@ -19084,7 +19263,8 @@ static int TestSidebarInboxAge(void)
     age = FindSidebarSessionTitle(&commands, "400d");
     Clay_RenderCommand *project = FindTrimmedCardText(&commands, long_name);
     if (!age || !project || project->boundingBox.x + project->boundingBox.width >= age->boundingBox.x ||
-        fabsf(age->boundingBox.y - project->boundingBox.y) > 0.01f ||
+        fabsf((age->boundingBox.y + age->boundingBox.height * 0.5f) -
+                  (project->boundingBox.y + project->boundingBox.height * 0.5f)) > 0.01f ||
         fabsf(age->boundingBox.x + age->boundingBox.width - right) > 0.01f) goto done;
     Pico_SetFontScale(old_scale);
 
@@ -21134,7 +21314,7 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--sidebar-headings") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
     if (argc == 2 && strcmp(argv[1], "--sidebar-modes") == 0)
-        return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
+        return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
                PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) ||
                PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) || PICO_TEST_RUN(RunSidebarModeShellCase(false)) ||
                PICO_TEST_RUN(RunSidebarModeShellCase(true)) ||
@@ -21205,7 +21385,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestExtensionPendingRollbackCapacity())) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
-        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
+        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
         PICO_TEST_RUN(TestSidebarInboxPins()) || PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||

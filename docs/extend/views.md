@@ -33,6 +33,14 @@ static int HelloInit(PicoHost *host, void **state_out)
 
 Full file: [`../../examples/hello.c`](../../examples/hello.c).
 
+## Fonts
+
+Use `FONT_MONO` for Roboto Mono Medium or `FONT_MONO_BOLD` for Roboto Mono Bold.
+Both retain Pico's Unicode fallback behavior. Font IDs select a face, not an
+alignment policy: ordinary text still uses advance widths and normal line metrics.
+Builtin project badges opt into a private ink-centering treatment; that treatment
+is not implied by choosing the bold monospace face in an extension.
+
 ## Clay layout lifetime
 
 Pico owns the process-wide Clay context and its arena. Arena initialization, replacement, and destruction are host-internal; extensions emit layout through the normal Clay APIs and must not call `Clay_Initialize`, `Clay_SetCurrentContext`, or change Clay capacity limits.

@@ -156,6 +156,9 @@ typedef struct SidebarState
     Texture2D archive_open;
     Texture2D archive_closed;
     Texture2D pen_icon;
+    Texture2D copy_icon;
+    Texture2D trash_icon;
+    Texture2D back_icon;
     bool stash_expanded;
     bool edit_open;
     bool delete_confirm;
@@ -1208,6 +1211,9 @@ static void EnsureFolderIcons(SidebarState *s)
         return;
     }
     s->icons_tried = true;
+    s->copy_icon = LoadFolderIcon("resources/copy.png", COLOR_TEXT);
+    s->trash_icon = LoadFolderIcon("resources/trash.png", (Clay_Color){235, 105, 105, 255});
+    s->back_icon = LoadFolderIcon("resources/arrow-left.png", COLOR_TEXT);
     s->pen_icon = LoadFolderIcon("resources/pen.png", COLOR_TEXT);
     s->pin_icon = LoadFolderIcon("resources/pin.png", COLOR_MUTED);
     s->worktree_icon = LoadFolderIcon("resources/worktree.png", COLOR_MUTED);
@@ -1221,6 +1227,12 @@ static void UnloadFolderIcons(SidebarState *s)
     {
         return;
     }
+    if (s->copy_icon.id != 0)
+        UnloadTexture(s->copy_icon);
+    if (s->trash_icon.id != 0)
+        UnloadTexture(s->trash_icon);
+    if (s->back_icon.id != 0)
+        UnloadTexture(s->back_icon);
     if (s->pen_icon.id != 0)
         UnloadTexture(s->pen_icon);
     if (s->pin_icon.id != 0)
@@ -2759,13 +2771,20 @@ static void OpenWorkspaceEdit(SidebarState *s, int index, int latch_button)
         s->host->ui_relayout_requested = true;
 }
 
-static void RenderEditAction(Clay_ElementId id, const char *label, bool danger)
+static void RenderEditAction(Clay_ElementId id, const char *label, bool danger, Texture2D *icon)
 {
     CLAY(id, {.layout = {.padding = {7, 7, 5, 5},
+                         .childGap = 7,
+                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                          .sizing = {.width = CLAY_SIZING_PERCENT(1)}},
               .backgroundColor = Clay_PointerOver(id) ? (Clay_Color){52, 52, 62, 255} : (Clay_Color){0, 0, 0, 0},
               .cornerRadius = CLAY_CORNER_RADIUS(4)})
     {
+        /* Reserve the same gutter even when an image cannot be loaded. */
+        float size = Pico_FontPx(SIDEBAR_FOLDER_ICON);
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
+                                           .height = CLAY_SIZING_FIXED(size)}},
+                      .image = {.imageData = icon && icon->id ? icon : NULL}}) {}
         CLAY_TEXT(CStr(label), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
                                                  .fontSize = PICO_FONT_UI,
                                                  .textColor = danger ? (Clay_Color){235, 105, 105, 255} : COLOR_TEXT,
@@ -2826,16 +2845,17 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
             CLAY_TEXT(CStr(s->edit_name[0] ? s->edit_name : " "),
                       CLAY_TEXT_CONFIG(field_config));
         }
-        RenderEditAction(CLAY_ID("SidebarEditSave"), "Save name", false);
-        RenderEditAction(CLAY_ID("SidebarEditStash"), s->workspaces[i].stashed ? "Restore to Projects" : "Stash project", false);
+        RenderEditAction(CLAY_ID("SidebarEditSave"), "Save name", false, &s->pen_icon);
+        RenderEditAction(CLAY_ID("SidebarEditStash"), s->workspaces[i].stashed ? "Restore to Projects" : "Stash project", false,
+                             s->workspaces[i].stashed ? &s->archive_open : &s->archive_closed);
         if (!s->delete_confirm)
-            RenderEditAction(CLAY_ID("SidebarEditDelete"), "Delete workspace...", true);
+            RenderEditAction(CLAY_ID("SidebarEditDelete"), "Delete workspace...", true, &s->trash_icon);
         else
         {
             CLAY_TEXT(CStr(s->delete_label),
                       CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            RenderEditAction(CLAY_ID("SidebarEditConfirm"), "Delete all saved history", true);
-            RenderEditAction(CLAY_ID("SidebarEditCancelDelete"), "Cancel", false);
+            RenderEditAction(CLAY_ID("SidebarEditConfirm"), "Delete all saved history", true, &s->trash_icon);
+            RenderEditAction(CLAY_ID("SidebarEditCancelDelete"), "Cancel", false, &s->back_icon);
         }
     }
 }
@@ -3415,9 +3435,9 @@ static void RenderSessionMenu(PicoHost *host, void *state)
         {
             if (SessionMenuCanPin(host, s))
                 RenderEditAction(CLAY_ID("SidebarSessionPin"),
-                    InboxPinned(s, s->session_menu_path, s->session_menu_id) ? "Unpin session" : "Pin session", false);
-            RenderEditAction(CLAY_ID("SidebarSessionCopy"), "Copy session id", false);
-            RenderEditAction(CLAY_ID("SidebarSessionDelete"), "Delete session...", true);
+                    InboxPinned(s, s->session_menu_path, s->session_menu_id) ? "Unpin session" : "Pin session", false, &s->pin_icon);
+            RenderEditAction(CLAY_ID("SidebarSessionCopy"), "Copy session id", false, &s->copy_icon);
+            RenderEditAction(CLAY_ID("SidebarSessionDelete"), "Delete session...", true, &s->trash_icon);
         }
         else
         {
@@ -3426,8 +3446,8 @@ static void RenderSessionMenu(PicoHost *host, void *state)
                                         .fontSize = PICO_FONT_CAPTION,
                                         .textColor = COLOR_TEXT,
                                         .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-            RenderEditAction(CLAY_ID("SidebarSessionConfirm"), "Delete session", true);
-            RenderEditAction(CLAY_ID("SidebarSessionCancel"), "Cancel", false);
+            RenderEditAction(CLAY_ID("SidebarSessionConfirm"), "Delete session", true, &s->trash_icon);
+            RenderEditAction(CLAY_ID("SidebarSessionCancel"), "Cancel", false, &s->back_icon);
         }
     }
 }

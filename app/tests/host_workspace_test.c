@@ -19050,6 +19050,10 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     }
     else if (action == PREF_RENAME || action == PREF_STASH)
     {
+        /* Project actions require project rows, regardless of the default sidebar mode. */
+        host->sidebar_inbox_mode = false;
+        pico_host_request_redraw(host);
+        PicoHost_Frame(host);
         if (!SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("SidebarWs", 0)), MOUSE_BUTTON_RIGHT)) goto done;
         if (action == PREF_RENAME && !InteractionReplaceText(host, CLAY_ID("SidebarEditName"), "Renamed")) goto done;
     }

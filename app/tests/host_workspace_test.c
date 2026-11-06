@@ -16910,6 +16910,161 @@ done_host:
     return rc;
 }
 
+static int TestChatLinkTooltip(void)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-ws-link-tip-XXXXXX";
+    char cfg[] = "/tmp/pico-cfg-link-tip-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0;
+    PicoAgentCreateOptions opt;
+    PicoAgent *agent = NULL;
+    ShellTestState state = {.composer_height = 44.0f};
+    Clay_Arena arena;
+    Clay_RenderCommandArray commands;
+    Clay_ElementData chip;
+    int frame;
+    int rc = 1;
+
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
+    {
+        free(memory);
+        Fail("link tooltip setup");
+        return 1;
+    }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK || !host)
+    {
+        free(memory);
+        unsetenv("XDG_CONFIG_HOME");
+        rmdir(cfg);
+        rmdir(dir);
+        Fail("link tooltip host init");
+        return 1;
+    }
+    WaitPluginLoad(host);
+    /* Headless runs have no real fonts; keep chat on the unclamped width path
+     * and stub the composer, which measures text with raylib directly. */
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_COMPOSER] = 0;
+    ShellTestAddView(host, PICO_SLOT_COMPOSER, ShellTestComposer, &state);
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
+    {
+        Fail("link tooltip open workspace");
+        goto done_host;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.kind = PICO_AGENT_MAIN;
+    opt.session_start = PICO_SESSION_NONE;
+    opt.select = true;
+    if (pico_main_agent_create(host, workspace_id, &opt, &agent_id) != PICO_OK ||
+        !(agent = PicoHost_FindAgent(host, agent_id)))
+    {
+        Fail("link tooltip create agent");
+        goto done_host;
+    }
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT,
+                         "A little context before the [destination](https://example.com/hidden-target)");
+
+    arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
+    if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
+    {
+        Clay_SetCurrentContext(previous);
+        Fail("link tooltip Clay initialization");
+        goto done_host;
+    }
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+
+    Clay_SetLayoutDimensions(viewport);
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+    commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+
+    chip = Clay_GetElementData(CLAY_IDI("MdLink", 0));
+    if (!chip.found || FindCardText(&commands, "https://example.com/hidden-target"))
+    {
+        Fail("link destination must stay hidden before hover");
+        goto done;
+    }
+
+    Clay_SetPointerState((Clay_Vector2){chip.boundingBox.x + chip.boundingBox.width / 2.0f,
+                                        chip.boundingBox.y + chip.boundingBox.height / 2.0f},
+                         false);
+    for (frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    }
+    Clay_ElementData tip = Clay_GetElementData(CLAY_ID("LinkTargetTooltip"));
+    if (!tip.found || !FindCardText(&commands, "https://example.com/hidden-target") ||
+        tip.boundingBox.x < 0 || tip.boundingBox.y < 0 ||
+        tip.boundingBox.x + tip.boundingBox.width > viewport.width ||
+        tip.boundingBox.y + tip.boundingBox.height > viewport.height)
+    {
+        Fail("hover must show the actual destination inside the viewport");
+        goto done;
+    }
+    float link_center = chip.boundingBox.x + chip.boundingBox.width / 2;
+    float tip_center = tip.boundingBox.x + tip.boundingBox.width / 2;
+    if (fabsf(link_center - tip_center) > 0.1f ||
+        (chip.boundingBox.y > tip.boundingBox.height + 16
+             ? tip.boundingBox.y + tip.boundingBox.height >= chip.boundingBox.y
+             : tip.boundingBox.y <= chip.boundingBox.y + chip.boundingBox.height))
+    {
+        Fail("tooltip must center on the link, above it or below when space is insufficient");
+        goto done;
+    }
+    /* A floating tooltip must not move its source or capture the hover. */
+    for (frame = 0; frame < 20; frame++)
+    {
+        Clay_Vector2 pointer = {chip.boundingBox.x + chip.boundingBox.width * (frame % 2 ? 0.2f : 0.8f),
+                                chip.boundingBox.y + chip.boundingBox.height / 2};
+        Clay_SetPointerState(pointer, false);
+        commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        Clay_ElementData link = Clay_GetElementData(CLAY_IDI("MdLink", 0));
+        if (!ShellBoxStable(chip.boundingBox, link.boundingBox) ||
+            !ShellBoxStable(tip.boundingBox, Clay_GetElementData(CLAY_ID("LinkTargetTooltip")).boundingBox) ||
+            !FindCardText(&commands, "https://example.com/hidden-target"))
+        {
+            Fail("tooltip must preserve link geometry and hover across layouts");
+            goto done;
+        }
+    }
+
+    Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+    for (frame = 0; frame < 3; frame++)
+    {
+        Clay_SetLayoutDimensions(viewport);
+        Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+        commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+    }
+    if (Clay_GetElementData(CLAY_ID("LinkTargetTooltip")).found)
+    {
+        Fail("link tooltip must hide once the pointer leaves");
+        goto done;
+    }
+
+    rc = g_failed ? 1 : 0;
+
+done:
+    Clay_SetCurrentContext(previous);
+done_host:
+    if (host)
+    {
+        pico_host_free(host);
+    }
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg);
+    rmdir(dir);
+    return rc;
+}
+
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static void WorktreeNameLayout(PicoHost *host, Clay_Dimensions viewport)
 {
@@ -21405,6 +21560,7 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestOpenAiBlockedShutdownChild());
 #endif
     if (!IsolateTestHome()) return 1;
+    if (argc == 2 && strcmp(argv[1], "--link-tooltip") == 0) return PICO_TEST_RUN(TestChatLinkTooltip());
     if (argc == 2 && strcmp(argv[1], "--apikey") == 0) return PICO_TEST_RUN(TestApiKeyDialog());
     if (PICO_TEST_RUN(TestApiKeyDialog()) != 0) return 1;
 #ifdef PICO_TEST_CLOCK
@@ -21550,6 +21706,8 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestFooterMainAgentTps()) != 0) return 1;
+    if (PICO_TEST_RUN(TestChatLinkTooltip()) != 0)
+        return 1;
     if (PICO_TEST_RUN(TestFooterCacheTooltip()) != 0)
     {
         return 1;

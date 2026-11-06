@@ -5,6 +5,7 @@
 #include "browser.h"
 #include "clarification.h"
 #include "render_scale.h"
+#include "richtext.h"
 #include "theme_internal.h"
 #include "pico/plugin.h"
 #include "pico/md_view.h"
@@ -53,6 +54,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <math.h>
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts);
 
@@ -4135,6 +4137,71 @@ static void ShellInput(PicoHost *host)
     }
 }
 
+/* URLs often have no spaces, so wrap at UTF-8 boundaries rather than relying
+ * on Clay's word wrapping. Slices borrow the same storage as hovered_link. */
+static int LinkTooltipLine(const char *text, float width, Clay_TextElementConfig config)
+{
+    int length = 0;
+    while (text[length] && text[length] != '\n')
+    {
+        int next = length + 1;
+        while (((unsigned char)text[next] & 0xc0) == 0x80) next++;
+        float measured = RichText_MeasureWidth((Clay_String){.chars = text, .length = next}, config);
+        if (length && measured > width) break;
+        length = next;
+    }
+    return length;
+}
+
+static void LayoutLinkTooltip(PicoHost *app)
+{
+    const char *target = app->hovered_link;
+    if (!target || !*target || PicoUi_ModalOpen(app) || PicoChatFind_PointerOver(app) ||
+        PicoBrowser_BlocksPointer(app) || PicoSettingsUi_BlocksPointer(app) || PicoDiffUi_BlocksPointer(app)) return;
+    Clay_Dimensions viewport = Clay_GetLayoutDimensions();
+    if (viewport.width <= 32 || viewport.height <= 32) return;
+    Clay_TextElementConfig config = {.fontId = FONT_MONO, .fontSize = PICO_FONT_CAPTION,
+        .lineHeight = PICO_FONT_CAPTION, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE};
+    float max_width = fminf(600, viewport.width - 32), width = 0;
+    int lines = 0;
+    for (const char *p = target; *p; )
+    {
+        int length = LinkTooltipLine(p, max_width, config);
+        width = fmaxf(width, RichText_MeasureWidth((Clay_String){.chars = p, .length = length}, config));
+        lines++;
+        p += length;
+        if (*p == '\n') p++;
+    }
+    width += 16;
+    float height = fminf(lines * PICO_FONT_CAPTION + 12, viewport.height - 16);
+    Clay_ElementData link = MdView_HoveredLinkElement();
+    if (!link.found) return;
+    Clay_BoundingBox anchor = link.boundingBox;
+    float x = fmaxf(8, fminf(anchor.x + (anchor.width - width) / 2,
+                             viewport.width - width - 8));
+    float y = anchor.y - height - 8;
+    if (y < 8) y = anchor.y + anchor.height + 8;
+    y = fmaxf(8, fminf(y, viewport.height - height - 8));
+    CLAY(CLAY_ID("LinkTargetTooltip"), {
+        .floating = {.attachTo = CLAY_ATTACH_TO_ROOT, .zIndex = 27,
+            .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
+            .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_TOP},
+            .offset = {x, y}},
+        .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .padding = {8, 8, 6, 6},
+            .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(height)}},
+        .clip = {.horizontal = true, .vertical = true},
+        .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(4)})
+    {
+        for (const char *p = target; *p; )
+        {
+            int length = LinkTooltipLine(p, max_width, config);
+            CLAY_TEXT(((Clay_String){.chars = p, .length = length}), CLAY_TEXT_CONFIG(config));
+            p += length;
+            if (*p == '\n') p++;
+        }
+    }
+}
+
 static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_height, float delta_time)
 {
     PicoChatFind_Sync(app);
@@ -4235,6 +4302,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
     PicoChatFind_Render(app);
 
     app->hovered_link = MdView_HoveredLink();
+    LayoutLinkTooltip(app);
     return Clay_EndLayout(delta_time);
 }
 

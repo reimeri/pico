@@ -781,6 +781,7 @@ static void EmitRun(RtRun *run, const RichTextStyle *style, RichTextEmitState *e
         if (hovered)
         {
             emit->hovered_link = run->link_url;
+            emit->hovered_link_id = id;
         }
         config.textColor = hovered ? style->link_hover_color : style->link_color;
         CLAY(id, {})

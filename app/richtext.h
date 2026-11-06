@@ -41,6 +41,7 @@ typedef struct RichTextStyle {
 // the pointer is over a link run; reset it to NULL before layout begins.
 typedef struct RichTextEmitState {
     const char *hovered_link;
+    Clay_ElementId hovered_link_id;
 } RichTextEmitState;
 
 // Resets per-layout-pass state (link id counter). Call once per frame before

@@ -9,6 +9,9 @@
 void MdView_RenderNoticeDocument(MdDocument *doc, int id_base, float available_width,
                                  Clay_Color color);
 
+// Last-layout bounds of the hovered link run, for shell tooltip placement.
+Clay_ElementData MdView_HoveredLinkElement(void);
+
 // Poll the last layout's image files; true requests an idle UI redraw.
 bool MdView_ImagesChanged(void);
 

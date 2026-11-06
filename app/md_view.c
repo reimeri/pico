@@ -41,6 +41,7 @@ static RichTextStyle BaseStyle = {
 };
 
 static const char *hovered_link = NULL;
+static Clay_ElementId hovered_link_id;
 static char hovered_link_path[8192];
 static bool notice_tinted;
 
@@ -514,12 +515,18 @@ void MdView_BeginFrame(void)
     ImagesBeginLayout();
     RichText_BeginLayout();
     hovered_link = NULL;
+    hovered_link_id = (Clay_ElementId){0};
     horizontal_scroll_count = 0;
 }
 
 const char *MdView_HoveredLink(void)
 {
     return hovered_link;
+}
+
+Clay_ElementData MdView_HoveredLinkElement(void)
+{
+    return hovered_link_id.id ? Clay_GetElementData(hovered_link_id) : (Clay_ElementData){0};
 }
 
 #define TABLE_CELL_PAD_X 8
@@ -1183,6 +1190,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
         if (emit.hovered_link)
         {
             SetHoveredLink(emit.hovered_link);
+            hovered_link_id = emit.hovered_link_id;
         }
         return;
     }
@@ -1228,6 +1236,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
     if (emit.hovered_link)
     {
         SetHoveredLink(emit.hovered_link);
+        hovered_link_id = emit.hovered_link_id;
     }
 }
 

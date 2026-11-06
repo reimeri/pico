@@ -2581,7 +2581,6 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                                             .fontSize = PICO_FONT_UI,
                                             .textColor = Clay_PointerOver(CLAY_ID("SidebarMode")) ? COLOR_TEXT : COLOR_MUTED,
                                             .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                RenderGlyph("⌄", COLOR_MUTED);
             }
             CLAY(CLAY_ID("SidebarAddWs"), {.layout = {.padding = {4, 4, 0, 0}}})
             {

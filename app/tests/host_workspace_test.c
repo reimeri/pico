@@ -18510,6 +18510,14 @@ static int RunSidebarModeShellCase(bool with_sidebar)
             if (frame == 20) project_color = badge->renderData.text.textColor;
             else if (!BadgeColorEqual(project_color, badge->renderData.text.textColor)) goto done;
         }
+        /* Removing the status gutter must remain stable across repeated
+         * bottom-follow passes, including section transitions. */
+        if (with_sidebar && f.host->sidebar_inbox_mode)
+        {
+            Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0));
+            if (row.found && (row.boundingBox.x < sidebar_root.x ||
+                row.boundingBox.x + row.boundingBox.width > sidebar_root.x + sidebar_root.width + 0.1f)) goto done;
+        }
         if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
         if (with_sidebar && frame == 40)
         {
@@ -18665,10 +18673,23 @@ static int TestSidebarInboxPins(void)
     g_sidebar_poll_due = true;
     if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1) ||
         !SidebarInboxAbove(f.host, agents[2], agents[0])) goto done;
-    phase = "indicator pins without selecting";
+    phase = "menu pins without selecting";
     PicoAgentId selected = pico_agent_active(f.host);
-    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInboxPin", (int)(rows[0].id & 0x7fffffff)))) ||
+    if (!SidebarFrameClickButton(f.host, Clay_GetElementData(rows[0]), MOUSE_BUTTON_RIGHT) ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSessionPin"))) ||
         pico_agent_active(f.host) != selected || !PicoCatalog_DrainPersistBefore(f.host, NULL) ||
+        !SidebarInboxAbove(f.host, agents[0], agents[2])) goto done;
+    phase = "pin occupies the title line without a status dot";
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    Clay_ElementData pin = Clay_GetElementData(CLAY_IDI("SidebarInboxPin", (int)(rows[0].id & 0x7fffffff)));
+    Clay_ElementData pinned_row = Clay_GetElementData(rows[0]);
+    if (!pin.found || !pinned_row.found ||
+        pin.boundingBox.y + pin.boundingBox.height > pinned_row.boundingBox.y + pinned_row.boundingBox.height / 2 ||
+        Clay_GetElementData(CLAY_IDI("SidebarSessDot", (int)(rows[0].id & 0x7fffffff))).found ||
+        Clay_GetElementData(CLAY_IDI("SidebarInboxPin", (int)(rows[2].id & 0x7fffffff))).found) goto done;
+    phase = "pin indicator selects without unpinning";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_IDI("SidebarInboxPin", (int)(rows[0].id & 0x7fffffff)))) ||
+        pico_agent_active(f.host) != agents[0]->id ||
         !SidebarInboxAbove(f.host, agents[0], agents[2])) goto done;
     phase = "menu pins preserve recency within groups";
     if (!SidebarFrameClickButton(f.host, Clay_GetElementData(rows[1]), MOUSE_BUTTON_RIGHT) ||
@@ -18732,7 +18753,7 @@ done:
             if (pico_agent_info(f.host, i, &info)) PicoHost_FindAgent(f.host, info.id)->state = PICO_AGENT_IDLE;
         }
     InteractionFixtureFree(&f);
-    if (!good) { fprintf(stderr, "inbox pin phase: %s\n", phase); Fail("inbox pins must sort first, survive clear and support both controls"); }
+    if (!good) { fprintf(stderr, "inbox pin phase: %s\n", phase); Fail("inbox pins must sort first, survive clear and use context-menu controls"); }
     return !good;
 }
 

@@ -2270,8 +2270,10 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
     if (row->section != *(InboxSection *)ctx) return 0;
     Clay_ElementId id = InboxSessionId(row);
     bool selected = SessionIsSelected(host, row->path, row->session_id, row->live_id);
-    float width = SidebarLabelWidth(s->row_width, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0);
-    Clay_String title = SidebarDisplayTitle(s, row->title, width);
+    float width = s->row_width - 2.0f * SIDEBAR_ROW_PAD_X;
+    float pin_width = row->pinned ? Pico_FontPx(SIDEBAR_FOLDER_ICON) : 0;
+    Clay_String title = SidebarDisplayTitle(s, row->title,
+        width - (row->pinned ? pin_width + SIDEBAR_ROW_GAP : 0));
     Clay_String age = InboxAgeLabel(s, row->last_user_action);
     float age_width = age.length ? SidebarTextWidth(age.chars, age.length) + 2 * SIDEBAR_ROW_GAP : 0;
     float badge_width = Pico_FontPx(SIDEBAR_FOLDER_ICON);
@@ -2279,9 +2281,6 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                                               width - age_width - badge_width - SIDEBAR_ROW_GAP);
     float subtitle_height = fmaxf(Pico_FontPx(PICO_FONT_CAPTION), badge_width);
     float height = Pico_FontPx(PICO_FONT_UI) + subtitle_height + 14;
-    const char *loading_path = NULL, *loading_id = NULL;
-    bool loading = PicoSession_LoadTarget(host, &loading_path, &loading_id) &&
-                   !strcmp(loading_path, row->path) && !strcmp(loading_id, row->session_id);
     CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_FIXED(height)}},
               .transition = {.handler = Clay_EaseOut, .duration = 0.18f,
                              .properties = CLAY_TRANSITION_PROPERTY_Y}})
@@ -2294,20 +2293,26 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                   .backgroundColor = RowFill(selected, Clay_PointerOver(id)),
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
-            CLAY(CLAY_IDI("SidebarInboxPin", (int)(id.id & 0x7fffffff)),
-                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON)),
-                                        .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))},
-                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}}})
-            {
-                RenderSessionDot(s, SessionDotKind(host, row->path, row->session_id, row->live_id, row->unseen),
-                                 (int)(id.id & 0x7fffffff), row->worktree, row->pinned, loading, !row->live_id);
-            }
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
                                      .sizing = {.width = CLAY_SIZING_GROW(0),
                                                 .height = CLAY_SIZING_FIXED(height - 10)}}})
             {
-                CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
-                    .textColor = row->missing ? COLOR_STATUS_ERR : COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = SIDEBAR_ROW_GAP,
+                    .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                    .sizing = {.width = CLAY_SIZING_GROW(0),
+                               .height = CLAY_SIZING_FIXED(Pico_FontPx(PICO_FONT_UI))}}})
+                {
+                    if (row->pinned)
+                    {
+                        CLAY(CLAY_IDI("SidebarInboxPin", (int)(id.id & 0x7fffffff)),
+                             {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(pin_width),
+                                                    .height = CLAY_SIZING_FIXED(pin_width)}},
+                              .image = {.imageData = &s->pin_icon}}) {}
+                    }
+                    CLAY_TEXT(title, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_UI,
+                        .textColor = row->missing ? COLOR_STATUS_ERR : COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                }
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                     .childGap = SIDEBAR_ROW_GAP,
                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
@@ -2412,13 +2417,6 @@ static int ClickInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row,
     (void)index;
     if (!Clay_PointerOver(InboxSessionId(row)))
         return 0;
-    if (row->section == INBOX_COMPLETED &&
-        Clay_PointerOver(CLAY_IDI("SidebarInboxPin", (int)(InboxSessionId(row).id & 0x7fffffff))))
-    {
-        ToggleInboxPin(host, s, row->path, row->session_id);
-        if (ctx) *(bool *)ctx = true;
-        return 1;
-    }
     if (row->live_id)
         SelectAgent(host, row->live_id);
     else

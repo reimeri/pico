@@ -4,6 +4,9 @@
 #include <stdbool.h>
 
 typedef struct PicoHost PicoHost;
+/* Recycle borrowed text once per shell layout, even when the sidebar is hidden. */
+void PicoSidebar_BeginLayout(PicoHost *host);
+
 /* Renders the internal Inbox project picker, returning whether it replaced the empty state. */
 bool PicoSidebar_RenderProjectPicker(PicoHost *host);
 

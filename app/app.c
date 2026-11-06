@@ -25,6 +25,7 @@
 #include "scrollbar.h"
 #include "md_view_internal.h"
 #include "builtins/chat.h"
+#include "builtins/sidebar.h"
 #include "builtins/background_model.h"
 #include "host_internal.h"
 #include "http_internal.h"
@@ -4151,6 +4152,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                                                 r.y < s.y + s.height && r.y + r.height > s.y;
         }
     }
+    PicoSidebar_BeginLayout(app);
     Clay_BeginLayout();
     PicoBrowser_BeginLayout(app);
     app->session_load_row_known = false;

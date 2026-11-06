@@ -18361,6 +18361,103 @@ done:
     return !good;
 }
 
+static int TestProjectPickerControls(bool with_sidebar)
+{
+    InteractionFixture f = {0};
+    char second[] = "/tmp/pico-picker-order-XXXXXX";
+    bool good = false;
+    const char *phase = "setup";
+    if (!InteractionFixtureInit(&f) || !mkdtemp(second)) goto done;
+    if (PicoCatalog_Ensure(second) || PicoCatalog_SetProjectName(second, "Second")) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    if (!with_sidebar) f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    f.host->sidebar_inbox_mode = true;
+    PicoHost_ClearAgentSelection(f.host);
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    int count = pico_agent_count(f.host);
+    phase = "menu";
+    if (!SidebarFrameClickButton(f.host, Clay_GetElementData(CLAY_IDI("InboxProject", 0)), MOUSE_BUTTON_RIGHT) ||
+        !Clay_GetElementData(CLAY_ID("SidebarEditPopup")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarEditSave")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarEditStash")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarEditDelete")).found || pico_agent_active(f.host)) goto done;
+    g_find_key = KEY_ESCAPE; PicoHost_Frame(f.host); g_find_key = -1;
+    for (int action = 0; action < 3; action++)
+    {
+        phase = action == 0 ? "outside drop" : action == 1 ? "escape" : "reorder";
+        (void)PicoHost_LayoutShell(f.host, 800, 0);
+        Clay_BoundingBox first = Clay_GetElementData(CLAY_IDI("InboxProject", 0)).boundingBox;
+        Clay_BoundingBox last = Clay_GetElementData(CLAY_IDI("InboxProject", 1)).boundingBox;
+        g_find_button = MOUSE_BUTTON_LEFT;
+        g_find_pointer = (Vector2){first.x + first.width - 12, first.y + first.height / 2};
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+        g_find_down = g_find_press = true;
+        pico_run_hooks(f.host, PICO_HOOK_AFTER_LAYOUT, 0);
+        g_find_press = false;
+        if (pico_agent_active(f.host) || pico_agent_count(f.host) != count) goto done;
+        g_find_pointer.y = last.y + last.height - 2;
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+        pico_run_hooks(f.host, PICO_HOOK_AFTER_LAYOUT, 0);
+        for (int frame = 0; frame < 20; frame++)
+        {
+            (void)PicoHost_LayoutShell(f.host, 800, 0);
+            if (!Clay_GetElementData(CLAY_ID("SidebarDragPreview")).found ||
+                !ShellBoxStable(first, Clay_GetElementData(CLAY_IDI("InboxProject", 0)).boundingBox) ||
+                !ShellBoxStable(last, Clay_GetElementData(CLAY_IDI("InboxProject", 1)).boundingBox)) goto done;
+        }
+        if (action == 0) g_find_pointer = (Vector2){0, 0};
+        if (action == 1) g_find_key = KEY_ESCAPE;
+        g_find_down = false;
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        pico_run_hooks(f.host, PICO_HOOK_AFTER_LAYOUT, 0);
+        g_find_key = -1;
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+        Clay_RenderCommand *original = FindCardText(&commands, "Original");
+        Clay_RenderCommand *other = FindCardText(&commands, "Second");
+        if (!original || !other || pico_agent_active(f.host) || pico_agent_count(f.host) != count ||
+            ((original->boundingBox.y > other->boundingBox.y) != (action == 2))) goto done;
+    }
+    phase = "persistent shared order";
+    if (!PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    Clay_RenderCommand *original = FindCardText(&commands, "Original");
+    Clay_RenderCommand *other = FindCardText(&commands, "Second");
+    if (!original || !other || original->boundingBox.y <= other->boundingBox.y) goto done;
+    if (with_sidebar)
+    {
+        f.host->sidebar_inbox_mode = false;
+        commands = PicoHost_LayoutShell(f.host, 800, 0);
+        original = FindCardText(&commands, "Original");
+        other = FindCardText(&commands, "Second");
+        if (!original || !other || original->boundingBox.y <= other->boundingBox.y) goto done;
+        f.host->sidebar_inbox_mode = true;
+        (void)PicoHost_LayoutShell(f.host, 800, 0);
+    }
+    phase = "click release";
+    if (!SidebarFrameClickWorkspace(f.host, Clay_GetElementData(CLAY_IDI("InboxProject", 0))) ||
+        !pico_agent_active(f.host) ||
+        strcmp(PicoAgent_WorkspacePath(PicoHost_SelectedAgent(f.host)), second)) goto done;
+    phase = "stash clicked workspace";
+    PicoHost_ClearAgentSelection(f.host);
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarFrameClickButton(f.host, Clay_GetElementData(CLAY_IDI("InboxProject", 0)), MOUSE_BUTTON_RIGHT) ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarEditStash")))) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (FindCardText(&commands, "Second") || !FindCardText(&commands, "Original") || pico_agent_active(f.host)) goto done;
+    good = true;
+done:
+    g_find_down = g_find_press = g_find_released = false;
+    g_find_key = -1;
+    if (!good) fprintf(stderr, "picker controls (%d): %s\n", with_sidebar, phase);
+    InteractionFixtureFree(&f);
+    RmRf(second);
+    if (!good) Fail("picker menus, click/drag separation, cancellation and durable order must work with either sidebar visibility");
+    return !good;
+}
+
 static int TestSidebarModesAndPicker(void)
 {
     InteractionFixture f = {0};
@@ -18422,13 +18519,13 @@ static int TestSidebarModesAndPicker(void)
         add.boundingBox.y - (project.boundingBox.y + project.boundingBox.height) >=
             project.boundingBox.y - (hint->boundingBox.y + hint->boundingBox.height)) goto done;
     phase = "create in chosen project";
-    if (!ClickSidebarId(f.host, CLAY_IDI("InboxProject", 0))) goto done;
+    if (!SidebarFrameClickWorkspace(f.host, Clay_GetElementData(CLAY_IDI("InboxProject", 0)))) goto done;
     PicoAgentId draft = pico_agent_active(f.host);
     if (!draft || draft == f.agent || pico_agent_count(f.host) != agent_count + 1 ||
         strcmp(PicoAgent_WorkspacePath(PicoHost_FindAgent(f.host, draft)), f.dir)) goto done;
     phase = "reuse empty draft";
     if (!ClickSidebarId(f.host, CLAY_ID("SidebarAddWs")) ||
-        !ClickSidebarId(f.host, CLAY_IDI("InboxProject", 0)) || pico_agent_active(f.host) != draft ||
+        !SidebarFrameClickWorkspace(f.host, Clay_GetElementData(CLAY_IDI("InboxProject", 0))) || pico_agent_active(f.host) != draft ||
         pico_agent_count(f.host) != agent_count + 1) goto done;
     agent->state = PICO_AGENT_IDLE;
     phase = "remember mode after restart";
@@ -21338,8 +21435,10 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE));
     if (argc == 2 && strcmp(argv[1], "--sidebar-headings") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
+    if (argc == 2 && strcmp(argv[1], "--project-picker") == 0)
+        return PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false));
     if (argc == 2 && strcmp(argv[1], "--sidebar-modes") == 0)
-        return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
+        return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarModesAndPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
                PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) ||
                PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) || PICO_TEST_RUN(RunSidebarModeShellCase(false)) ||
                PICO_TEST_RUN(RunSidebarModeShellCase(true)) ||
@@ -21410,7 +21509,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestExtensionPendingRollbackCapacity())) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
-        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
+        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||
         PICO_TEST_RUN(TestSidebarInboxPins()) || PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||

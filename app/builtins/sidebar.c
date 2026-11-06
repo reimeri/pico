@@ -179,6 +179,9 @@ typedef struct SidebarState
     bool pin_saving, pin_value;
     char pin_path[4096], pin_id[40];
     bool icons_tried;
+    bool edit_from_picker;
+    bool drag_from_picker;
+    char drag_path[4096];
     bool drag_press_pending;
     int drag_source_index;
     Vector2 drag_press_pos;
@@ -212,6 +215,14 @@ static float SidebarTextWidth(const char *text, int length)
 /* Text commands refer to these strings until Clay_EndLayout and the draw complete.
  * Never realloc a buffer containing a previously emitted title. Reuse the
  * chunks on the next layout pass, after the prior command array is finished. */
+void PicoSidebar_BeginLayout(PicoHost *host)
+{
+    SidebarState *s = PicoPlugins_HostState(host, "sidebar");
+    if (!s) return;
+    s->label_chunk = NULL;
+    s->label_used = 0;
+}
+
 static char *SidebarNextLabel(SidebarState *s)
 {
     if (!s->label_chunk || s->label_used == SIDEBAR_LABEL_CHUNK_SIZE)
@@ -1671,7 +1682,8 @@ static int SidebarComputeDragTarget(SidebarState *s, float mouse_y, bool pointer
     n = SidebarDraggableSlots(s, slots);
     for (int k = 0; k < n; k++)
     {
-        Clay_ElementData el = Clay_GetElementData(CLAY_IDI("SidebarWs", slots[k]));
+        Clay_ElementData el = Clay_GetElementData(s->drag_from_picker
+            ? CLAY_IDI("InboxProject", slots[k]) : CLAY_IDI("SidebarWs", slots[k]));
         if (!el.found)
             return s->drag_source_index;
         mids[k] = el.boundingBox.y + el.boundingBox.height * 0.5f;
@@ -2500,6 +2512,42 @@ static bool PointerOverInbox(PicoHost *host, SidebarState *s)
     return false;
 }
 
+static void RenderWorkspaceDragPreview(SidebarState *s)
+{
+    if (s->is_dragging && s->drag_source_index >= 0 && s->drag_source_index < s->workspace_count)
+    {
+        Vector2 mouse = GetMousePosition();
+        const PicoCatalogWorkspace *drag_ws = &s->workspaces[s->drag_source_index];
+        Clay_String preview = SidebarDisplayTitle(
+            s, drag_ws->name,
+            SidebarLabelWidth(180.0f, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0.0f));
+        CLAY(CLAY_ID("SidebarDragPreview"),
+             {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+                           .offset = {.x = mouse.x + 12.0f, .y = mouse.y - 12.0f},
+                           .zIndex = 50,
+                           .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+              .layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                         .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
+                         .childGap = SIDEBAR_ROW_GAP,
+                         .sizing = {.width = CLAY_SIZING_FIXED(180)}},
+              .backgroundColor = (Clay_Color){42, 42, 50, 230},
+              .cornerRadius = CLAY_CORNER_RADIUS(6),
+              .border = {.width = {1, 1, 1, 1}, .color = (Clay_Color){80, 140, 255, 200}}})
+        {
+            RenderProjectBadge(s, drag_ws);
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+            {
+                CLAY_TEXT(preview,
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                            .fontSize = PICO_FONT_UI,
+                                            .textColor = COLOR_TEXT,
+                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            }
+        }
+    }
+}
+
 bool PicoSidebar_RenderProjectPicker(PicoHost *host)
 {
     SidebarState *s = PicoPlugins_HostState(host, "sidebar");
@@ -2516,23 +2564,30 @@ bool PicoSidebar_RenderProjectPicker(PicoHost *host)
         CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
                                  .sizing = {.width = CLAY_SIZING_GROW(0)}}})
         {
-            for (int i = 0; i < s->workspace_count; i++)
+            CLAY(CLAY_ID("InboxProjectRows"), {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
+                                     .sizing = {.width = CLAY_SIZING_GROW(0)}}})
             {
-                const PicoCatalogWorkspace *ws = &s->workspaces[i];
-                if (ws->stashed) continue;
-                Clay_ElementId id = CLAY_IDI("InboxProject", i);
-                CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 12,
-                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}, .padding = {12, 12, 6, 6},
-                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                          .backgroundColor = RowFill(false, Clay_PointerOver(id)), .cornerRadius = CLAY_CORNER_RADIUS(8)})
+                for (int i = 0; i < s->workspace_count; i++)
                 {
-                    RenderProjectBadge(s, ws);
-                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                    const PicoCatalogWorkspace *ws = &s->workspaces[i];
+                    if (ws->stashed) continue;
+                    Clay_ElementId id = CLAY_IDI("InboxProject", i);
+                    CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 12,
+                                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}, .padding = {12, 12, 6, 6},
+                                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                              .backgroundColor = RowFill(false, Clay_PointerOver(id)), .cornerRadius = CLAY_CORNER_RADIUS(8),
+                              .border = {.color = (Clay_Color){80, 140, 255, 200},
+                                  .width = {.top = s->drag_from_picker && s->is_dragging && s->drag_target_index == i && i < s->drag_source_index ? 2 : 0,
+                                            .bottom = s->drag_from_picker && s->is_dragging && s->drag_target_index == i && i > s->drag_source_index ? 2 : 0}}})
                     {
-                        CLAY_TEXT(CStr(ws->name), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                    .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+                        RenderProjectBadge(s, ws);
+                        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
+                        {
+                            CLAY_TEXT(CStr(ws->name), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                        .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT}));
+                        }
+                        RenderGlyph("+", COLOR_MUTED);
                     }
-                    RenderGlyph("+", COLOR_MUTED);
                 }
             }
             CLAY(CLAY_ID("InboxAddProject"), {.layout = {.padding = {12, 12, 6, 6},
@@ -2544,6 +2599,7 @@ bool PicoSidebar_RenderProjectPicker(PicoHost *host)
             }
         }
     }
+    if (s->drag_from_picker) RenderWorkspaceDragPreview(s);
     return true;
 }
 
@@ -2563,8 +2619,6 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     SidebarBuildLiveSnapshot(s);
     EnsureFolderIcons(s);
     s->row_width = PicoHost_SidebarContentWidth();
-    s->label_chunk = NULL;
-    s->label_used = 0;
 
     add_hover = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs")));
     float add_width = 8.0f + SidebarTextWidth("+", 1);
@@ -2676,38 +2730,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
         }
 
 
-        if (s->is_dragging && s->drag_source_index >= 0 && s->drag_source_index < s->workspace_count)
-        {
-            Vector2 mouse = GetMousePosition();
-            const PicoCatalogWorkspace *drag_ws = &s->workspaces[s->drag_source_index];
-            Clay_String preview = SidebarDisplayTitle(
-                s, drag_ws->name,
-                SidebarLabelWidth(180.0f, Pico_FontPx(SIDEBAR_FOLDER_ICON), 0.0f));
-            CLAY(CLAY_ID("SidebarDragPreview"),
-                 {.floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
-                               .offset = {.x = mouse.x + 12.0f, .y = mouse.y - 12.0f},
-                               .zIndex = 50,
-                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
-                  .layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 4, 4},
-                             .childGap = SIDEBAR_ROW_GAP,
-                             .sizing = {.width = CLAY_SIZING_FIXED(180)}},
-                  .backgroundColor = (Clay_Color){42, 42, 50, 230},
-                  .cornerRadius = CLAY_CORNER_RADIUS(6),
-                  .border = {.width = {1, 1, 1, 1}, .color = (Clay_Color){80, 140, 255, 200}}})
-            {
-                RenderProjectBadge(s, drag_ws);
-                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
-                {
-                    CLAY_TEXT(preview,
-                              CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                .fontSize = PICO_FONT_UI,
-                                                .textColor = COLOR_TEXT,
-                                                .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                }
-            }
-        }
+        if (!s->drag_from_picker) RenderWorkspaceDragPreview(s);
     }
 }
 
@@ -2757,6 +2780,7 @@ static void OpenWorkspaceEdit(SidebarState *s, int index, int latch_button)
         return;
     if (!s->edit_open && !pico_ui_modal_push(s->host, "sidebar-workspace-edit"))
         return;
+    s->edit_from_picker = s->host->sidebar_inbox_mode && !PicoHost_SelectedAgent(s->host);
     s->edit_open = true;
     s->delete_confirm = false;
     s->edit_pointer_latched = true; /* opening press must not close the new popup */
@@ -2801,7 +2825,7 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
     bool short_view;
     if (i < 0 || !pico_ui_modal_is_top(host, "sidebar-workspace-edit"))
         return;
-    row = Clay_GetElementData(CLAY_IDI("SidebarWs", i));
+    row = Clay_GetElementData(s->edit_from_picker ? CLAY_IDI("InboxProject", i) : CLAY_IDI("SidebarWs", i));
     if (!row.found)
         return;
     x = row.boundingBox.x;
@@ -3314,8 +3338,15 @@ static bool VisitVisibleSessions(PicoHost *host, SidebarState *s, bool pointer_o
 static int WorkspaceUnderPointer(const SidebarState *s)
 {
     int i;
-    if (!s || s->host->sidebar_inbox_mode)
+    if (!s) return -1;
+    if (s->host->sidebar_inbox_mode)
+    {
+        if (!PicoHost_SelectedAgent(s->host))
+            for (i = 0; i < s->workspace_count; i++)
+                if (!s->workspaces[i].stashed && Clay_PointerOver(CLAY_IDI("InboxProject", i)))
+                    return i;
         return -1;
+    }
     for (i = 0; i < s->workspace_count; i++)
     {
         if (Clay_PointerOver(CLAY_IDI("SidebarWs", i)) ||
@@ -3590,7 +3621,12 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         SessionMenuInput(host, s);
         return;
     }
-    if (s->want_folder || PicoUi_ModalOpen(host) || IsKeyPressed(KEY_ESCAPE))
+    bool drag_valid = !s->drag_press_pending ||
+        (s->drag_from_picker == (host->sidebar_inbox_mode && !PicoHost_SelectedAgent(host)) &&
+         s->drag_source_index >= 0 && s->drag_source_index < s->workspace_count &&
+         !strcmp(s->drag_path, s->workspaces[s->drag_source_index].path) &&
+         !s->workspaces[s->drag_source_index].stashed);
+    if (!drag_valid || s->want_folder || PicoUi_ModalOpen(host) || IsKeyPressed(KEY_ESCAPE))
     {
         s->drag_press_pending = false;
         s->is_dragging = false;
@@ -3625,7 +3661,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
                 host->hovered_drag = true;
                 s->drag_target_index = SidebarComputeDragTarget(
                     s, mouse.y,
-                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll"))));
+                    Clay_PointerOver(s->drag_from_picker ? CLAY_ID("InboxProjectRows") : CLAY_ID("SidebarScroll")));
                 return;
             }
         }
@@ -3636,7 +3672,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
                 Vector2 mouse = GetMousePosition();
                 s->drag_target_index = SidebarComputeDragTarget(
                     s, mouse.y,
-                    Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll"))));
+                    Clay_PointerOver(s->drag_from_picker ? CLAY_ID("InboxProjectRows") : CLAY_ID("SidebarScroll")));
                 if (s->drag_target_index >= 0 && s->drag_target_index < s->workspace_count &&
                     s->drag_target_index != s->drag_source_index)
                 {
@@ -3657,9 +3693,10 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
                 s->drag_target_index = -1;
                 host->ui_drag_active = false;
                 if (clicked >= 0 && clicked < s->workspace_count &&
-                    Clay_PointerOver(CLAY_IDI("SidebarWs", clicked)))
+                    Clay_PointerOver(s->drag_from_picker ? CLAY_IDI("InboxProject", clicked) : CLAY_IDI("SidebarWs", clicked)))
                 {
-                    ToggleCollapsed(s, clicked);
+                    if (s->drag_from_picker) NewSessionInWorkspace(host, s, clicked);
+                    else ToggleCollapsed(s, clicked);
                     return;
                 }
             }
@@ -3691,7 +3728,13 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         for (int k = 0; k < s->workspace_count; k++)
             if (!s->workspaces[k].stashed && Clay_PointerOver(CLAY_IDI("InboxProject", k)))
             {
-                NewSessionInWorkspace(host, s, k);
+                s->drag_from_picker = true;
+                s->drag_press_pending = true;
+                s->drag_source_index = s->drag_target_index = k;
+                snprintf(s->drag_path, sizeof(s->drag_path), "%s", s->workspaces[k].path);
+                s->drag_press_pos = GetMousePosition();
+                s->is_dragging = false;
+                host->ui_drag_active = true;
                 return;
             }
     }
@@ -3744,6 +3787,8 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
                 ToggleCollapsed(s, i);
                 return;
             }
+            s->drag_from_picker = false;
+            snprintf(s->drag_path, sizeof(s->drag_path), "%s", ws->path);
             s->drag_press_pending = true;
             s->drag_source_index = i;
             s->drag_press_pos = GetMousePosition();

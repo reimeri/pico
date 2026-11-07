@@ -5,7 +5,7 @@
 #include "json.h"
 
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.6.0"
+#define PICO_VERSION "0.6.1"
 #endif
 
 #include <curl/curl.h>

@@ -5,7 +5,7 @@
 #include "json.h"
 
 #ifndef PICO_VERSION
-#define PICO_VERSION "0.5.7"
+#define PICO_VERSION "0.6.0"
 #endif
 
 #include <curl/curl.h>
@@ -407,7 +407,8 @@ static bool TransientTransport(CURLcode rc)
 
 int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error)
 {
-    if (req && req->failure) *req->failure = PICO_HTTP_FAILURE_PERMANENT;
+    if (req && req->failure)
+        *req->failure = PICO_HTTP_FAILURE_PERMANENT;
 
     if (out_http)
     {
@@ -478,16 +479,21 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
 
     char error[CURL_ERROR_SIZE] = {0};
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
-    if (req->fresh_connection) curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+    if (req->fresh_connection)
+        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
     CURLcode rc;
-    if (req->provider_managed_retry) {
+    if (req->provider_managed_retry)
+    {
         BeginStreamAttempt(&ctx);
         rc = req->cancel && req->cancel(req->user) ? CURLE_ABORTED_BY_CALLBACK : curl_easy_perform(curl);
-    } else {
+    }
+    else
+    {
         rc = PerformWithRetries(curl, &ctx.received, req->cancel, req->on_retry,
                                 req->user, error, BeginStreamAttempt, &ctx);
     }
-    if (rc != CURLE_OK) curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
+    if (rc != CURLE_OK)
+        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
     long http = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     curl_slist_free_all(headers);
@@ -512,7 +518,8 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
      * can otherwise report transport success halfway through an event. Recovery
      * callers must not accept that tail as a complete provider message. */
     if (req->provider_managed_retry && rc == CURLE_OK && ctx.saw_sse &&
-        (ctx.acc.len || ctx.have_data)) {
+        (ctx.acc.len || ctx.have_data))
+    {
         rc = CURLE_PARTIAL_FILE;
         snprintf(error, sizeof(error), "Provider stream ended inside an SSE event");
     }
@@ -546,8 +553,8 @@ int pico_http_post_sse(const PicoHttpPost *req, long *out_http, char **out_error
     JsonBuf_Free(&ctx.headers);
 
     if (req->failure)
-        *req->failure = ctx.json_abort || rc == CURLE_OK ? PICO_HTTP_FAILURE_NONE :
-            TransientTransport(rc) ? PICO_HTTP_FAILURE_TRANSIENT : PICO_HTTP_FAILURE_PERMANENT;
+        *req->failure = ctx.json_abort || rc == CURLE_OK ? PICO_HTTP_FAILURE_NONE : TransientTransport(rc) ? PICO_HTTP_FAILURE_TRANSIENT
+                                                                                                           : PICO_HTTP_FAILURE_PERMANENT;
 
     /* An aborting callback already recorded why it stopped, so report success
      * and let the caller surface its own error. */

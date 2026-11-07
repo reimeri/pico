@@ -6094,20 +6094,23 @@ static bool BrowserResizeCancelBehavior(PicoHost *host)
 static bool BrowserResizeGeometryStable(PicoHost *host, bool with_sidebar)
 {
     ChatStabilitySnapshot expected, current;
-    /* Settle wrapping/virtualization once after the intentional width change. */
-    for (int frame = 0; frame < 8; ++frame) LayoutChatStabilityFrame(host, (Clay_Dimensions){1100,800});
+    /* Establish the new viewport without waiting for offscreen refinement:
+     * replacing estimated row heights must not disturb the shell bounds. */
+    LayoutChatStabilityFrame(host, (Clay_Dimensions){1100,800});
     if (!CaptureChatStabilitySnapshot(with_sidebar, &expected)) return false;
     Clay_BoundingBox pane = Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox;
     Clay_BoundingBox row = Clay_GetElementData(CLAY_ID("ChatBrowserRow")).boundingBox;
     Clay_BoundingBox handle = Clay_GetElementData(CLAY_ID("BrowserResizeHandle")).boundingBox;
     for (int frame = 0; frame < 60; ++frame) {
         LayoutChatStabilityFrame(host, (Clay_Dimensions){1100,800});
-        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
-        if (!scroll.found || !scroll.scrollPosition || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) return false;
-        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height, &scroll.scrollPosition->y);
+        /* Exercise a same-frame pass without repairing the scroll position.
+         * Content extent and absolute offset may change during refinement;
+         * the viewport must remain bottom-pinned to the current extent. */
         (void)PicoHost_LayoutShell(host, 800, 0);
         if (!CaptureChatStabilitySnapshot(with_sidebar, &current) ||
-            !ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+            current.content_height <= current.container_height ||
+            fabsf(current.scroll_y + current.content_height - current.container_height) > 0.001f ||
+            !ChatShellBoundsStable(&expected, &current, with_sidebar) ||
             !ShellBoxStable(pane, Clay_GetElementData(CLAY_ID("BrowserPane")).boundingBox) ||
             !ShellBoxStable(row, Clay_GetElementData(CLAY_ID("ChatBrowserRow")).boundingBox) ||
             !ShellBoxStable(handle, Clay_GetElementData(CLAY_ID("BrowserResizeHandle")).boundingBox)) return false;
@@ -21845,6 +21848,7 @@ static int TestApiKeyDialog(void)
     uint32_t arena_size = Clay_MinMemorySize();
     void *memory = malloc(arena_size);
     int rc = 1;
+    int previous_frame_width = g_clay_frame_width;
     if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) goto done;
     setenv("XDG_CONFIG_HOME", cfg, 1);
     if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
@@ -21962,6 +21966,7 @@ static int TestApiKeyDialog(void)
     if (!failed_notice) goto done;
     rc = 0;
 done:
+    g_clay_frame_width = previous_frame_width;
     g_find_input_test = g_clay_frame_test = false;
     SetFixedWidthTextMeasure(false);
     g_find_ctrl = false; g_find_key = 0;

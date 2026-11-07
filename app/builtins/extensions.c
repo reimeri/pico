@@ -9,7 +9,6 @@
 typedef struct ExtensionsState {
     PicoHost *app;
     bool open;
-    bool overflow;
     PicoScrollbar scrollbar;
 } ExtensionsState;
 
@@ -17,7 +16,6 @@ static __thread ExtensionsState *s_active_exts_state = NULL;
 
 #define g_app (s_active_exts_state->app)
 #define g_open (s_active_exts_state->open)
-#define g_overflow (s_active_exts_state->overflow)
 #define g_scrollbar (s_active_exts_state->scrollbar)
 
 static bool Claim(void)
@@ -60,7 +58,6 @@ void PicoExts_Close(PicoHost *host)
     {
         return;
     }
-    g_overflow = false;
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
 
@@ -339,7 +336,7 @@ static void ExtsRender(PicoHost *app, void *state)
                     RenderSection(app, true, CLAY_STRING("Built-in"));
                     RenderSection(app, false, CLAY_STRING("User"));
                 }
-                if (g_overflow)
+                if (PicoScrollbar_Overflows(CLAY_STRING("ExtModalScroll")))
                 {
                     PicoScrollbar_Render(CLAY_STRING("ExtModalScroll"), CLAY_STRING("ExtModalScrollTrack"),
                                          CLAY_STRING("ExtModalScrollHandle"));
@@ -357,7 +354,6 @@ static void ExtsAfterLayout(PicoHost *app, const PicoHookEvent *event, void *sta
     {
         return;
     }
-    g_overflow = PicoScrollbar_Overflows(CLAY_STRING("ExtModalScroll"));
     int n = PicoPlugins_Count(app);
     int over_row = -1;
     for (int i = 0; i < n; i++)
@@ -461,7 +457,6 @@ static void ExtsShutdown(PicoHost *app, void *state)
     s_active_exts_state = s;
     (void)Unclaim();
     s->open = false;
-    s->overflow = false;
     memset(&s->scrollbar, 0, sizeof(s->scrollbar));
     free(s);
     s_active_exts_state = NULL;

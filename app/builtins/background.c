@@ -25,8 +25,6 @@ typedef struct BackgroundState {
     char log_copy[PICO_BG_LOG_MAX + 1];
     char log_caption[96];
     bool selected_running;
-    bool list_overflow;
-    bool log_overflow;
     bool icon_tried;
     Texture2D icon;
     PicoScrollbar list_scrollbar;
@@ -466,7 +464,7 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
                                 }
                             }
                         }
-                        if (s->list_overflow)
+                        if (PicoScrollbar_Overflows(CLAY_STRING("BackgroundListScroll")))
                         {
                             PicoScrollbar_Render(CLAY_STRING("BackgroundListScroll"),
                                                  CLAY_STRING("BackgroundListScrollTrack"),
@@ -540,7 +538,7 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
                                                     .lineHeight = Pico_FontPxU16(PICO_FONT_CAPTION_LINE),
                                                     .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                     }
-                    if (s->log_overflow)
+                    if (PicoScrollbar_Overflows(CLAY_STRING("BackgroundLogScroll")))
                     {
                         PicoScrollbar_Render(CLAY_STRING("BackgroundLogScroll"),
                                              CLAY_STRING("BackgroundLogScrollTrack"),
@@ -566,23 +564,6 @@ static void BackgroundAfterLayout(PicoHost *app, const PicoHookEvent *event, voi
     {
         return;
     }
-    if (pico_ui_modal_has(app, BG_LIST_NAME))
-    {
-        s->list_overflow = PicoScrollbar_Overflows(CLAY_STRING("BackgroundListScroll"));
-    }
-    else
-    {
-        s->list_overflow = false;
-    }
-    if (pico_ui_modal_has(app, BG_LOG_NAME))
-    {
-        s->log_overflow = PicoScrollbar_Overflows(CLAY_STRING("BackgroundLogScroll"));
-    }
-    else
-    {
-        s->log_overflow = false;
-    }
-
     if (Clay_PointerOver(CLAY_ID("BackgroundPill")) || Clay_PointerOver(CLAY_ID("BackgroundKill")) ||
         Clay_PointerOver(CLAY_ID("BackgroundLogStop")) || Clay_PointerOver(CLAY_ID("BackgroundRow")))
     {

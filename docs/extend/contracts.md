@@ -110,6 +110,18 @@ requests a redraw; extension-specific main-thread state changes need a request
 from the owning callback. No Clay-owned pointer survives a frame or same-frame
 reflow even when no image was presented.
 
+Successful `pico_ui_modal_push` / `pico_ui_modal_pop` invalidate both layout and
+presentation, including when called from `PICO_HOOK_AFTER_LAYOUT`. Pico replaces
+pending commands before presenting the changed stack; input hooks are not
+replayed during corrective layouts. Failed modal operations do not invalidate.
+Clay text and image commands borrow their backing storage until consumed or
+replaced by a new layout: do not mutate/free backing storage merely because a
+redraw was requested. In particular, a generic redraw request from an
+`AFTER_LAYOUT` hook is not a guarantee that the already-built commands will be
+replaced. Keep such non-modal mutations before layout, or keep the old backing
+storage valid through presentation.
+
+
 ## Commands during streaming
 
 While an agent is streaming, ordinary submits and slash commands are blocked before submit hooks; only commands explicitly opted in during registration with `pico_host_command_allow_while_busy` or `pico_workspace_command_allow_while_busy` run. The builtin `/background`, `/help`, `/docs`, `/settings`, `/extensions`, and `/show-prompt` are opted in. A busy-allowed command must clear and cancel its submission and must not interrupt the active turn. See [commands](commands.md).

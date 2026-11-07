@@ -246,12 +246,15 @@ void __wrap_EndDrawing(void) { if (!g_clay_frame_test) __real_EndDrawing(); }
 #endif
 
 static int g_presented_frames;
+/* Borrowed until the next layout; tests inspect immediately after presentation. */
+static Clay_RenderCommandArray g_last_presented_commands;
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font *fonts)
 {
     (void)renderCommands;
     (void)fonts;
     g_presented_frames++;
+    g_last_presented_commands = renderCommands;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (g_clay_frame_test)
     {
@@ -18349,6 +18352,8 @@ static void InteractionFixtureFree(InteractionFixture *f)
     RmRf(f->dir); RmRf(f->cfg);
 }
 
+#include "layout_invalidation_test.c"
+
 static int TestShellStripSettings(void)
 {
     InteractionFixture f = {0};
@@ -21911,6 +21916,9 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestSessionScrollBookmarks())) return 1;
 #endif
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--layout-invalidation") == 0)
+        return TestLayoutInvalidation();
+    if (argc == 1 && TestLayoutInvalidation()) return 1;
     if (argc == 2 && strcmp(argv[1], "--shell-geometry") == 0)
         return PICO_TEST_RUN(TestBottomFollowShellGeometryStable());
     if (argc == 2 && strcmp(argv[1], "--tool-group-release") == 0)

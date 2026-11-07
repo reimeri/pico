@@ -15,7 +15,6 @@ typedef struct PromptState {
     char *text;
     PicoPromptSpan spans[PICO_PROMPT_SPAN_MAX];
     int span_count;
-    bool overflow;
     PicoScrollbar scrollbar;
 } PromptState;
 
@@ -26,7 +25,6 @@ static __thread PromptState *s_active_prompt_state = NULL;
 #define g_text (s_active_prompt_state->text)
 #define g_spans (s_active_prompt_state->spans)
 #define g_span_count (s_active_prompt_state->span_count)
-#define g_overflow (s_active_prompt_state->overflow)
 #define g_scrollbar (s_active_prompt_state->scrollbar)
 
 #define COLOR_PROMPT_BASE (Clay_Color){186, 164, 122, 255}
@@ -54,7 +52,6 @@ static void ClearPrompt(void)
     g_text = NULL;
     g_span_count = 0;
     memset(g_spans, 0, sizeof(g_spans));
-    g_overflow = false;
     memset(&g_scrollbar, 0, sizeof(g_scrollbar));
 }
 
@@ -282,7 +279,7 @@ static void PromptRender(PicoHost *app, void *state)
             {
                 RenderPromptText();
             }
-            if (g_overflow)
+            if (PicoScrollbar_Overflows(CLAY_STRING("PromptModalScroll")))
             {
                 PicoScrollbar_RenderOverlay(CLAY_STRING("PromptModalScroll"), CLAY_STRING("PromptModalScrollTrack"),
                                             CLAY_STRING("PromptModalScrollHandle"));
@@ -300,7 +297,6 @@ static void PromptAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     {
         return;
     }
-    g_overflow = PicoScrollbar_Overflows(CLAY_STRING("PromptModalScroll"));
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         return;

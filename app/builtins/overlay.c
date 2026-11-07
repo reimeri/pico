@@ -29,7 +29,6 @@ typedef struct OverlayState {
     uint64_t ask_id;
     bool ask_show;
     char *ask_msg;
-    bool ask_overflow;
     PicoScrollbar ask_bar;
 } OverlayState;
 
@@ -45,7 +44,6 @@ static OverlayState *ActiveOverlayState(void)
 #define g_ask_id (ActiveOverlayState()->ask_id)
 #define g_ask_show (ActiveOverlayState()->ask_show)
 #define g_ask_msg (ActiveOverlayState()->ask_msg)
-#define g_ask_overflow (ActiveOverlayState()->ask_overflow)
 #define g_ask_bar (ActiveOverlayState()->ask_bar)
 
 void PicoOverlay_Notify(PicoHost *app, const char *text)
@@ -91,7 +89,6 @@ static void ClearAskUi(void)
     g_ask_msg = NULL;
     g_ask_id = 0;
     g_ask_show = false;
-    g_ask_overflow = false;
     memset(&g_ask_bar, 0, sizeof(g_ask_bar));
 }
 
@@ -213,7 +210,7 @@ static void RenderAsk(PicoHost *app)
                                                                  .textColor = COLOR_TEXT,
                                                                  .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                 }
-                if (g_ask_overflow)
+                if (PicoScrollbar_Overflows(CLAY_STRING("AskModalScroll")))
                 {
                     PicoScrollbar_Render(CLAY_STRING("AskModalScroll"), CLAY_STRING("AskModalScrollTrack"),
                                          CLAY_STRING("AskModalScrollHandle"));
@@ -410,7 +407,6 @@ static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     }
     if (g_ask_show)
     {
-        g_ask_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskModalScroll"));
         if (OverAsk(CLAY_STRING("AskApprove")) || OverAsk(CLAY_STRING("AskDeny")))
         {
             app->hovered_clickable = true;
@@ -439,6 +435,8 @@ static void OverlayAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ExtWarn"))))
     {
+        /* The pending text commands borrow the allocation dismissed below. */
+        app->ui_relayout_requested = true;
         if (app->status_warn)
         {
             free(app->status_warn);

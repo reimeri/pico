@@ -606,6 +606,8 @@ void pico_add_llm_hook(PicoWorkspace *workspace, PicoLlmHookFn fn);
 void pico_add_context_hook(PicoWorkspace *workspace, PicoContextHookFn fn);
 void pico_add_tool_row_hook(PicoWorkspace *workspace, PicoToolRowFn fn);
 /* Main thread. Named modal stack used by PicoUi_ModalOpen. `name` is copied.
+ * Successful push/pop invalidate layout and presentation, including from
+ * AFTER_LAYOUT (input hooks are not replayed during corrective layouts).
  * Push fails when name is empty, already claimed, or the stack is full. Pop
  * succeeds only when `name` is the current top. */
 bool pico_ui_modal_push(PicoHost *host, const char *name);

@@ -4324,28 +4324,56 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
     return commands;
 }
 
-/* Scrollbar commands read the previous completed Clay geometry. Reconcile
- * both transcript panes when layout changes that input, even without a scroll
- * correction or a change to the overflow boolean. Copy the offset, not Clay's
- * mutable scrollPosition pointer. */
-typedef struct TranscriptScrollGeometry {
-    bool found;
-    float viewport, content, y;
-} TranscriptScrollGeometry;
+static const Clay_String scroll_ids[] = {
+    CLAY_STRING("ChatScroll"), CLAY_STRING("SidebarScroll"),
+    CLAY_STRING("SubagentChatScroll"),
+    CLAY_STRING("SettingsPanelScroll"), CLAY_STRING("SettingsDefaultMenuScroll"),
+    CLAY_STRING("AskModalScroll"), CLAY_STRING("AskUserTextScroll"),
+    CLAY_STRING("ClarificationFocus"), CLAY_STRING("ComposerScroll"), CLAY_STRING("FooterMenuScroll"),
+    CLAY_STRING("ExtModalScroll"), CLAY_STRING("PromptModalScroll"),
+    CLAY_STRING("BackgroundListScroll"), CLAY_STRING("BackgroundLogScroll"),
+    CLAY_STRING("DiffScroll"), CLAY_STRING("DiffFiles"), CLAY_STRING("MdHorizontalScroll")};
 
-static TranscriptScrollGeometry TranscriptScrollSnapshot(Clay_String id)
+#define SHELL_SCROLL_COUNT (sizeof(scroll_ids) / sizeof(scroll_ids[0]))
+
+/* Scrollbar visibility/thumbs read the last completed layout. Snapshot all
+ * shell-owned scrollers, not just chat: caret reveal, modal opening and content
+ * edits can change those inputs after commands have already been built. */
+typedef struct LayoutScrollGeometry {
+    bool found;
+    Clay_Dimensions viewport, content;
+    Clay_Vector2 offset;
+} LayoutScrollGeometry;
+
+static LayoutScrollGeometry LayoutScrollSnapshot(Clay_String id)
 {
     Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(id));
-    return (TranscriptScrollGeometry){data.found, data.scrollContainerDimensions.height,
-                                      data.contentDimensions.height,
-                                      data.scrollPosition ? data.scrollPosition->y : 0};
+    return (LayoutScrollGeometry){data.found, data.scrollContainerDimensions,
+                                  data.contentDimensions,
+                                  data.scrollPosition ? *data.scrollPosition : (Clay_Vector2){0}};
 }
 
-static bool TranscriptScrollChanged(TranscriptScrollGeometry before, Clay_String id)
+static void CaptureLayoutScroll(LayoutScrollGeometry *snapshots)
 {
-    TranscriptScrollGeometry after = TranscriptScrollSnapshot(id);
-    return before.found != after.found || fabsf(before.viewport - after.viewport) > 0.01f ||
-           fabsf(before.content - after.content) > 0.01f || fabsf(before.y - after.y) > 0.01f;
+    for (size_t i = 0; i < SHELL_SCROLL_COUNT; i++)
+        snapshots[i] = LayoutScrollSnapshot(scroll_ids[i]);
+}
+
+static bool LayoutScrollChanged(const LayoutScrollGeometry *snapshots)
+{
+    for (size_t i = 0; i < SHELL_SCROLL_COUNT; i++)
+    {
+        LayoutScrollGeometry a = snapshots[i], b = LayoutScrollSnapshot(scroll_ids[i]);
+        if (a.found != b.found) return true;
+        if (!a.found) continue;
+        if (fabsf(a.viewport.width - b.viewport.width) > 0.01f ||
+            fabsf(a.viewport.height - b.viewport.height) > 0.01f ||
+            fabsf(a.content.width - b.content.width) > 0.01f ||
+            fabsf(a.content.height - b.content.height) > 0.01f ||
+            fabsf(a.offset.x - b.offset.x) > 0.01f ||
+            fabsf(a.offset.y - b.offset.y) > 0.01f) return true;
+    }
+    return false;
 }
 
 static void UpdateChatScrollbarDrag(PicoHost *app)
@@ -4733,17 +4761,8 @@ void PicoHost_Frame(PicoHost *app)
                                  PicoDiffUi_ScrollHovered(app, wheel);
     /* Clay advances drag inertia independently of wheel/input events. A new
      * scroll offset is a visible change even with a stationary pointer. */
-    static const Clay_String scroll_ids[] = {
-        CLAY_STRING("ChatScroll"), CLAY_STRING("SidebarScroll"),
-        CLAY_STRING("SubagentChatScroll"),
-        CLAY_STRING("SettingsPanelScroll"), CLAY_STRING("SettingsDefaultMenuScroll"),
-        CLAY_STRING("AskModalScroll"), CLAY_STRING("AskUserTextScroll"),
-        CLAY_STRING("ClarificationFocus"), CLAY_STRING("ComposerScroll"), CLAY_STRING("FooterMenuScroll"),
-        CLAY_STRING("ExtModalScroll"), CLAY_STRING("PromptModalScroll"),
-        CLAY_STRING("BackgroundListScroll"), CLAY_STRING("BackgroundLogScroll"),
-        CLAY_STRING("DiffScroll"), CLAY_STRING("DiffFiles"), CLAY_STRING("MdHorizontalScroll")};
-    Clay_Vector2 previous_scroll[sizeof(scroll_ids) / sizeof(scroll_ids[0])];
-    for (size_t i = 0; i < sizeof(scroll_ids) / sizeof(scroll_ids[0]); i++)
+    Clay_Vector2 previous_scroll[SHELL_SCROLL_COUNT];
+    for (size_t i = 0; i < SHELL_SCROLL_COUNT; i++)
     {
         Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(scroll_ids[i]));
         previous_scroll[i] = (data.found && data.scrollPosition) ? *data.scrollPosition : (Clay_Vector2){0};
@@ -4752,7 +4771,7 @@ void PicoHost_Frame(PicoHost *app)
         !bar_drag && !PicoBrowser_BlocksPointer(app) && !PicoSettingsUi_BlocksPointer(app) && !PicoDiffUi_BlocksPointer(app) && !over_settings_content &&
             (modal_open || (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
         (pane_wheel || sidebar_wheel || over_settings_content) ? (Clay_Vector2){0, 0} : wheel, frame_dt);
-    for (size_t i = 0; i < sizeof(scroll_ids) / sizeof(scroll_ids[0]); i++)
+    for (size_t i = 0; i < SHELL_SCROLL_COUNT; i++)
     {
         Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(scroll_ids[i]));
         if (data.found && data.scrollPosition &&
@@ -4786,8 +4805,8 @@ void PicoHost_Frame(PicoHost *app)
     if (app->ui_relayout_requested)
         pico_host_request_redraw(app);
 
-    TranscriptScrollGeometry chat_geometry = TranscriptScrollSnapshot(CLAY_STRING("ChatScroll"));
-    TranscriptScrollGeometry inspect_geometry = TranscriptScrollSnapshot(CLAY_STRING("SubagentChatScroll"));
+    LayoutScrollGeometry scroll_geometry[SHELL_SCROLL_COUNT];
+    CaptureLayoutScroll(scroll_geometry);
     Clay_RenderCommandArray render_commands =
         RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), frame_dt));
 
@@ -4857,9 +4876,7 @@ void PicoHost_Frame(PicoHost *app)
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
 
-    bool relayout = app->ui_relayout_requested ||
-                    TranscriptScrollChanged(chat_geometry, CLAY_STRING("ChatScroll")) ||
-                    TranscriptScrollChanged(inspect_geometry, CLAY_STRING("SubagentChatScroll"));
+    bool relayout = app->ui_relayout_requested || LayoutScrollChanged(scroll_geometry);
     if (ClayLayoutUnusable(render_commands))
     {
         (void)PicoChat_TakeVirtualRelayout();
@@ -4899,8 +4916,7 @@ void PicoHost_Frame(PicoHost *app)
     for (int pass = 0; relayout && pass < 3; pass++)
     {
         pico_host_request_redraw(app);
-        chat_geometry = TranscriptScrollSnapshot(CLAY_STRING("ChatScroll"));
-        inspect_geometry = TranscriptScrollSnapshot(CLAY_STRING("SubagentChatScroll"));
+        CaptureLayoutScroll(scroll_geometry);
         /* Rebuild commands with the corrected scroll and visibility plan. */
         render_commands = RecoverClayLayoutIfNeeded(
             app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), 0.0f));
@@ -4910,10 +4926,9 @@ void PicoHost_Frame(PicoHost *app)
             return;
         }
         PicoChat_HarvestVirtualHeights(app);
-        relayout = PicoChat_TakeVirtualRelayout() || app->ui_relayout_requested ||
-                   TranscriptScrollChanged(chat_geometry, CLAY_STRING("ChatScroll")) ||
-                   TranscriptScrollChanged(inspect_geometry, CLAY_STRING("SubagentChatScroll"));
         PicoBrowser_AfterLayout(app);
+        relayout = PicoChat_TakeVirtualRelayout() || app->ui_relayout_requested ||
+                   LayoutScrollChanged(scroll_geometry);
         app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         if (!Pico_NeedsClayReinit())
         {

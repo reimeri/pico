@@ -644,6 +644,13 @@ bool pico_composer_remove_at(int index)
     {
         g_preview--;
     }
+    /* Commands borrow thumbnail slots; removal also shifts the remaining
+     * slots. Never present those commands after changing the attachment set. */
+    if (g_app)
+    {
+        g_app->ui_relayout_requested = true;
+        pico_host_request_redraw(g_app);
+    }
     UnloadAttach(&g_attach[index], true);
     if (index < g_attach_n - 1)
     {
@@ -1468,7 +1475,8 @@ static void EnsureCaretVisible(PicoHost *app)
     float caret_top = (float)line_i * v.line_height;
     float caret_bot = caret_top + v.line_height;
     float view_h = scroll.scrollContainerDimensions.height;
-    float vis_top = -scroll.scrollPosition->y;
+    float old_y = scroll.scrollPosition->y;
+    float vis_top = -old_y;
     float vis_bot = vis_top + view_h;
     if (caret_top < vis_top)
     {
@@ -1478,6 +1486,8 @@ static void EnsureCaretVisible(PicoHost *app)
     {
         scroll.scrollPosition->y = -(caret_bot - view_h);
     }
+    if (scroll.scrollPosition->y != old_y)
+        app->ui_relayout_requested = true;
 }
 
 static bool ComposerReserve(PicoComposer *c, int extra)
@@ -2330,7 +2340,7 @@ void PicoComposer_Render(PicoHost *app, void *state)
                     }
                 }
             }
-            if (app->composer_overflow)
+            if (PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll")))
             {
                 PicoScrollbar_Render(CLAY_STRING("ComposerScroll"), CLAY_STRING("CompScrollTrack"),
                                      CLAY_STRING("CompScrollBarHandle"));
@@ -2531,7 +2541,6 @@ static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
     {
         s_composer_width = composer.boundingBox.width;
     }
-    app->composer_overflow = PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll"));
     if (!preview_consumed && !PicoUi_ModalOpen(app))
     {
         if (!PicoClarification_View(app) && ComposerHandleAttachPointer())

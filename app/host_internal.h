@@ -210,7 +210,6 @@ struct PicoHost {
     bool chat_follow_bottom;
     uint64_t chat_transcript_revision; /* Invalidates retained extent on same-session replacement. */
     bool chat_overflow;
-    bool composer_overflow;
     bool reinitialize_clay;
     bool ui_relayout_requested; /* Main-thread input changed layout/scroll after layout. */
     bool redraw_requested; /* Full-frame invalidation; only the main thread mutates it. */

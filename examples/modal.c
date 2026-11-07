@@ -1,4 +1,7 @@
 // Host overlay modal plus workspace tool-row click. Copy then F5:
+// Modal push/pop invalidate layout even from AFTER_LAYOUT; see
+// docs/extend/views.md#named-modals and docs/extend/contracts.md for borrowed
+// command-storage lifetimes. No additional redraw request is needed here.
 //
 //   mkdir -p ~/.config/pico/extensions/modal
 //   cp examples/modal.c ~/.config/pico/extensions/modal/

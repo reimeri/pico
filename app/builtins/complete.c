@@ -526,6 +526,9 @@ bool PicoComplete_HandlePointer(PicoHost *app)
     if (hovered >= 0)
     {
         g_complete.selected = hovered;
+        /* Acceptance can replace/reallocate composer text borrowed by the
+         * current commands, including through extension accept callbacks. */
+        app->ui_relayout_requested = true;
         Accept(app);
         return true;
     }
@@ -534,6 +537,7 @@ bool PicoComplete_HandlePointer(PicoHost *app)
         return true;
     }
     Dismiss(app);
+    app->ui_relayout_requested = true;
     return false;
 }
 

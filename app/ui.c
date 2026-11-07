@@ -38,6 +38,9 @@ bool pico_ui_modal_push(PicoHost *app, const char *name)
         return false;
     }
     app->ui_modal_count++;
+    /* Modal commands may already exist when an AFTER_LAYOUT handler changes
+     * the stack. Replace those commands before consuming this redraw. */
+    app->ui_relayout_requested = true;
     pico_host_request_redraw(app);
     return true;
 }
@@ -54,6 +57,9 @@ bool pico_ui_modal_pop(PicoHost *app, const char *name)
     }
     app->ui_modal_count--;
     app->ui_modals[app->ui_modal_count][0] = '\0';
+    /* Modal commands may already exist when an AFTER_LAYOUT handler changes
+     * the stack. Replace those commands before consuming this redraw. */
+    app->ui_relayout_requested = true;
     pico_host_request_redraw(app);
     return true;
 }

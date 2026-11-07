@@ -208,6 +208,13 @@ if (pico_ui_modal_push(host, "my-modal"))
 
 - `pico_ui_modal_push` copies a globally unique `name` (non-empty, shorter than `PICO_UI_MODAL_NAME`). It fails when that name is already claimed or the stack is full (`PICO_MAX_UI_MODALS`). Prefix extension modal names to avoid collisions with builtins.
 - `pico_ui_modal_pop(host, name)` succeeds only when `name` is the current top.
+- A successful push/pop requests both layout and presentation. If called from
+  `PICO_HOOK_AFTER_LAYOUT`, Pico rebuilds the pending commands before presenting
+  the changed modal stack, without replaying input hooks. Failed calls do not
+  invalidate the view. This also protects a closed modal's borrowed text/image
+  commands from being presented after its content has been released. Other
+  state changes are not implicitly covered by a modal claim; see
+  [redraw and frame contracts](contracts.md#redraw-and-frame-callbacks).
 - `pico_ui_modal_top` / `pico_ui_modal_is_top` / `pico_ui_modal_count` / `pico_ui_modal_has` / `pico_ui_modal_claimed` inspect the stack. Ask UI is not a named claim; `PicoUi_ModalOpen` includes surfaced asks separately, except the builtin custom questionnaire. Confirmation asks and extension-defined custom asks remain modal.
 - The builtin Settings sidepanel is shell-owned, not an overlay-slot view. It includes a **Subagents** section, also opened with `/subagents`, for user-global profile management, including with zero open workspaces. Schema-valid definitions remain editable even if their referenced model/effort/tools are unavailable in a workspace; compatibility is checked when that workspace loads them for use. Profile drafts/confirmations and queued profile saves defer host-extension replacement until save or confirmed discard; see [subagents](../subagents.md#managing-profiles-in-the-gui). Once replacement can proceed, host-extension replacement closes every named modal before rebuilding host view/hook registrations. Host replacement also closes the settings panel; its app-run width is retained, but editor-local state is not preserved. Do not attempt to preserve modal-local state across host reload.
 - `pico_host_init` / `pico_host_free` also clear the stack and modal-local builtin state. Builtin inspect, extensions, prompt, diff, preview, footer menu, and folder picker use this same stack.

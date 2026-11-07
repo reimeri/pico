@@ -17,6 +17,8 @@
 #include "text_field_ui.h"
 
 #include "clay/clay.h"
+#include "clay_custom.h"
+#include "rlgl.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -840,6 +842,33 @@ static void RenderCacheChip(void)
     }
 }
 
+static void DrawWorkingStatus(Clay_BoundingBox bounds)
+{
+    const float two_pi = 6.28318530718f;
+    const float head = (float)fmod(GetTime() / 2.0, 1.0) * two_pi;
+    const Clay_Color color = COLOR_LINK;
+    const int segments = 32;
+    float cx = bounds.x + bounds.width * 0.5f;
+    float cy = bounds.y + bounds.height * 0.5f;
+    /* Match the inbox's two-pixel stroke, with a two-thirds-circle fading tail.
+     * The outer radius preserves the old orbiting dots' visual footprint. */
+    rlSetTexture(rlGetTextureIdDefault());
+    rlBegin(RL_QUADS);
+    for (int i = 0; i < segments; i++)
+    {
+        for (int vertex = 0; vertex < 4; vertex++)
+        {
+            int sample = i + (vertex == 1 || vertex == 2);
+            float angle = head - (two_pi * 2 / 3) * sample / segments;
+            float radius = vertex < 2 ? 7.0f : 5.0f;
+            rlColor4ub((unsigned char)color.r, (unsigned char)color.g, (unsigned char)color.b,
+                       (unsigned char)(color.a * (1.0f - (float)sample / segments)));
+            rlVertex2f(cx + radius * cosf(angle), cy + radius * sinf(angle));
+        }
+    }
+    rlEnd();
+}
+
 static void RenderStatus(PicoHost *app)
 {
     FooterStatusKind kind = StatusKind(app);
@@ -849,27 +878,17 @@ static void RenderStatus(PicoHost *app)
     {
         if (kind == FOOTER_STATUS_RUNNING)
         {
-            const float radius = 5.0f;
-            const float two_pi = 6.28318530718f;
-            float theta = (float)GetTime() * two_pi * 1.75f;
-            static const float alphas[3] = {1.0f, 0.5f, 0.22f};
-            for (int i = 0; i < 3; i++)
-            {
-                float angle = theta + (float)i * (two_pi / 3.0f);
-                Clay_Color color = COLOR_STATUS_ON;
-                color.a *= alphas[i];
-                CLAY(CLAY_IDI("FooterRunDot", i),
-                     {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
-                                   .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH,
-                                   .attachPoints = {.element = CLAY_ATTACH_POINT_CENTER_CENTER,
-                                                    .parent = CLAY_ATTACH_POINT_CENTER_CENTER},
-                                   .offset = {.x = radius * cosf(angle), .y = radius * sinf(angle)}},
-                      .layout = {.sizing = {.width = CLAY_SIZING_FIXED(4), .height = CLAY_SIZING_FIXED(4)}},
-                      .backgroundColor = color,
-                      .cornerRadius = CLAY_CORNER_RADIUS(2)})
-                {
-                }
-            }
+            static CustomLayoutElement decoration = {
+                .type = CUSTOM_LAYOUT_ELEMENT_TYPE_CALLBACK,
+                .customData.draw = DrawWorkingStatus,
+            };
+            CLAY_AUTO_ID({.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                                      .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT,
+                                      .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+                          .layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                                .height = CLAY_SIZING_PERCENT(1)}},
+                          .custom = {.customData = &decoration}}) {}
+            pico_host_request_redraw_after(app, 1.0 / 60.0);
         }
         else
         {

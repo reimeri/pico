@@ -19,6 +19,8 @@
 #include "text_field_ui.h"
 
 #include "clay/clay.h"
+#include "clay_custom.h"
+#include "rlgl.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -2289,6 +2291,87 @@ static Clay_String InboxAgeLabel(SidebarState *s, int64_t at)
     return CStr(label);
 }
 
+/* Distance along the inset rounded perimeter, clockwise from the top edge.
+ * Keeping the decoration floating means it never participates in row sizing. */
+static Vector2 InboxBorderPoint(float distance, float width, float height)
+{
+    const float radius = 5.0f, quarter = 1.57079632679f;
+    const float lengths[] = {width - 12, radius * quarter, height - 12, radius * quarter,
+                             width - 12, radius * quarter, height - 12, radius * quarter};
+    const Vector2 centers[] = {{width - 6, 6}, {width - 6, height - 6},
+                               {6, height - 6}, {6, 6}};
+    for (int side = 0; side < 8; side++)
+    {
+        if (distance <= lengths[side] || side == 7)
+        {
+            if (side & 1)
+            {
+                float angle = (side / 2 - 1) * quarter + distance / radius;
+                Vector2 c = centers[side / 2];
+                return (Vector2){c.x + radius * cosf(angle), c.y + radius * sinf(angle)};
+            }
+            switch (side)
+            {
+            case 0: return (Vector2){6 + distance, 1};
+            case 2: return (Vector2){width - 1, 6 + distance};
+            case 4: return (Vector2){width - 6 - distance, height - 1};
+            default: return (Vector2){1, height - 6 - distance};
+            }
+        }
+        distance -= lengths[side];
+    }
+    return (Vector2){6, 1};
+}
+
+static void DrawInboxWorkingBorder(Clay_BoundingBox bounds)
+{
+    const float width = bounds.width, height = bounds.height;
+    if (width < 12 || height < 12) return;
+    const float perimeter = 2 * (width + height - 24) + 10 * 3.14159265359f;
+    const float tail = perimeter / 3;
+    const float head = (float)fmod(GetTime() / 2.0, 1.0) * perimeter;
+    const Clay_Color color = COLOR_LINK;
+    int steps = (int)ceilf(tail);
+    /* A single strip with interpolated alpha, rather than overlapping dots:
+     * no bright seams, and only one floating Clay root per working row. */
+    rlSetTexture(rlGetTextureIdDefault());
+    rlBegin(RL_QUADS);
+    for (int i = 0; i < steps; i++)
+    {
+        for (int vertex = 0; vertex < 4; vertex++)
+        {
+            int sample = i + (vertex == 1 || vertex == 2);
+            float distance = fmodf(head - tail * sample / steps + perimeter, perimeter);
+            Vector2 point = InboxBorderPoint(distance, width, height);
+            Vector2 before = InboxBorderPoint(fmodf(distance + perimeter - 0.05f, perimeter), width, height);
+            Vector2 after = InboxBorderPoint(fmodf(distance + 0.05f, perimeter), width, height);
+            float dx = after.x - before.x, dy = after.y - before.y;
+            float length = sqrtf(dx * dx + dy * dy);
+            float sign = vertex < 2 ? -1 : 1;
+            rlColor4ub((unsigned char)color.r, (unsigned char)color.g, (unsigned char)color.b,
+                       (unsigned char)(color.a * (1.0f - (float)sample / steps)));
+            rlVertex2f(bounds.x + point.x - sign * dy / length,
+                       bounds.y + point.y + sign * dx / length);
+        }
+    }
+    rlEnd();
+}
+
+static void RenderInboxWorkingBorder(PicoHost *host)
+{
+    static CustomLayoutElement decoration = {
+        .type = CUSTOM_LAYOUT_ELEMENT_TYPE_CALLBACK,
+        .customData.draw = DrawInboxWorkingBorder,
+    };
+    CLAY_AUTO_ID({.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                              .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT,
+                              .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+                  .layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                        .height = CLAY_SIZING_PERCENT(1)}},
+                  .custom = {.customData = &decoration}}) {}
+    pico_host_request_redraw_after(host, 1.0 / 60.0);
+}
+
 static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
 {
     if (row->section != *(InboxSection *)ctx) return 0;
@@ -2317,6 +2400,8 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                   .backgroundColor = RowFill(selected, Clay_PointerOver(id)),
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
+            if (row->section == INBOX_WORKING)
+                RenderInboxWorkingBorder(host);
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
                                      .sizing = {.width = CLAY_SIZING_GROW(0),
                                                 .height = CLAY_SIZING_FIXED(height - 10)}}})

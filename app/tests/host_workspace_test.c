@@ -2678,6 +2678,7 @@ static int RunBrowserViewportCase(bool with_sidebar);
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static int RunSidebarModeShellCase(bool with_sidebar);
+static int RunWorkingBorderShellCase(bool with_sidebar);
 #endif
 
 static int RunOverlayShellCase(bool with_sidebar)
@@ -3001,7 +3002,8 @@ static int TestBottomFollowShellGeometryStable(void)
     if (RunBrowserViewportCase(false) || RunBrowserViewportCase(true)) return 1;
     if (RunOverlayShellCase(false) || RunOverlayShellCase(true)) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
-    if (RunSidebarModeShellCase(false) || RunSidebarModeShellCase(true)) return 1;
+    if (RunSidebarModeShellCase(false) || RunSidebarModeShellCase(true) ||
+        RunWorkingBorderShellCase(false) || RunWorkingBorderShellCase(true)) return 1;
 #endif
     return RunWorkspaceLessShellCase();
 }
@@ -18755,6 +18757,76 @@ done:
     return !good;
 }
 
+static int RunWorkingBorderShellCase(bool with_sidebar)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    double saved_time = g_frame_time;
+    ChatStabilitySnapshot expected, current;
+    Clay_BoundingBox expected_row = {0}, expected_scroll = {0}, expected_status = {0};
+    if (!InteractionFixtureInit(&f)) goto done;
+    if (!with_sidebar) f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    f.host->sidebar_inbox_mode = true;
+    PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
+    agent->inbox_pending = true;
+    for (int i = 0; i < 60; i++)
+        PicoAgent_AddMessage(f.host, agent, PICO_ROLE_ASSISTANT, "Working border must not resize the shell.");
+    for (int frame = 0; frame < 120; frame++)
+    {
+        g_frame_time = 100 + frame * 0.05;
+        /* Exercise animation phases, then needs-input and completion. */
+        agent->state = frame < 80 ? PICO_AGENT_LLM_WAIT :
+                       frame < 100 ? PICO_AGENT_ERROR : PICO_AGENT_IDLE;
+        LayoutChatStabilityFrame(f.host, (Clay_Dimensions){1100, 600});
+        Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (!chat.found) goto done;
+        PicoScrollbar_PinToBottom(chat.scrollContainerDimensions.height, chat.contentDimensions.height,
+                                   &chat.scrollPosition->y);
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 600, 0);
+        Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0));
+        Clay_ElementData status = Clay_GetElementData(CLAY_ID("FooterStatus"));
+        if (!status.found) goto done;
+        int decorations = 0, footer_decorations = 0;
+        for (int i = 0; i < commands.length; i++)
+        {
+            Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+            if (command->commandType != CLAY_RENDER_COMMAND_TYPE_CUSTOM) continue;
+            if (ShellBoxStable(status.boundingBox, command->boundingBox)) footer_decorations++;
+            else
+            {
+                decorations++;
+                if (!row.found || !ShellBoxStable(row.boundingBox, command->boundingBox)) goto done;
+            }
+        }
+        if (decorations != (with_sidebar && frame < 80 ? 1 : 0) ||
+            footer_decorations != (frame < 80 ? 1 : 0)) goto done;
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
+        if (frame == 20)
+        {
+            expected = current;
+            expected_status = status.boundingBox;
+            expected_row = row.boundingBox;
+            expected_scroll = Clay_GetElementData(CLAY_ID("SidebarScroll")).boundingBox;
+        }
+        if (frame > 20)
+        {
+            if (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+                !ShellBoxStable(expected_status, status.boundingBox)) goto done;
+            if (with_sidebar && (!row.found ||
+                fabsf(row.boundingBox.width - expected_row.width) > 0.1f ||
+                fabsf(row.boundingBox.height - expected_row.height) > 0.1f ||
+                !ShellBoxStable(expected_scroll, Clay_GetElementData(CLAY_ID("SidebarScroll")).boundingBox))) goto done;
+        }
+    }
+    good = true;
+done:
+    g_frame_time = saved_time;
+    if (f.host) PicoHost_FindAgent(f.host, f.agent)->state = PICO_AGENT_IDLE;
+    InteractionFixtureFree(&f);
+    if (!good) Fail("Working inbox and footer indicators must follow their bounds without resizing the bottom-follow shell");
+    return !good;
+}
+
 static int RunSidebarModeShellCase(bool with_sidebar)
 {
     InteractionFixture f = {0};
@@ -21640,11 +21712,14 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
     if (argc == 2 && strcmp(argv[1], "--project-picker") == 0)
         return PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false));
+    if (argc == 2 && strcmp(argv[1], "--sidebar-working") == 0)
+        return PICO_TEST_RUN(RunWorkingBorderShellCase(false)) || PICO_TEST_RUN(RunWorkingBorderShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--sidebar-modes") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarModesAndPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
                PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) ||
                PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) || PICO_TEST_RUN(RunSidebarModeShellCase(false)) ||
                PICO_TEST_RUN(RunSidebarModeShellCase(true)) ||
+               PICO_TEST_RUN(RunWorkingBorderShellCase(false)) || PICO_TEST_RUN(RunWorkingBorderShellCase(true)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_SUCCESS)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_PARTIAL_FAILURE)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_NEWER_EVENT));

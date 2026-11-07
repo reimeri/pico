@@ -81,6 +81,15 @@ const char *__wrap_GetApplicationDirectory(void) {
 }
 static bool g_find_input_test;
 static bool g_fixed_width_text_measure;
+
+static void SetFixedWidthTextMeasure(bool enabled)
+{
+    if (g_fixed_width_text_measure == enabled) return;
+    g_fixed_width_text_measure = enabled;
+    /* The production cache cannot distinguish mocked from real font metrics. */
+    Pico_MeasureCacheReset();
+}
+
 static int g_find_key;
 static bool g_find_ctrl;
 static bool g_find_shift;
@@ -5867,7 +5876,8 @@ static bool BrowserMenuMatchesSettings(PicoHost *host)
     bool good = false;
     const float scales[] = {0.75f, 1.25f};
     PicoExt settings = pico_ext_settings();
-    g_clay_frame_test = g_fixed_width_text_measure = true;
+    g_clay_frame_test = true;
+    SetFixedWidthTextMeasure(true);
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
     for (int scale = 0; scale < 2; ++scale) {
         Pico_SetFontScale(scales[scale]); Clay_ResetMeasureTextCache();
@@ -5912,7 +5922,8 @@ done:
     Pico_SetFontScale(old_scale); Clay_ResetMeasureTextCache();
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     Clay_SetPointerState((Clay_Vector2){0}, false);
-    g_find_input_test = g_find_press = g_clay_frame_test = g_fixed_width_text_measure = false;
+    g_find_input_test = g_find_press = g_clay_frame_test = false;
+    SetFixedWidthTextMeasure(false);
     return good;
 }
 
@@ -12234,7 +12245,8 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
                          viewport, (Clay_ErrorHandler){0})) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     RichText_SetMeasureFunction(ShellMeasureText, NULL);
-    g_find_input_test = g_fixed_width_text_measure = true;
+    g_find_input_test = true;
+    SetFixedWidthTextMeasure(true);
     PicoExt ext = pico_ext_ask_user();
     void *ui = PicoPlugins_HostState(host, "ask-user");
     const char *panes[] = {"Root", "Body", "RightColumn", "MainColumn", "ChatScroll",
@@ -12535,7 +12547,8 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
 done:
     if (photo[0]) unlink(photo);
     MdView_ClearImages();
-    g_find_input_test = g_find_press = g_find_down = g_clay_frame_test = g_fixed_width_text_measure = false;
+    g_find_input_test = g_find_press = g_find_down = g_clay_frame_test = false;
+    SetFixedWidthTextMeasure(false);
     g_find_key = g_find_character = 0;
     if (host) pico_host_free(host);
     g_chat_image_test = g_browser_fake_window = false;
@@ -20898,8 +20911,7 @@ static int RunSessionReferenceShellCase(bool with_sidebar)
     PicoAgent_AddMessage(host,agent,PICO_ROLE_USER,portable);
     int reference_message=agent->message_count-1;
     PicoComposer_SetText(host,draft);
-    g_fixed_width_text_measure=true;
-    Pico_MeasureCacheReset();
+    SetFixedWidthTextMeasure(true);
     Clay_Arena arena=Clay_CreateArenaWithCapacityAndMemory(arena_size,memory);
     if (!Clay_Initialize(arena,viewport,(Clay_ErrorHandler){0})) goto done;
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8,NULL);
@@ -20999,10 +21011,10 @@ static int RunSessionReferenceShellCase(bool with_sidebar)
     if (host->composer.length!=0) { Fail("delete must remove a complete session chip"); goto done; }
     rc=0;
 done:
-    g_find_input_test=g_fixed_width_text_measure=false;
+    g_find_input_test=false;
+    SetFixedWidthTextMeasure(false);
     g_find_press=g_find_down=false;
     g_find_key=0;
-    Pico_MeasureCacheReset();
     if (host) pico_host_free(host);
     Clay_SetCurrentContext(previous);
     free(memory); free(portable); free(draft);
@@ -21849,7 +21861,8 @@ static int TestApiKeyDialog(void)
     if (!Clay_Initialize(arena, (Clay_Dimensions){900,800}, (Clay_ErrorHandler){0})) goto done;
     Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
     RichText_SetMeasureFunction(ShellMeasureText, NULL);
-    g_find_input_test = g_fixed_width_text_measure = g_clay_frame_test = true;
+    g_find_input_test = g_clay_frame_test = true;
+    SetFixedWidthTextMeasure(true);
     g_clay_frame_width = 900;
     const char *providers[] = {"openai", "hyper", "xai"};
     for (int i = 0; i < 3; i++)
@@ -21949,7 +21962,8 @@ static int TestApiKeyDialog(void)
     if (!failed_notice) goto done;
     rc = 0;
 done:
-    g_find_input_test = g_fixed_width_text_measure = g_clay_frame_test = false;
+    g_find_input_test = g_clay_frame_test = false;
+    SetFixedWidthTextMeasure(false);
     g_find_ctrl = false; g_find_key = 0;
     if (host) pico_host_free(host);
     Clay_SetCurrentContext(previous);

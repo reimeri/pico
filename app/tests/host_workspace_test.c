@@ -12149,6 +12149,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     PicoHost *host = NULL;
     char dir[] = "/tmp/pico-question-shell-XXXXXX";
     char cfg[] = "/tmp/pico-question-config-XXXXXX";
+    char photo[4096] = {0};
     MatrixProviderState state;
     MatrixStateInit(&state, MATRIX_PROVIDER_ASK);
     state.clarification_fixture = true;
@@ -12428,6 +12429,47 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     if (pico_ui_modal_claimed(host) || PicoAgent_CancelRequested(agent) ||
         !pico_tool_pending_ask(host, &ask))
     { Fail("Escape closing a footer menu must not cancel the pending questionnaire"); goto done; }
+    /* Chat previews remain interactive while the questionnaire owns composer
+     * input. Neither dismissal method may answer/cancel it or alter the draft. */
+    snprintf(photo, sizeof(photo), "%s/question-preview.png", dir);
+    Image image = GenImageColor(80, 40, RED);
+    bool saved = ExportImage(image, photo);
+    UnloadImage(image);
+    if (!saved) goto done;
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, "![Preview](question-preview.png)");
+    g_chat_image_test = g_browser_fake_window = true;
+    for (int dismissal = 0; dismissal < 2; dismissal++)
+    {
+        Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        if (chat.found && chat.scrollPosition)
+            PicoScrollbar_PinToBottom(chat.scrollContainerDimensions.height, chat.contentDimensions.height,
+                                      &chat.scrollPosition->y);
+        commands = PicoHost_LayoutShell(host, viewport.height, 0);
+        Clay_RenderCommand *thumbnail = ChatImageCommand(&commands, 0);
+        if (!thumbnail) { Fail("pending questionnaire must retain chat image thumbnails"); goto done; }
+        Clay_BoundingBox box = thumbnail->boundingBox;
+        g_find_pointer = (Vector2){box.x + box.width / 2, box.y + box.height / 2};
+        g_find_press = true;
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+        g_find_press = false;
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        if (!pico_ui_modal_is_top(host, "preview"))
+        { Fail("questionnaire must not block opening chat image previews"); goto done; }
+        PicoHost_LayoutShell(host, viewport.height, 0);
+        g_find_key = dismissal == 0 ? KEY_ESCAPE : 0;
+        g_find_press = dismissal == 1;
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+        g_find_key = 0;
+        g_find_press = false;
+        PicoToolAsk pending = {0};
+        if (pico_ui_modal_has(host, "preview") || PicoAgent_CancelRequested(agent) ||
+            !pico_tool_pending_ask(host, &pending) || pending.id != ask.id ||
+            strcmp(host->composer.text, "unsent draft"))
+        { Fail("preview dismissal must preserve the pending questionnaire and composer draft"); goto done; }
+    }
+    PicoHost_LayoutShell(host, viewport.height, 0);
     /* Expand again, then Submit the preserved Other answer explicitly. */
     toggle = Clay_GetElementData(CLAY_ID("AskUserToggle")).boundingBox;
     g_find_pointer = (Vector2){toggle.x + toggle.width / 2, toggle.y + toggle.height / 2};
@@ -12454,9 +12496,12 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
         Clay_GetElementData(CLAY_ID("AskUserHeader")).found || strcmp(host->composer.text, "unsent draft")) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
     result = 0;
 done:
+    if (photo[0]) unlink(photo);
+    MdView_ClearImages();
     g_find_input_test = g_find_press = g_find_down = g_clay_frame_test = g_fixed_width_text_measure = false;
     g_find_key = g_find_character = 0;
     if (host) pico_host_free(host);
+    g_chat_image_test = g_browser_fake_window = false;
     MatrixStateDestroy(&state);
     Clay_SetCurrentContext(previous);
     free(memory);
@@ -21569,6 +21614,8 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestSessionScrollBookmarks())) return 1;
 #endif
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--question-panel") == 0)
+        return PICO_TEST_RUN(RunQuestionPanelShellCase(false)) || PICO_TEST_RUN(RunQuestionPanelShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--diff-panel") == 0)
         return PICO_TEST_RUN(TestDiffPanelInteraction()) || PICO_TEST_RUN(TestDiffPanelContext()) || PICO_TEST_RUN(TestDiffFileBands()) || PICO_TEST_RUN(RunDockPanelShellCase(false, true)) ||
                PICO_TEST_RUN(RunDockPanelShellCase(true, true));

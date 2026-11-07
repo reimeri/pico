@@ -2486,17 +2486,41 @@ void PicoComposer_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *s
     Pico_ScissorEnd();
 }
 
+/* Transcript previews are shared UI, independent of the composer being
+ * replaced by a non-modal questionnaire. Consume dismissal before opening so
+ * a closing click cannot reopen the thumbnail underneath. */
+static bool HandlePreviewPointer(PicoHost *app)
+{
+    if (g_preview_open)
+    {
+        if (!pico_ui_modal_is_top(app, "preview"))
+        {
+            return true;
+        }
+        if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            ClosePreview();
+        }
+        return true;
+    }
+    const char *image_path = MdView_HoveredImagePath();
+    if (!app->status_warn && !PicoChatFind_PointerOver(app) && image_path &&
+        (!PicoUi_ModalOpen(app) || pico_ui_modal_is_top(app, "inspect")) &&
+        IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        OpenPreview(image_path, -1);
+        return true;
+    }
+    return false;
+}
+
 static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void *state)
 {
     (void)event;
     s_active_composer_state = state ? (ComposerState *)state : (ComposerState *)PicoPlugins_HostState(app, "composer");
     if (!s_active_composer_state || !PicoHost_SelectedAgent(app)) return;
-    if (PicoUi_QuestionnaireOpen(app))
-    {
-        if (g_preview_open && pico_ui_modal_is_top(app, "preview") &&
-            (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) ClosePreview();
-        return;
-    }
+    bool preview_consumed = HandlePreviewPointer(app);
+    if (PicoUi_QuestionnaireOpen(app)) return;
     ComposerView v = GetComposerView(app);
     if (v.wrap_width > 10)
     {
@@ -2508,28 +2532,7 @@ static void ComposerAfterLayout(PicoHost *app, const PicoHookEvent *event, void 
         s_composer_width = composer.boundingBox.width;
     }
     app->composer_overflow = PicoScrollbar_Overflows(CLAY_STRING("ComposerScroll"));
-    if (g_preview_open)
-    {
-        if (!pico_ui_modal_is_top(app, "preview"))
-        {
-            EnsureCaretVisible(app);
-            return;
-        }
-        if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-        {
-            ClosePreview();
-        }
-        EnsureCaretVisible(app);
-        return;
-    }
-    const char *image_path = MdView_HoveredImagePath();
-    if (!app->status_warn && !PicoChatFind_PointerOver(app) && image_path &&
-        (!PicoUi_ModalOpen(app) || pico_ui_modal_is_top(app, "inspect")) &&
-        IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-    {
-        OpenPreview(image_path, -1);
-    }
-    else if (!PicoUi_ModalOpen(app))
+    if (!preview_consumed && !PicoUi_ModalOpen(app))
     {
         if (!PicoClarification_View(app) && ComposerHandleAttachPointer())
         {

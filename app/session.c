@@ -7732,8 +7732,9 @@ bool PicoSession_LoadBlocksSubmit(const PicoHost *host, PicoAgentId id)
            host->session_load->replace_id == id;
 }
 
-/* A per-frame time budget complements the row budget: small records should
- * not aggregate into a long frame. A single callback/record is uninterruptible. */
+/* Share a per-frame time budget across replay and finalization. Cheap records
+ * should use the available time rather than wait for another frame because of
+ * an item-count cap. A single callback/record is uninterruptible. */
 void PicoSession_LoadPump(PicoHost *host)
 {
     PicoSessionLoad *load = host ? host->session_load : NULL;
@@ -7775,7 +7776,7 @@ void PicoSession_LoadPump(PicoHost *host)
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     double deadline = (double)now.tv_sec + now.tv_nsec / 1e9 + 0.004;
-    for (int budget = 0; budget < 16 && !load->cancelled; budget++)
+    while (!load->cancelled)
     {
         host->session_replay_agent = load->candidate;
         bool finished = PicoSession_ReplayBatch(host, load->candidate, load->replay, 1);
@@ -7791,8 +7792,7 @@ void PicoSession_LoadPump(PicoHost *host)
     if (load->cancelled) goto cancelled;
     if (load->replay->cursor < load->replay->count) goto done;
     /* Historical tool rows must not retain their live completion dwell. */
-    for (int budget = 0; budget < 32 &&
-                         load->finish_message < load->candidate->message_count; budget++)
+    while (load->finish_message < load->candidate->message_count)
     {
         PicoMessage *msg = &load->candidate->messages[load->finish_message++];
         for (int t = 0; t < msg->trace_count; t++) msg->trace[t].tool_done_t0 = 0.0;

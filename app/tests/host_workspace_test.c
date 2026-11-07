@@ -14643,6 +14643,30 @@ done:
     return rc;
 }
 
+/* Model an expensive extension callback without tying the test to the replay
+ * budget's configured duration or the machine's execution speed. */
+static void SlowReplayMessage(PicoWorkspace *workspace, const PicoHookEvent *event, void *opaque)
+{
+    (void)workspace;
+    (void)event;
+    if (!*(bool *)opaque) return;
+#ifdef PICO_TEST_CLOCK
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    PicoTestClock_Set((double)now.tv_sec + now.tv_nsec / 1e9 + 60.0);
+#else
+    sleep(1);
+#endif
+}
+
+static void RegisterSlowReplayMessage(PicoHost *host, PicoWorkspaceId id, bool *slow)
+{
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, id);
+    PicoHost_BeginRegistration(host, PICO_REG_WORKSPACE, workspace);
+    pico_workspace_add_hook(workspace, PICO_HOOK_ON_MESSAGE, SlowReplayMessage);
+    PicoHost_PublishRegistration(host, slow);
+}
+
 static int TestLoadTargetSurvivesPreviousLoadCancellation(void)
 {
     char root[] = "/tmp/pico-capacity-load-XXXXXX";
@@ -14653,6 +14677,7 @@ static int TestLoadTargetSurvivesPreviousLoadCancellation(void)
     PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
     CapacityOpenState state = {.result = PICO_INVALID};
     int rc = 1;
+    bool slow_replay = true;
     if (!mkdtemp(root)) return 1;
     snprintf(path, sizeof(path), "%s/replay.jsonl", root);
     if (!WriteCapacityReplay(path, 80)) goto done;
@@ -14667,10 +14692,18 @@ static int TestLoadTargetSurvivesPreviousLoadCancellation(void)
     if (pico_main_agent_create(host, ids[PICO_MAX_WORKSPACES - 1], &options, &selected) != PICO_OK) goto done;
     state.path = dirs[PICO_MAX_WORKSPACES];
     RegisterCapacityDestroyOpen(host, ids[1], &state);
+    RegisterSlowReplayMessage(host, ids[1], &slow_replay);
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Set(1000.0);
+#endif
     int adopted_before = g_replay_adopted;
     if (PicoSession_LoadAsync(host, ids[1], 0, path, false, false, true, false) != PICO_OK) goto done;
     PICO_TEST_WAIT(g_replay_adopted == adopted_before) pico_host_pump(host);
     if (!PicoSession_LoadPending(host)) goto done;
+    slow_replay = false;
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Reset();
+#endif
     /* The private candidate has received replay callbacks, so cancelling it
      * dispatches a destroy hook. The new target is the oldest idle workspace. */
     if (PicoSession_LoadAsync(host, ids[0], 0, path, false, false, true, false) != PICO_OK ||
@@ -14688,6 +14721,9 @@ static int TestLoadTargetSurvivesPreviousLoadCancellation(void)
     }
     rc = 0;
 done:
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Reset();
+#endif
     if (host) pico_host_free(host);
     RmRf(root);
     if (rc && !g_failed) Fail("load cancellation capacity fixture failed");
@@ -14910,6 +14946,7 @@ static int TestAsyncSessionReplay(void)
     char session_id[40] = {0}, path[4096] = {0};
     int ready[2] = {-1, -1}, release[2] = {-1, -1};
     int rc = 1;
+    bool slow_replay = true;
     if (!mkdtemp(dir) || !mkdtemp(cfg)) { Fail("async replay fixture"); return 1; }
     setenv("XDG_CONFIG_HOME", cfg, 1);
     if (pico_host_init(&host, NULL, true) != PICO_OK ||
@@ -14921,7 +14958,7 @@ static int TestAsyncSessionReplay(void)
         !DrainSessionForAssertion(host, seed)) goto done;
     snprintf(session_id, sizeof(session_id), "%s", seed->session_id);
     snprintf(path, sizeof(path), "%s", seed->session_path);
-    /* Many records ensure adoption and commit cannot occur in one pump. */
+    /* Enough cheap messages to exercise both replay and finalization batching. */
     FILE *f = fopen(path, "ab");
     if (!f) goto done;
     for (int i = 0; i < 80; i++)
@@ -14934,6 +14971,10 @@ static int TestAsyncSessionReplay(void)
     if (pipe(ready) != 0 || pipe(release) != 0) goto done;
     g_replay_ready_fd = ready[1];
     g_replay_continue_fd = release[0];
+    RegisterSlowReplayMessage(host, ws_id, &slow_replay);
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Set(1000.0);
+#endif
     int adopted_before = g_replay_adopted;
     /* Exercise the actual /resume command registration, not just its loader. */
     PicoWorkspace *ws = PicoHost_FindWorkspace(host, ws_id);
@@ -14960,10 +15001,18 @@ static int TestAsyncSessionReplay(void)
     if (g_replay_adopted == adopted_before || !PicoSession_LoadPending(host) ||
         !PicoHost_FindAgent(host, current_id))
     {
-        Fail("worker adoption must not publish a partly replayed transcript");
+        Fail("an expensive replay callback must yield without publishing a partial transcript");
         goto done;
     }
+    slow_replay = false;
+#ifdef PICO_TEST_CLOCK
+    /* No elapsed work: all remaining records and finalization must fit in
+     * this pump, irrespective of transcript item count. */
+    PicoSession_LoadPump(host);
+    PicoTestClock_Reset();
+#else
     PICO_TEST_WAIT(PicoSession_LoadPending(host)) pico_host_pump(host);
+#endif
     PicoAgent *loaded = PicoHost_SelectedAgent(host);
     if (PicoSession_LoadPending(host) || !loaded || loaded->id == current_id ||
         loaded->message_count != 81 || PicoHost_FindAgent(host, current_id) ||
@@ -15116,6 +15165,9 @@ static int TestAsyncSessionReplay(void)
     }
     rc = 0;
 done:
+#ifdef PICO_TEST_CLOCK
+    PicoTestClock_Reset();
+#endif
     /* Always release the test worker before host shutdown, even on failure. */
     if (release[1] >= 0) (void)TransferTestByte(release[1], true);
     g_replay_ready_fd = g_replay_continue_fd = -1;
@@ -21907,6 +21959,15 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestOpenAiBlockedShutdownChild());
 #endif
     if (!IsolateTestHome()) return 1;
+    if (argc == 2 && strcmp(argv[1], "--session-replay") == 0)
+        return PICO_TEST_RUN(TestLoadTargetSurvivesPreviousLoadCancellation()) ||
+               PICO_TEST_RUN(TestSteeringAsyncReplayIdentity()) ||
+               PICO_TEST_RUN(TestAsyncRecoveryCancellation()) ||
+               PICO_TEST_RUN(TestLatestResumeWaitsForHeader()) ||
+               PICO_TEST_RUN(TestAsyncSessionReplay()) ||
+               PICO_TEST_RUN(TestAsyncReplayLargeMessage()) ||
+               PICO_TEST_RUN(TestSavedSubagentInspectLoadsOffThread()) ||
+               PICO_TEST_RUN(TestResumeCompletionDoesNotScanOnUi());
     if (argc == 2 && strcmp(argv[1], "--link-tooltip") == 0) return PICO_TEST_RUN(TestChatLinkTooltip());
     if (argc == 2 && strcmp(argv[1], "--apikey") == 0) return PICO_TEST_RUN(TestApiKeyDialog());
     if (PICO_TEST_RUN(TestApiKeyDialog()) != 0) return 1;

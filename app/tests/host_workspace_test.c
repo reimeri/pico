@@ -15966,6 +15966,7 @@ static int TestSidebarDisplayTitlesFitRows(void)
         goto done;
     }
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     if (!WaitCatalogScanDone(host, g_catalog_scan_done_calls + 1))
     {
         Fail("sidebar label fixture catalog scan");
@@ -16067,6 +16068,7 @@ static int TestIdleSidebarSessionDot(void)
         return 1;
     }
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     if (PicoCatalog_Ensure(dir) != 0)
     {
         Fail("idle session dot catalog workspace");
@@ -16202,6 +16204,7 @@ static int TestSidebarInbox(void)
         return 1;
     }
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     if (PicoCatalog_Ensure(dir) != 0 || !WaitCatalogScanDone(host, g_catalog_scan_done_calls + 1) ||
         pico_workspace_open(host, dir, &workspace_id) != PICO_OK)
     {
@@ -16369,6 +16372,7 @@ static int TestSidebarInboxAsk(void)
         return 1;
     }
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     if (PicoCatalog_Ensure(dir) != 0 || !WaitCatalogScanDone(host, g_catalog_scan_done_calls + 1) ||
         pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
         !ConfigureMatrixWorkspace(host, PicoHost_FindWorkspace(host, workspace_id), &state, true))
@@ -16531,6 +16535,7 @@ static int TestSidebarSnapshotBeforeReconcile(bool fail_reconcile)
     host = NULL;
     if (!shutdown_ok || pico_host_init(&host, NULL, true) != PICO_OK) goto done;
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     if (pipe(ready) != 0 || pipe(proceed) != 0) goto done;
     g_catalog_ready_fd = ready[1];
     g_catalog_continue_fd = proceed[0];
@@ -17684,6 +17689,7 @@ static int TestSidebarContextMenus(void)
     if (pico_host_init(&host, NULL, true) != PICO_OK || !host ||
         !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     for (int i = 0; i < host->hook_count; )
     {
         if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
@@ -17829,6 +17835,7 @@ static int TestSidebarSameFrameControls(void)
     if (pico_host_init(&host, NULL, true) != PICO_OK || !host ||
         !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     /* Frame presentation is wrapped, but builtin overlay after-render hooks
      * call graphics scissoring directly. Keep input hooks and omit those. */
     for (int i = 0; i < host->hook_count; )
@@ -17982,6 +17989,7 @@ static int TestSidebarCollapseSaveDoesNotBlock(SidebarCollapseScenario scenario)
     if (pico_host_init(&host, NULL, true) != PICO_OK ||
         !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     for (int i = 0; i < host->hook_count; )
     {
         if (host->hooks[i].hook == PICO_HOOK_AFTER_RENDER)
@@ -18179,6 +18187,7 @@ static int TestSidebarOfflineInboxAcknowledgements(InboxAckScenario scenario)
     if (pico_host_init(&host, NULL, true) != PICO_OK ||
         !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
     WaitPluginLoad(host);
+    host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
         PicoCatalog_Ensure(dir) != 0 || PicoCatalog_SetProjectName(dir, "Workspace") != 0) goto done;
     for (int i = 0; i < 3; i++)
@@ -18590,6 +18599,7 @@ static int TestSidebarProjectBadges(void)
     float original_device_scale = Pico_DeviceFontScale();
     const char *phase = "fixture";
     if (!InteractionFixtureInit(&f)) goto done;
+    f.host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
     Clay_SetPointerState((Clay_Vector2){0}, false);
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
@@ -18773,6 +18783,7 @@ static int TestSidebarModesAndPicker(void)
     bool good = false;
     const char *phase = "fixture";
     if (!InteractionFixtureInit(&f) || !mkdtemp(stashed)) goto done;
+    f.host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
     if (!SidebarCommandsContain(&commands, "Projects")) goto done;
     Clay_RenderCommand *badge = FindCardText(&commands, "OL");
@@ -19032,6 +19043,7 @@ static int TestSidebarInboxKeepsSessionOrder(void)
     PicoAgentId live_inbox_id = 0;
     const char *phase = "fixture";
     if (!InteractionFixtureInit(&f)) goto done;
+    f.host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     phase = "older conversations";
     for (int i = 0; i < 3; i++)
     {
@@ -19861,6 +19873,7 @@ static int TestSidebarLiveSavedPagination(void)
     const char *title = "Older saved title";
     char newest_title[64] = {0};
     if (!InteractionFixtureInit(&f)) goto done;
+    f.host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
 
     phase = "create old live saved session";
     PicoAgent *old = PicoHost_FindAgent(f.host, f.agent);
@@ -19993,6 +20006,7 @@ static int TestSidebarInboxMissingSavedTitle(void)
     InteractionFixture f = {0};
     bool good = false;
     if (!InteractionFixtureInit(&f)) goto done;
+    f.host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
     PicoSession_Start(f.host, agent, PICO_SESSION_NEW, NULL);
     if (PicoSession_LogUser(f.host, agent, "Removed file", "Removed file", NULL) != PICO_SESSION_WRITE_OK ||
@@ -20023,6 +20037,7 @@ static int TestSidebarBlankDraftOrdering(void)
     PicoAgentId older_draft, newer_draft, saved_id = 0;
     bool good = false;
     if (!InteractionFixtureInit(&f)) goto done;
+    f.host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     older_draft = f.agent;
     PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
         .session_start = PICO_SESSION_NONE};
@@ -20066,6 +20081,7 @@ static int TestSidebarCachedLiveRowIdentity(void)
     char session_ids[2][40] = {{0}};
     bool good = false;
     if (!InteractionFixtureInit(&f)) goto done;
+    f.host->sidebar_inbox_mode = false; /* This scenario starts in Projects. */
     PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN,
         .session_start = PICO_SESSION_NEW};
     for (int i = 0; i < 2; i++)

@@ -477,19 +477,20 @@ static pid_t ReadPidFile(const char *path)
 static int TestDescendantLifetime(const char *cwd, int action)
 {
     const char *test = "descendant_lifetime";
-    char leader_path[4096], child_path[4096], fifo_path[4096];
+    char leader_path[4096], child_path[4096], fifo_path[4096], supervisor_path[4096];
     snprintf(leader_path, sizeof(leader_path), "%s/launcher.pid", cwd);
     snprintf(child_path, sizeof(child_path), "%s/descendant.pid", cwd);
     snprintf(fifo_path, sizeof(fifo_path), "%s/release.fifo", cwd);
+    snprintf(supervisor_path, sizeof(supervisor_path), "%s/supervisor.pid", cwd);
     if (mkfifo(fifo_path, 0600) != 0) return Fail(test, "fifo setup");
     PicoBgTable *table = PicoBgTable_Create();
     char *error = NULL;
     char *result = PicoBgTable_Spawn(table, 1, cwd, "orphan descendant",
         "sh -c 'trap \"\" TERM; echo $$ > descendant.pid; exec 1>/dev/null 2>&1; read release < release.fifo' & "
-        "echo $$ > launcher.pid; exit 7", &error);
+        "echo $PPID > supervisor.pid; echo $$ > launcher.pid; exit 7", &error);
     bool ok = result && !error;
     free(result); free(error);
-    pid_t launcher = 0, descendant = 0;
+    pid_t launcher = 0, descendant = 0, supervisor = 0;
     if (ok)
     {
         PICO_TEST_WAIT_LOOP("launcher exited while its descendant is blocked")
@@ -499,8 +500,18 @@ static int TestDescendantLifetime(const char *cwd, int action)
             descendant = ReadPidFile(child_path);
             if (launcher > 0 && descendant > 0 && kill(launcher, 0) != 0 && errno == ESRCH) break;
         }
+        supervisor = ReadPidFile(supervisor_path);
+        /* Hold cleanup itself, not a wall-clock budget. Each request must
+         * return before we resume the fixture's parent, even after destruction
+         * of its visible job table. The product must do all eventual reaping. */
+        if (action >= 1 && action <= 3)
+        {
+            int stopped = 0;
+            ok = supervisor > 0 && kill(supervisor, SIGSTOP) == 0 &&
+                 waitpid(supervisor, &stopped, WUNTRACED) == supervisor && WIFSTOPPED(stopped);
+        }
         PicoBgJobInfo info = {0};
-        ok = PicoBgTable_CopyJobs(table, 1, &info, 1) == 1 && info.status == PICO_BG_RUNNING &&
+        ok = ok && PicoBgTable_CopyJobs(table, 1, &info, 1) == 1 && info.status == PICO_BG_RUNNING &&
              PicoBgTable_RunningCount(table, 1) == 1;
         if (ok && (action == 0 || action == 4))
         {
@@ -525,9 +536,15 @@ static int TestDescendantLifetime(const char *cwd, int action)
             ok = result && !error && strstr(result, "\"status\":\"killed\"") &&
                  strstr(result, "\"signal\":") && !strstr(result, "\"exit_code\":");
             free(result); free(error);
+            /* Repeating a pending termination request must remain harmless. */
+            error = NULL;
+            result = PicoBgTable_Kill(table, 1, "bg_1", &error);
+            ok = ok && result && !error && strstr(result, "\"status\":\"killed\"");
+            free(result); free(error);
         }
         else if (ok && action == 2)
         {
+            PicoBgTable_ResetAgent(table, 1);
             PicoBgTable_ResetAgent(table, 1);
             ok = PicoBgTable_CopyJobs(table, 1, &info, 1) == 0;
         }
@@ -536,31 +553,88 @@ static int TestDescendantLifetime(const char *cwd, int action)
             PicoBgTable_Destroy(table);
             table = NULL;
         }
+        if (action >= 1 && action <= 3 && supervisor > 0) kill(supervisor, SIGCONT);
         if (ok)
         {
             PICO_TEST_WAIT_LOOP("descendant terminated by completion or cleanup")
             {
                 PicoBgTable_Pump(table);
-                /* The test is a subreaper solely to clean up fixtures when a
-                 * killed supervisor and descendant exit simultaneously. */
-                (void)waitpid(descendant, NULL, WNOHANG);
                 if (kill(descendant, 0) != 0 && errno == ESRCH) break;
+            }
+            PICO_TEST_WAIT_LOOP("core reaper collects the supervisor without a live table")
+            {
+                if (kill(supervisor, 0) != 0 && errno == ESRCH) break;
             }
         }
     }
+    if (supervisor > 0) kill(supervisor, SIGCONT);
     if (descendant > 0) kill(descendant, SIGKILL);
     PicoBgTable_Destroy(table);
-    if (descendant > 0)
-    {
-        while (waitpid(descendant, NULL, 0) < 0 && errno == EINTR) {}
-    }
-    unlink(fifo_path); unlink(leader_path); unlink(child_path);
+    unlink(fifo_path); unlink(leader_path); unlink(child_path); unlink(supervisor_path);
     return ok ? 0 : Fail(test, "job lost its live descendant or reported the wrong final status");
 }
-static int TestBackgroundParentDeath(const char *cwd)
+/* Another child may fork while a background job is running and retain all
+ * close-on-exec descriptors without execing. Its lifetime must not delay a
+ * termination request for the original job. */
+static int TestCleanupWithInheritedDescriptors(const char *cwd)
 {
     char pid_path[4096];
+    snprintf(pid_path, sizeof(pid_path), "%s/inherited.pid", cwd);
+    PicoBgTable *table = PicoBgTable_Create();
+    char *error = NULL;
+    char *result = PicoBgTable_Spawn(table, 1, cwd, "inherited descriptors",
+        "echo $$ > inherited.pid; while :; do sleep 3600; done", &error);
+    bool ok = result && !error;
+    free(result); free(error);
+    pid_t command = 0;
+    int release[2] = {-1, -1};
+    pid_t holder = -1;
+    if (ok)
+    {
+        PICO_TEST_WAIT(command <= 0) command = ReadPidFile(pid_path);
+        ok = pipe(release) == 0;
+    }
+    if (ok)
+    {
+        holder = fork();
+        if (holder == 0)
+        {
+            close(release[1]);
+            char byte;
+            while (read(release[0], &byte, 1) < 0 && errno == EINTR) {}
+            _exit(0);
+        }
+        ok = holder > 0;
+    }
+    if (ok)
+    {
+        close(release[0]); release[0] = -1;
+        error = NULL;
+        result = PicoBgTable_Kill(table, 1, "bg_1", &error);
+        ok = result && !error;
+        free(result); free(error);
+        if (ok)
+        {
+            PICO_TEST_WAIT_LOOP("cleanup despite an unrelated child retaining descriptors")
+            {
+                PicoBgTable_Pump(table);
+                if (kill(command, 0) != 0 && errno == ESRCH) break;
+            }
+        }
+    }
+    if (release[0] >= 0) close(release[0]);
+    if (release[1] >= 0) close(release[1]);
+    if (holder > 0) while (waitpid(holder, NULL, 0) < 0 && errno == EINTR) {}
+    PicoBgTable_Destroy(table);
+    unlink(pid_path);
+    return ok ? 0 : Fail("inherited_descriptors", "an unrelated child prevented job cleanup");
+}
+
+static int TestBackgroundParentDeath(const char *cwd)
+{
+    char pid_path[4096], supervisor_path[4096];
     snprintf(pid_path, sizeof(pid_path), "%s/orphan.pid", cwd);
+    snprintf(supervisor_path, sizeof(supervisor_path), "%s/orphan-supervisor.pid", cwd);
     int ready[2], release[2];
     if (pipe(ready) != 0 || pipe(release) != 0) return Fail("parent_death", "pipe");
     pid_t host = fork();
@@ -570,7 +644,7 @@ static int TestBackgroundParentDeath(const char *cwd)
         PicoBgTable *table = PicoBgTable_Create();
         char *error = NULL;
         char *result = PicoBgTable_Spawn(table, 1, cwd, "parent death",
-            "sh -c 'echo $$ > orphan.pid; exec sleep 3600' & exit 0", &error);
+            "echo $PPID > orphan-supervisor.pid; sh -c 'echo $$ > orphan.pid; exec sleep 3600' & exit 0", &error);
         if (!result || error) _exit(2);
         char byte = 'x';
         if (write(ready[1], &byte, 1) != 1) _exit(3);
@@ -587,16 +661,21 @@ static int TestBackgroundParentDeath(const char *cwd)
         kill(host, SIGKILL);
         while (waitpid(host, NULL, 0) < 0 && errno == EINTR) {}
         host = -1;
-        /* The fixture owns this isolated host subtree. Adopt/reap its dying
-         * supervisor and descendant without touching production table children. */
-        PICO_TEST_WAIT_LOOP("parent death kills the background group")
+        /* Only the orphaned supervisor belongs to the fixture after host
+         * death. It, not our subreaper, must collect the payload descendants. */
+        pid_t supervisor = ReadPidFile(supervisor_path);
+        if (supervisor <= 0) ok = false;
+        else
         {
-            while (waitpid(-1, NULL, WNOHANG) > 0) {}
-            if (kill(descendant, 0) != 0 && errno == ESRCH) break;
+            PICO_TEST_WAIT_LOOP("parent death cleans payload and exits its supervisor")
+            {
+                if (waitpid(supervisor, NULL, WNOHANG) == supervisor) break;
+            }
+            ok = kill(descendant, 0) != 0 && errno == ESRCH;
         }
     }
     if (host > 0) { kill(host, SIGKILL); (void)waitpid(host, NULL, 0); }
-    close(ready[0]); close(release[1]); unlink(pid_path);
+    close(ready[0]); close(release[1]); unlink(pid_path); unlink(supervisor_path);
     return ok ? 0 : Fail("parent_death", "fixture failed");
 }
 
@@ -619,14 +698,17 @@ int main(void)
     }
 
 #if defined(__linux__)
-    if (prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) return Fail("setup", "subreaper");
     rc |= PICO_TEST_RUN(TestDescendantLifetime(cwd, 0));
     rc |= PICO_TEST_RUN(TestDescendantLifetime(cwd, 1));
     rc |= PICO_TEST_RUN(TestDescendantLifetime(cwd, 2));
     rc |= PICO_TEST_RUN(TestDescendantLifetime(cwd, 3));
     rc |= PICO_TEST_RUN(TestDescendantLifetime(cwd, 4));
+    rc |= PICO_TEST_RUN(TestCleanupWithInheritedDescriptors(cwd));
+    int subreaper = 0;
+    if (prctl(PR_GET_CHILD_SUBREAPER, &subreaper) != 0 ||
+        prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) return Fail("setup", "subreaper");
     rc |= PICO_TEST_RUN(TestBackgroundParentDeath(cwd));
-    if (prctl(PR_SET_CHILD_SUBREAPER, 0) != 0) return Fail("setup", "restore subreaper");
+    if (prctl(PR_SET_CHILD_SUBREAPER, subreaper) != 0) return Fail("setup", "restore subreaper");
 #endif
     rc |= PICO_TEST_RUN(TestEmptyPump());
     rc |= PICO_TEST_RUN(TestSpawnAndList(table, cwd));

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,23 +18,152 @@
 
 #if defined(__linux__)
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #endif
 
 #define PICO_BG_MAX_JOBS (PICO_MAX_AGENTS * PICO_BG_MAX_RECORDS)
 #define PICO_BG_READ_CHUNK 4096
 #define PICO_BG_READ_BUDGET (16 * PICO_BG_READ_CHUNK)
-/* Bound on waiting for SIGKILLed children to become reapable before their records
- * are removed; a record removed while unreaped leaves a zombie nobody can waitpid. */
-#define PICO_BG_REAP_TRIES 100
-#define PICO_BG_REAP_WAIT_NS 1000000L
+/* Admission includes detached cleanup, not just visible history. */
+#define PICO_BG_MAX_PENDING PICO_BG_MAX_JOBS
+
+typedef struct PicoBgChild {
+    struct PicoBgChild *next;
+    pid_t pid;
+    int control;
+    int status;
+    bool done;
+    bool attached;
+} PicoBgChild;
+
+/* Compiled-in ownership, independent of host/workspace/plugin lifetimes. Only
+ * this service waits for its exact child pids; it never adopts unrelated work. */
+static pthread_mutex_t children_mu = PTHREAD_MUTEX_INITIALIZER;
+static PicoBgChild *children;
+static int children_count;
+static bool children_reaper_running;
+
+static void *ReapChildren(void *unused)
+{
+    (void)unused;
+    for (;;)
+    {
+        pthread_mutex_lock(&children_mu);
+        PicoBgChild **link = &children;
+        while (*link)
+        {
+            PicoBgChild *child = *link;
+            int status = 0;
+            pid_t result = child->pid > 0 ? waitpid(child->pid, &status, WNOHANG) : 0;
+            if (result > 0 || (result < 0 && errno == ECHILD))
+            {
+                /* ECHILD means an external reaper took our child. Never retain
+                 * or signal its now-unowned numeric identity. */
+                child->status = result > 0 ? status : 127 << 8;
+                child->done = true;
+                if (child->control >= 0) close(child->control);
+                child->control = -1;
+                *link = child->next;
+                children_count--;
+                if (!child->attached) free(child);
+            }
+            else link = &child->next;
+        }
+        if (!children)
+        {
+            children_reaper_running = false;
+            pthread_mutex_unlock(&children_mu);
+            return NULL;
+        }
+        pthread_mutex_unlock(&children_mu);
+        struct timespec pause = {.tv_nsec = 10000000L};
+        nanosleep(&pause, NULL);
+    }
+}
+
+/* Reserve the owner and start the service before fork. Resource exhaustion must
+ * reject a spawn, never leave an already-created child with no reaping owner. */
+static PicoBgChild *ReserveChild(void)
+{
+    PicoBgChild *child = calloc(1, sizeof(*child));
+    if (!child) return NULL;
+    child->control = -1;
+    child->attached = true;
+    pthread_mutex_lock(&children_mu);
+    if (children_count >= PICO_BG_MAX_PENDING) goto fail;
+    if (!children_reaper_running)
+    {
+        pthread_attr_t attr;
+        if (pthread_attr_init(&attr) != 0) goto fail;
+        pthread_t thread;
+        bool ok = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
+                  pthread_create(&thread, &attr, ReapChildren, NULL) == 0;
+        pthread_attr_destroy(&attr);
+        if (!ok) goto fail;
+        children_reaper_running = true;
+    }
+    child->next = children;
+    children = child;
+    children_count++;
+    pthread_mutex_unlock(&children_mu);
+    return child;
+fail:
+    pthread_mutex_unlock(&children_mu);
+    free(child);
+    return NULL;
+}
+
+static void CancelChildReservation(PicoBgChild *child)
+{
+    pthread_mutex_lock(&children_mu);
+    PicoBgChild **link = &children;
+    while (*link != child) link = &(*link)->next;
+    *link = child->next;
+    children_count--;
+    pthread_mutex_unlock(&children_mu);
+    free(child);
+}
+
+static void StopChildLocked(PicoBgChild *child)
+{
+    if (!child || child->done) return;
+#if defined(__linux__)
+    /* shutdown affects the endpoint even if a concurrent fork inherited a
+     * duplicate. Plain close/pipe EOF could wait on that unrelated child. */
+    if (child->control >= 0)
+    {
+        (void)shutdown(child->control, SHUT_WR);
+        close(child->control);
+    }
+    child->control = -1;
+#else
+    if (child->pid > 0) (void)kill(-child->pid, SIGKILL);
+#endif
+}
+
+static void StopChild(PicoBgChild *child)
+{
+    pthread_mutex_lock(&children_mu);
+    StopChildLocked(child);
+    pthread_mutex_unlock(&children_mu);
+}
+
+static void DetachChild(PicoBgChild *child)
+{
+    if (!child) return;
+    pthread_mutex_lock(&children_mu);
+    StopChildLocked(child);
+    child->attached = false;
+    if (child->done) free(child);
+    pthread_mutex_unlock(&children_mu);
+}
 
 typedef struct PicoBgJob {
     PicoAgentId agent_id;
     char id[PICO_BG_ID_MAX];
     char *description;
     char *command;
-    pid_t pid;
-    pid_t pgid;
+    PicoBgChild *child;
     int fd;
     PicoBgStatus status;
     bool reaped;
@@ -88,18 +218,6 @@ static int OpenJobPipe(int pipefd[2])
 #endif
 }
 
-static void KillProcessGroup(pid_t pgid)
-{
-    if (pgid <= 0)
-    {
-        return;
-    }
-    if (kill(-pgid, SIGKILL) != 0)
-    {
-        kill(pgid, SIGKILL);
-    }
-}
-
 static void FreeJobContents(PicoBgJob *job)
 {
     if (!job)
@@ -129,11 +247,7 @@ static void RemoveJobAt(PicoBgTable *table, int index)
         return;
     }
     job = &table->jobs[index];
-    if (!job->reaped && job->pid > 0)
-    {
-        KillProcessGroup(job->pgid > 0 ? job->pgid : job->pid);
-        (void)waitpid(job->pid, NULL, WNOHANG);
-    }
+    DetachChild(job->child);
     FreeJobContents(job);
     if (index < table->job_count - 1)
     {
@@ -287,10 +401,10 @@ static void LogAppend(PicoBgJob *job, const char *data, size_t n)
     free(chunk);
 }
 
-static void DrainFd(PicoBgJob *job, bool until_eof)
+static void DrainFd(PicoBgJob *job)
 {
     char buf[PICO_BG_READ_CHUNK];
-    size_t budget = until_eof ? (size_t)-1 : (size_t)PICO_BG_READ_BUDGET;
+    size_t budget = PICO_BG_READ_BUDGET;
     if (!job || job->fd < 0)
     {
         return;
@@ -301,10 +415,7 @@ static void DrainFd(PicoBgJob *job, bool until_eof)
         if (n > 0)
         {
             LogAppend(job, buf, (size_t)n);
-            if (budget != (size_t)-1)
-            {
-                budget = budget > (size_t)n ? budget - (size_t)n : 0;
-            }
+            budget = budget > (size_t)n ? budget - (size_t)n : 0;
             continue;
         }
         if (n == 0)
@@ -377,7 +488,7 @@ static char *FormatJobJson(const PicoBgJob *job, bool include_command)
         int sig = job->term_signal;
         if (sig <= 0 && job->status == PICO_BG_KILLED)
         {
-            sig = SIGKILL; /* kill always sends SIGKILL; reap has not landed yet */
+            sig = SIGKILL; /* requested payload signal; cleanup may still be pending */
         }
         if (sig > 0)
         {
@@ -411,52 +522,9 @@ PicoBgTable *PicoBgTable_Create(void)
 
 void PicoBgTable_Destroy(PicoBgTable *table)
 {
-    int i;
-    if (!table)
-    {
-        return;
-    }
+    if (!table) return;
     pthread_mutex_lock(&table->mu);
-    for (i = 0; i < table->job_count; i++)
-    {
-        PicoBgJob *job = &table->jobs[i];
-        if (!job->reaped && job->pgid > 0)
-        {
-            KillProcessGroup(job->pgid);
-            job->status = PICO_BG_KILLED;
-        }
-    }
-    pthread_mutex_unlock(&table->mu);
-    for (i = 0; i < 40; i++)
-    {
-        PicoBgTable_Pump(table);
-        pthread_mutex_lock(&table->mu);
-        {
-            int running = 0;
-            int j;
-            for (j = 0; j < table->job_count; j++)
-            {
-                if (!table->jobs[j].reaped)
-                {
-                    running++;
-                }
-            }
-            pthread_mutex_unlock(&table->mu);
-            if (running == 0)
-            {
-                break;
-            }
-        }
-        {
-            struct timespec req = {.tv_sec = 0, .tv_nsec = 10000000L};
-            nanosleep(&req, NULL);
-        }
-    }
-    pthread_mutex_lock(&table->mu);
-    while (table->job_count > 0)
-    {
-        RemoveJobAt(table, table->job_count - 1);
-    }
+    while (table->job_count > 0) RemoveJobAt(table, table->job_count - 1);
     pthread_mutex_unlock(&table->mu);
     pthread_mutex_destroy(&table->mu);
     free(table);
@@ -464,54 +532,41 @@ void PicoBgTable_Destroy(PicoBgTable *table)
 
 void PicoBgTable_Pump(PicoBgTable *table)
 {
-    int i;
-    if (!table)
-    {
-        return;
-    }
+    if (!table) return;
     pthread_mutex_lock(&table->mu);
-    for (i = 0; i < table->job_count; i++)
+    for (int i = 0; i < table->job_count; i++)
     {
         PicoBgJob *job = &table->jobs[i];
-        int status = 0;
-        pid_t waited;
-        DrainFd(job, false);
-        if (job->reaped || job->pid <= 0)
-        {
-            continue;
-        }
-        waited = waitpid(job->pid, &status, WNOHANG);
-        if (waited == job->pid)
-        {
-            DrainFd(job, true);
-            ReapJob(job, status);
-        }
+        /* Even after completion, an escaped process may retain stdout. Never
+         * turn that out-of-scope writer into an unbounded main-thread drain. */
+        DrainFd(job);
+        if (job->reaped) continue;
+        pthread_mutex_lock(&children_mu);
+        if (job->child->done) ReapJob(job, job->child->status);
+        pthread_mutex_unlock(&children_mu);
     }
     pthread_mutex_unlock(&table->mu);
 }
 
 #if defined(__linux__)
 static pid_t supervisor_parent;
+static volatile sig_atomic_t supervisor_stop;
 static sigset_t supervisor_original_mask;
 static struct sigaction supervisor_original_term;
 
 static void SupervisorSignal(int signal)
 {
     (void)signal;
-    /* PDEATHSIG follows the creating thread on Linux. A finished tool worker
-     * must not kill a job while the host process is still its parent. */
-    if (getppid() != supervisor_parent)
-    {
-        kill(-getpgrp(), SIGKILL);
-        _exit(127);
-    }
+    /* Linux delivers PDEATHSIG for the creating thread too. Its completion is
+     * not host death. Also check this in the loop: delivery can be exhausted
+     * by worker exit, and unrelated fork copies must not mask host death. */
+    if (getppid() != supervisor_parent) supervisor_stop = 1;
 }
 
-/* Group-directed signals belong to the command. Block them in the supervisor
- * except SIGTERM for parent death; SIGKILL still terminates the whole group. */
 static void ConfigureSupervisor(pid_t parent)
 {
     supervisor_parent = parent;
+    supervisor_stop = 0;
     sigset_t blocked;
     sigfillset(&blocked);
     if (sigprocmask(SIG_SETMASK, &blocked, &supervisor_original_mask) != 0) _exit(127);
@@ -519,51 +574,86 @@ static void ConfigureSupervisor(pid_t parent)
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGTERM, &action, &supervisor_original_term) != 0 ||
         prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) _exit(127);
-    SupervisorSignal(0); /* Host may have died before PDEATHSIG was installed. */
+    SupervisorSignal(0);
 }
 
-/* This child alone is a subreaper, never the multithreaded Pico host. It pins
- * the job's process group until its command and orphaned group descendants
- * finish, reaping them without stealing any other tool's children. */
-static void SuperviseJob(void)
+/* The supervisor first creates the payload group using its own pid, forks the
+ * command into it, then rejoins its inherited host group. Its live pid pins the
+ * payload PGID even after the command is reaped or the last member escapes.
+ * Never move it back into the payload group from the parent. */
+static void SuperviseJob(int control, pid_t inherited_group)
 {
     if (prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) _exit(127);
+    pid_t group = getpid();
+    if (setpgid(0, 0) != 0) _exit(127);
+    int ready[2];
+    if (OpenJobPipe(ready) != 0) _exit(127);
     pid_t command = fork();
     if (command < 0) _exit(127);
     if (command == 0)
     {
-        /* Parent-death delivery is blocked across fork. Restore the command's
-         * inherited policy before unblocking, without running our handler. */
+        close(ready[1]);
+        close(control);
+        char byte;
+        ssize_t n;
+        do { n = read(ready[0], &byte, 1); } while (n < 0 && errno == EINTR);
+        close(ready[0]);
+        if (n != 1) _exit(127);
         sigaction(SIGTERM, &supervisor_original_term, NULL);
         sigprocmask(SIG_SETMASK, &supervisor_original_mask, NULL);
         return;
     }
+    close(ready[0]);
+    if (setpgid(0, inherited_group) != 0)
+    {
+        /* The inherited group may disappear with the host. The payload is
+         * still gated, so no descendants can escape cleanup during startup. */
+        kill(command, SIGKILL);
+        while (waitpid(command, NULL, 0) < 0 && errno == EINTR) {}
+        _exit(127);
+    }
+    char byte = 'x';
+    if (write(ready[1], &byte, 1) != 1) supervisor_stop = 1;
+    close(ready[1]);
     sigset_t parent_death;
     sigemptyset(&parent_death);
     sigaddset(&parent_death, SIGTERM);
     sigprocmask(SIG_UNBLOCK, &parent_death, NULL);
 
-    /* Unlike the command, the supervisor never execs. Do not retain inherited
-     * capture pipes, sockets, session locks, or other host descriptors. */
-    if (close_range(0, ~0U, 0) != 0)
-    {
-        kill(-getpgrp(), SIGKILL);
-        _exit(127);
-    }
+    /* Keep only the request socket, not capture pipes or host descriptors. */
+    bool closed = (control == 0 || close_range(0, (unsigned)control - 1, 0) == 0) &&
+                  close_range((unsigned)control + 1, ~0U, 0) == 0;
+    if (!closed) supervisor_stop = 1;
+    bool stopping = false, have_status = false;
     int command_status = 0;
-    bool have_status = false;
     for (;;)
     {
+        SupervisorSignal(0);
+        if (supervisor_stop && !stopping)
+        {
+            kill(-group, SIGKILL);
+            stopping = true;
+        }
         int status;
-        pid_t child = waitpid(-getpgrp(), &status, 0);
+        pid_t child = waitpid(-group, &status, WNOHANG);
         if (child > 0)
         {
             if (child == command) { command_status = status; have_status = true; }
             continue;
         }
-        if (errno == EINTR) continue;
-        if (errno != ECHILD) _exit(127);
-        break;
+        if (child < 0)
+        {
+            if (errno == EINTR) continue;
+            if (errno != ECHILD) _exit(127);
+            /* An escaped parent can still own children in our group. ECHILD
+             * alone does not mean the group is empty. Our live pid pins its
+             * identity while we wait for those members too. */
+            if (kill(-group, 0) != 0 && errno == ESRCH) break;
+        }
+        /* Polling also observes adopted descendants even when SIGCHLD is
+         * blocked. No host/UI thread waits for this cleanup. */
+        struct pollfd request = {.fd = stopping ? -1 : control, .events = POLLIN};
+        if (poll(&request, 1, 10) > 0 && request.revents) supervisor_stop = 1;
     }
     if (!have_status) _exit(127);
     if (WIFSIGNALED(command_status))
@@ -587,6 +677,10 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
                         const char *description, const char *command, char **error)
 {
     int pipefd[2];
+#if defined(__linux__)
+    int control[2];
+#endif
+    PicoBgChild *child;
     pid_t pid;
     PicoBgJob *job;
     char id[PICO_BG_ID_MAX];
@@ -677,7 +771,6 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         return NULL;
     }
     snprintf(id, sizeof(id), "bg_%u", serial);
-    pthread_mutex_unlock(&table->mu);
 
     desc_copy = JsonDup(description);
     cmd_copy = JsonDup(command);
@@ -689,6 +782,7 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         {
             *error = DupError("run_background: out of memory");
         }
+        pthread_mutex_unlock(&table->mu);
         return NULL;
     }
 
@@ -700,15 +794,41 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         {
             *error = DupError("run_background: pipe failed");
         }
+        pthread_mutex_unlock(&table->mu);
         return NULL;
     }
 
 #if defined(__linux__)
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, control) != 0)
+    {
+        close(pipefd[0]); close(pipefd[1]);
+        free(desc_copy); free(cmd_copy);
+        if (error) *error = DupError("run_background: control socket failed");
+        pthread_mutex_unlock(&table->mu);
+        return NULL;
+    }
     pid_t parent = getpid();
+    pid_t inherited_group = getpgrp();
 #endif
+    child = ReserveChild();
+    if (!child)
+    {
+        close(pipefd[0]); close(pipefd[1]);
+#if defined(__linux__)
+        close(control[0]); close(control[1]);
+#endif
+        free(desc_copy); free(cmd_copy);
+        if (error) *error = DupError("run_background: background cleanup capacity unavailable");
+        pthread_mutex_unlock(&table->mu);
+        return NULL;
+    }
     pid = fork();
     if (pid < 0)
     {
+        CancelChildReservation(child);
+#if defined(__linux__)
+        close(control[0]); close(control[1]);
+#endif
         close(pipefd[0]);
         close(pipefd[1]);
         free(desc_copy);
@@ -717,13 +837,16 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         {
             *error = DupError("run_background: fork failed");
         }
+        pthread_mutex_unlock(&table->mu);
         return NULL;
     }
     if (pid == 0)
     {
-        setpgid(0, 0);
 #if defined(__linux__)
+        close(control[1]);
         ConfigureSupervisor(parent);
+#else
+        setpgid(0, 0);
 #endif
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0)
@@ -739,18 +862,34 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
                 close(nullfd);
             }
         }
+#if defined(__linux__)
+        /* Isolate descriptors before any filesystem work or the gated second
+         * fork. The payload must not retain another job's control endpoint. */
+        if ((control[0] > 3 && close_range(3, (unsigned)control[0] - 1, 0) != 0) ||
+            close_range((unsigned)control[0] + 1, ~0U, 0) != 0) _exit(127);
+#endif
         if (workspace && workspace[0] && chdir(workspace) != 0)
         {
             _exit(127);
         }
 #if defined(__linux__)
-        SuperviseJob();
+        SuperviseJob(control[0], inherited_group);
 #endif
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);
     }
 
+#if defined(__linux__)
+    close(control[0]);
+#else
     setpgid(pid, pid);
+#endif
+    pthread_mutex_lock(&children_mu);
+    child->pid = pid;
+#if defined(__linux__)
+    child->control = control[1];
+#endif
+    pthread_mutex_unlock(&children_mu);
     close(pipefd[1]);
     flags = fcntl(pipefd[0], F_GETFL, 0);
     if (flags >= 0)
@@ -758,30 +897,13 @@ char *PicoBgTable_Spawn(PicoBgTable *table, PicoAgentId agent_id, const char *wo
         fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
     }
 
-    pthread_mutex_lock(&table->mu);
-    if (CountAgent(table, agent_id, true) >= PICO_BG_MAX_RUNNING ||
-        table->job_count >= PICO_BG_MAX_JOBS)
-    {
-        pthread_mutex_unlock(&table->mu);
-        KillProcessGroup(pid);
-        (void)waitpid(pid, NULL, 0);
-        close(pipefd[0]);
-        free(desc_copy);
-        free(cmd_copy);
-        if (error)
-        {
-            *error = DupError("run_background: too many running jobs");
-        }
-        return NULL;
-    }
     job = &table->jobs[table->job_count++];
     memset(job, 0, sizeof(*job));
     job->agent_id = agent_id;
     snprintf(job->id, sizeof(job->id), "%s", id);
     job->description = desc_copy;
     job->command = cmd_copy;
-    job->pid = pid;
-    job->pgid = pid;
+    job->child = child;
     job->fd = pipefd[0];
     job->status = PICO_BG_RUNNING;
     job->exit_code = 0;
@@ -822,10 +944,10 @@ char *PicoBgTable_Kill(PicoBgTable *table, PicoAgentId agent_id, const char *id,
         }
         return NULL;
     }
-    if (job->status == PICO_BG_RUNNING && job->pid > 0)
+    if (job->status == PICO_BG_RUNNING)
     {
         job->status = PICO_BG_KILLED;
-        KillProcessGroup(job->pgid);
+        StopChild(job->child);
         job->term_signal = SIGKILL;
     }
     result = FormatJobJson(job, true);
@@ -923,55 +1045,12 @@ char *PicoBgTable_Log(PicoBgTable *table, PicoAgentId agent_id, const char *id, 
     return out;
 }
 
-static bool AgentHasUnreapedJob(PicoBgTable *table, PicoAgentId agent_id)
-{
-    int i;
-    for (i = 0; i < table->job_count; i++)
-    {
-        if (table->jobs[i].agent_id == agent_id && !table->jobs[i].reaped &&
-            table->jobs[i].pid > 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 void PicoBgTable_ResetAgent(PicoBgTable *table, PicoAgentId agent_id)
 {
     int i;
     if (!table || agent_id == 0)
     {
         return;
-    }
-    pthread_mutex_lock(&table->mu);
-    for (i = 0; i < table->job_count; i++)
-    {
-        PicoBgJob *job = &table->jobs[i];
-        if (job->agent_id == agent_id && !job->reaped && job->pgid > 0)
-        {
-            KillProcessGroup(job->pgid > 0 ? job->pgid : job->pid);
-            job->status = PICO_BG_KILLED;
-        }
-    }
-    pthread_mutex_unlock(&table->mu);
-    /* Wait (briefly, bounded) until the killed children are reaped; removing a
-     * record while its child is still a zombie leaks it for the host's lifetime. */
-    for (i = 0; i < PICO_BG_REAP_TRIES; i++)
-    {
-        bool pending;
-        PicoBgTable_Pump(table);
-        pthread_mutex_lock(&table->mu);
-        pending = AgentHasUnreapedJob(table, agent_id);
-        pthread_mutex_unlock(&table->mu);
-        if (!pending)
-        {
-            break;
-        }
-        {
-            struct timespec req = {.tv_sec = 0, .tv_nsec = PICO_BG_REAP_WAIT_NS};
-            nanosleep(&req, NULL);
-        }
     }
     pthread_mutex_lock(&table->mu);
     for (i = table->job_count - 1; i >= 0; i--)

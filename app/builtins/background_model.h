@@ -30,6 +30,8 @@ typedef struct PicoBgJobInfo {
 typedef struct PicoBgTable PicoBgTable;
 
 PicoBgTable *PicoBgTable_Create(void);
+/* Teardown/reset request termination without waiting. Exact child wait
+ * obligations outlive visible records and the table in a core-owned reaper. */
 void PicoBgTable_Destroy(PicoBgTable *table);
 void PicoBgTable_Pump(PicoBgTable *table);
 

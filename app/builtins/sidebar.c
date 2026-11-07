@@ -2381,8 +2381,14 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
     float pin_width = row->pinned ? Pico_FontPx(SIDEBAR_FOLDER_ICON) : 0;
     Clay_String title = SidebarDisplayTitle(s, row->title,
         width - (row->pinned ? pin_width + SIDEBAR_ROW_GAP : 0));
-    Clay_String age = InboxAgeLabel(s, row->last_user_action);
-    float age_width = age.length ? SidebarTextWidth(age.chars, age.length) + 2 * SIDEBAR_ROW_GAP : 0;
+    SidebarDotKind kind = SessionDotKind(host, row->path, row->session_id, row->live_id, row->unseen);
+    bool status_dot = kind == SIDEBAR_DOT_WAITING_USER || kind == SIDEBAR_DOT_ERROR || kind == SIDEBAR_DOT_DONE;
+    float dot_size = Pico_FontPx(SIDEBAR_SESSION_DOT);
+    Clay_Color dot_color = kind == SIDEBAR_DOT_ERROR ? COLOR_STATUS_ERR :
+                           kind == SIDEBAR_DOT_WAITING_USER ? COLOR_STATUS_RUN : COLOR_STATUS_DONE;
+    Clay_String age = status_dot ? (Clay_String){0} : InboxAgeLabel(s, row->last_user_action);
+    float age_width = status_dot ? dot_size + 2 * SIDEBAR_ROW_GAP :
+                      age.length ? SidebarTextWidth(age.chars, age.length) + 2 * SIDEBAR_ROW_GAP : 0;
     float badge_width = Pico_FontPx(SIDEBAR_FOLDER_ICON);
     Clay_String project = SidebarDisplayTitle(s, s->workspaces[row->ws_index].name,
                                               width - age_width - badge_width - SIDEBAR_ROW_GAP);
@@ -2431,11 +2437,22 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                     RenderProjectBadge(s, &s->workspaces[row->ws_index]);
                     CLAY_TEXT(project, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
                         .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
-                    if (age.length)
+                    if (status_dot || age.length)
                     {
                         CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
-                        CLAY_TEXT(age, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
-                            .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                        if (status_dot)
+                        {
+                            CLAY(CLAY_IDI("SidebarInboxStatus", index),
+                                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(dot_size),
+                                                        .height = CLAY_SIZING_FIXED(dot_size)}},
+                                  .backgroundColor = dot_color,
+                                  .cornerRadius = CLAY_CORNER_RADIUS(dot_size * 0.5f)}) {}
+                        }
+                        else
+                        {
+                            CLAY_TEXT(age, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                                .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                        }
                     }
                 }
             }

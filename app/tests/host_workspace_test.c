@@ -15750,6 +15750,20 @@ static int FirstSidebarSessionRowId(void)
     return -1;
 }
 
+static bool SidebarInboxStatusColor(Clay_RenderCommandArray *commands, Clay_Color color)
+{
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (command->id == CLAY_IDI("SidebarInboxStatus", 0).id &&
+            command->commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE &&
+            !memcmp(&command->renderData.rectangle.backgroundColor, &color, sizeof(color)))
+            return command->boundingBox.width > 0 &&
+                   command->boundingBox.width == command->boundingBox.height;
+    }
+    return false;
+}
+
 static bool SidebarSessionDotVisible(Clay_RenderCommandArray *commands, int row_id,
                                      Clay_BoundingBox *box)
 {
@@ -16322,7 +16336,8 @@ static int TestSidebarInboxAsk(void)
     Clay_SetLayoutDimensions(viewport);
     (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
     Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 0);
-    if (!SidebarCommandsContain(&commands, "Needs input · 1"))
+    if (!SidebarCommandsContain(&commands, "Needs input · 1") ||
+        !SidebarInboxStatusColor(&commands, COLOR_STATUS_RUN))
     {
         Fail("a waiting questionnaire session must appear in Needs input");
         goto done;
@@ -19258,7 +19273,8 @@ static int TestSidebarInboxWorkingAnswerOrder(InboxAnswerScenario scenario)
     /* Keep the old prompt offscreen until the newer turn starts, so malformed
      * prompts cannot be automatically rejected during this initial layout. */
     Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
-    if (!SidebarCommandsContain(&commands, "Needs input · 1")) goto done;
+    if (!SidebarCommandsContain(&commands, "Needs input · 1") ||
+        !SidebarInboxStatusColor(&commands, COLOR_STATUS_RUN)) goto done;
     pthread_mutex_lock(&state.mu);
     state.mode = MATRIX_PROVIDER_BLOCK;
     pthread_mutex_unlock(&state.mu);
@@ -19642,6 +19658,22 @@ static int TestSidebarInboxAge(void)
         if (i && fabsf(edge - right) > 0.01f) goto done;
         right = edge;
     }
+
+    phase = "state indicators replace the timer without changing completion state";
+    agent->unseen_complete = true;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarInboxStatusColor(&commands, COLOR_STATUS_DONE) ||
+        FindSidebarSessionTitle(&commands, "400d")) goto done;
+    agent->state = PICO_AGENT_ERROR;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarInboxStatusColor(&commands, COLOR_STATUS_ERR) ||
+        FindSidebarSessionTitle(&commands, "400d")) goto done;
+    agent->unseen_complete = false;
+    agent->state = PICO_AGENT_LLM_WAIT;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (Clay_GetElementData(CLAY_IDI("SidebarInboxStatus", 0)).found ||
+        !FindSidebarSessionTitle(&commands, "400d")) goto done;
+    agent->state = PICO_AGENT_IDLE;
 
     phase = "long workspace names leave room for the age at larger font sizes";
     Pico_SetFontScale(1.5f);

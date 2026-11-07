@@ -151,10 +151,17 @@ static Clay_ElementId *horizontal_scroll_ids;
 static int horizontal_scroll_count;
 static int horizontal_scroll_capacity;
 
+/* Hash the document namespace before the element kind and block offset.
+ * Adding namespace + block instead aliases adjacent documents' blocks. Keep
+ * the kind string static: Clay retains it for diagnostics across layouts. */
+static Clay_ElementId MarkdownBlockId(Clay_String kind, int id_base, int block_index)
+{
+    return Clay__HashStringWithOffset(kind, (uint32_t)block_index, (uint32_t)id_base);
+}
+
 static Clay_ElementId HorizontalScrollId(int id_base, int block_index)
 {
-    return Clay_GetElementIdWithIndex(CLAY_STRING("MdHorizontalScroll"),
-                                      (uint32_t)id_base + (uint32_t)block_index);
+    return MarkdownBlockId(CLAY_STRING("MdHorizontalScroll"), id_base, block_index);
 }
 
 static void TrackHorizontalScroller(Clay_ElementId id)
@@ -836,7 +843,7 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                                          .width = {.left = 4}}})
                 {
                     RichText_RenderParagraphWindowed(block, &doc->arena, content_width, &style, emit, NULL,
-                                                      CLAY_IDI("MdParagraph", id_base + index));
+                                                      MarkdownBlockId(CLAY_STRING("MdParagraph"), id_base, index));
                 }
             }
             else if (block->type == MDB_LIST_ITEM)
@@ -876,14 +883,14 @@ static void RenderBlock(MdDocument *doc, int index, int id_base, float available
                                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
                     {
                         RichText_RenderParagraphWindowed(block, &doc->arena, content_width, &style, emit, NULL,
-                                                      CLAY_IDI("MdParagraph", id_base + index));
+                                                      MarkdownBlockId(CLAY_STRING("MdParagraph"), id_base, index));
                     }
                 }
             }
             else
             {
                 RichText_RenderParagraphWindowed(block, &doc->arena, available_width, &style, emit, NULL,
-                                                  CLAY_IDI("MdParagraph", id_base + index));
+                                                  MarkdownBlockId(CLAY_STRING("MdParagraph"), id_base, index));
             }
             break;
         }
@@ -1172,7 +1179,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
 
     if (doc->load_error)
     {
-        CLAY(CLAY_IDI("LoadError", id_base),
+        CLAY(MarkdownBlockId(CLAY_STRING("LoadError"), id_base, 0),
              {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .padding = {16, 16, 12, 12},
                          .childGap = 8,
@@ -1201,7 +1208,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
         int spacing_above = i > 0 ? (heading ? BLOCK_SPACING : 0) : 0;
         if (spacing_above > 0)
         {
-            CLAY(CLAY_IDI("HeadingSpacer", id_base + i),
+            CLAY(MarkdownBlockId(CLAY_STRING("HeadingSpacer"), id_base, i),
                  {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
                                         .height = CLAY_SIZING_FIXED((float)spacing_above)}}})
             {
@@ -1216,7 +1223,7 @@ void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width)
             {
                 end++;
             }
-            CLAY(CLAY_IDI("MdList", id_base + start),
+            CLAY(MarkdownBlockId(CLAY_STRING("MdList"), id_base, start),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .childGap = 2,
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})

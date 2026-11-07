@@ -14,6 +14,7 @@
 #include <time.h>
 
 static size_t measured_bytes;
+static void LayoutError(Clay_ErrorData error);
 
 static Clay_Dimensions MeasureRichText(Clay_StringSlice text, Clay_TextElementConfig *config,
                                        void *user_data)
@@ -181,6 +182,19 @@ static int AssertNoTextOverlap(Clay_RenderCommandArray commands)
     return text_count > 0 ? 0 : Fail("markdown width test rendered no text");
 }
 
+static Clay_ElementId HorizontalScroller(Clay_RenderCommandArray *commands)
+{
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (command->commandType != CLAY_RENDER_COMMAND_TYPE_SCISSOR_START) continue;
+        Clay_ElementId id = {.id = command->id};
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(id);
+        if (scroll.found && scroll.config.horizontal) return id;
+    }
+    return (Clay_ElementId){0};
+}
+
 static int AssertHorizontalOverflow(MdDocument *doc, int id_base, const char *kind)
 {
     const float width = 180.0f;
@@ -190,10 +204,8 @@ static int AssertHorizontalOverflow(MdDocument *doc, int id_base, const char *ki
     {
         previous_chat.scrollPosition->y = 0.0f;
     }
-    (void)RenderDocument(doc, id_base, width, false);
-
-    Clay_ElementId id = Clay_GetElementIdWithIndex(CLAY_STRING("MdHorizontalScroll"),
-                                                    (uint32_t)id_base);
+    Clay_RenderCommandArray commands = RenderDocument(doc, id_base, width, false);
+    Clay_ElementId id = HorizontalScroller(&commands);
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(id);
     if (!scroll.found || !scroll.scrollPosition || !scroll.config.horizontal)
     {
@@ -232,9 +244,8 @@ static int AssertHorizontalOverflow(MdDocument *doc, int id_base, const char *ki
     }
 
     int unrelated_id_base = id_base + 7919;
-    (void)RenderDocument(doc, unrelated_id_base, width, false);
-    Clay_ElementId unrelated_id = Clay_GetElementIdWithIndex(
-        CLAY_STRING("MdHorizontalScroll"), (uint32_t)unrelated_id_base);
+    commands = RenderDocument(doc, unrelated_id_base, width, false);
+    Clay_ElementId unrelated_id = HorizontalScroller(&commands);
     Clay_ScrollContainerData unrelated = Clay_GetScrollContainerData(unrelated_id);
     if (!unrelated.found || !unrelated.scrollPosition || fabsf(unrelated.scrollPosition->x) > 0.01f)
     {
@@ -416,7 +427,7 @@ static int TestHugeUnspacedWordWrapsInsideBudget(void)
     Clay_Arena arena =
         Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory);
     if (!memory || !Clay_Initialize(arena, (Clay_Dimensions){width, 600.0f},
-                                    (Clay_ErrorHandler){0}))
+                                    (Clay_ErrorHandler){.errorHandlerFunction = LayoutError}))
     {
         Fail("huge word test could not raise Clay capacity");
         goto done;
@@ -555,6 +566,31 @@ done:
     return 0;
 }
 
+static int duplicate_ids;
+
+static void LayoutError(Clay_ErrorData error)
+{
+    if (error.errorType == CLAY_ERROR_TYPE_DUPLICATE_ID) duplicate_ids++;
+}
+
+static int TestDocumentBlockNamespaces(void)
+{
+    /* Corresponding blocks are one index apart, while document IDs differ by
+     * one in the opposite direction. Adding the two aliases every block. */
+    const char *body = "Intro\n\n# Heading\n\n- Item\n\n```text\nwide_code_content\n```\n";
+    char prefixed[256];
+    snprintf(prefixed, sizeof(prefixed), "Extra paragraph\n\n%s", body);
+    MdDocument first = MdDocument_Parse(prefixed, strlen(prefixed));
+    MdDocument second = MdDocument_Parse(body, strlen(body));
+    duplicate_ids = 0;
+    for (int pass = 0; pass < 3; pass++)
+        (void)RenderLinkDocuments(&first, &second);
+    MdView_BeginFrame();
+    MdDocument_Free(&first);
+    MdDocument_Free(&second);
+    return duplicate_ids ? Fail("distinct documents must not alias Markdown block IDs") : 0;
+}
+
 #ifdef PICO_TEST_IMAGES
 #include "md_image_cache_test.c"
 #endif
@@ -569,7 +605,7 @@ int main(void)
     }
     Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
     if (!Clay_Initialize(arena, (Clay_Dimensions){180.0f, 600.0f},
-                         (Clay_ErrorHandler){0}))
+                         (Clay_ErrorHandler){.errorHandlerFunction = LayoutError}))
     {
         free(memory);
         return Fail("could not initialize Clay");
@@ -577,7 +613,8 @@ int main(void)
     Clay_SetMeasureTextFunction(MeasureRichText, NULL);
     RichText_SetMeasureFunction(MeasureRichText, NULL);
 
-    int result = PICO_TEST_RUN(TestHoveredLinkKeepsDocumentBase());
+    int result = PICO_TEST_RUN(TestDocumentBlockNamespaces());
+    if (result == 0) result = PICO_TEST_RUN(TestHoveredLinkKeepsDocumentBase());
 #ifdef PICO_TEST_IMAGES
     if (result == 0) result = PICO_TEST_RUN(TestImageCache());
     if (result == 0) result = PICO_TEST_RUN(TestWebPImagePreview());

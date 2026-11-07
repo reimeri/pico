@@ -53,6 +53,8 @@ The builtin chat window-renders very tall wrapped paragraphs (also in expanded t
 
 ## Markdown paths and links
 
+`MdView_RenderDocument(doc, id_base, width)` treats `id_base` as a document-instance namespace. Supply distinct values for documents rendered in the same layout, and keep each value stable across layouts to preserve horizontal scroll state. Adjacent values are valid: block indices and element kinds are hashed within the namespace, not added to it. Rendering the same document twice requires two namespaces.
+
 `MdView_SetBaseDir()` sets the base for relative image paths and file-link targets
 in subsequent document renders. This main/render-thread setting is copied
 internally; custom Markdown views should set their own base before rendering

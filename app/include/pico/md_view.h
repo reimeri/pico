@@ -18,8 +18,10 @@ void MdView_SetBaseDir(const char *dir);
 // The graphics owner calls this before closing its context; clears all textures.
 void MdView_ClearImages(void);
 
-// Renders doc->blocks as Clay elements. id_base is mixed into explicit Clay
-// IDs so multiple documents in one frame (chat messages) do not collide.
+// Renders doc->blocks as Clay elements. id_base is a document namespace, not
+// an arithmetic block offset. Use a distinct value per document instance in a
+// layout, stable across layouts to preserve scroll state. Block indices and
+// element kinds are hashed within that namespace; adjacent values are valid.
 void MdView_RenderDocument(MdDocument *doc, int id_base, float available_width);
 
 // Hovered target with relative file paths resolved against that document's base.

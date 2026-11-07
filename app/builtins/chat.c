@@ -233,6 +233,8 @@ static __thread ChatState *s_active_chat_state = NULL;
 #define g_inspect_virtual_ns (s_active_chat_state->inspect_virtual_ns)
 #define g_virtual_relayout (s_active_chat_state->virtual_relayout)
 
+static void InspectFollowScroll(void);
+
 static void RememberVisibleBookmark(ChatState *state);
 
 static bool IsSubagentTool(const PicoTraceLine *line)
@@ -2524,6 +2526,7 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
         Clay_GetScrollContainerData(Clay_GetElementId(scroll_id));
     float anchor_top = scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
     float anchor_delta = 0.0f;
+    bool measured = false;
     TranscriptView ids = {.id_ns = id_ns};
     for (int j = 0; j < PicoTranscriptVirtual_MountedCount(cache); j++)
     {
@@ -2533,16 +2536,26 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
         {
             continue;
         }
+        measured = true;
         float delta = preserve_anchor
                           ? PicoTranscriptVirtual_AnchorDelta(
                                 cache, i, element.boundingBox.height, anchor_top,
                                 TRANSCRIPT_MESSAGE_GAP)
                           : 0.0f;
+        /* A shrink can expose rows excluded by the old visibility plan even
+         * when the scroll anchor does not move. Replan before presentation. */
+        if (fabsf(PicoTranscriptVirtual_ItemHeight(cache, i) - element.boundingBox.height) > 0.01f)
+            g_virtual_relayout = true;
         PicoTranscriptVirtual_RecordHeight(cache, i, element.boundingBox.height);
         anchor_top += delta;
         anchor_delta += delta;
     }
     PicoTranscriptVirtual_FinishMeasure(cache);
+    /* Continue bounded cold-history work even if this batch happened to match
+     * the estimates exactly. Hidden transcripts cannot drain their queues and
+     * must not keep the host awake. */
+    if (measured && cache->dirty_count > 0)
+        g_virtual_relayout = true;
 
     if (!preserve_anchor || !scroll.found || !scroll.scrollPosition ||
         fabsf(anchor_delta) <= 0.01f)
@@ -2599,8 +2612,18 @@ void PicoChat_HarvestVirtualHeights(PicoHost *app)
     PicoChat_RecordVirtualScroll();
     HarvestTranscriptHeights(&g_main_virtual, 0, CLAY_STRING("ChatScroll"),
                              !app->chat_follow_bottom);
-    HarvestTranscriptHeights(&g_inspect_virtual, g_inspect_virtual_ns,
-                             CLAY_STRING("SubagentChatScroll"), !g_inspect_follow);
+    if (g_inspect_n > 0)
+    {
+        HarvestTranscriptHeights(&g_inspect_virtual, g_inspect_virtual_ns,
+                                 CLAY_STRING("SubagentChatScroll"), !g_inspect_follow);
+        bool overflow = PicoScrollbar_Overflows(CLAY_STRING("SubagentChatScroll"));
+        if (overflow != g_inspect_overflow)
+        {
+            g_inspect_overflow = overflow;
+            g_virtual_relayout = true;
+        }
+        InspectFollowScroll();
+    }
 }
 
 bool PicoChat_TakeVirtualRelayout(void)
@@ -3329,11 +3352,9 @@ static void InspectFollowScroll(void)
     }
     Clay_ScrollContainerData data =
         Clay_GetScrollContainerData(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
-    if (data.found && data.scrollPosition &&
-        data.contentDimensions.height > data.scrollContainerDimensions.height)
-    {
-        data.scrollPosition->y = data.scrollContainerDimensions.height - data.contentDimensions.height;
-    }
+    if (data.found && PicoScrollbar_PinToBottom(data.scrollContainerDimensions.height,
+                                               data.contentDimensions.height, data.scrollPosition ? &data.scrollPosition->y : NULL))
+        g_virtual_relayout = true;
 }
 
 static void InspectRender(PicoHost *app, void *state)
@@ -3681,6 +3702,7 @@ static void InspectHandlePointer(PicoHost *app)
     {
         PicoMessage *msg = (PicoMessage *)&inspect.messages[group_msg];
         msg->trace_group_expanded = !msg->trace_group_expanded;
+        app->ui_relayout_requested = true;
     }
     else if (g_inspect_pressed_tool && tool_idx >= 0 && tool_msg == g_inspect_tool_msg &&
              tool_idx == g_inspect_tool_idx && found && tool_msg < inspect.message_count)
@@ -3694,6 +3716,7 @@ static void InspectHandlePointer(PicoHost *app)
         else
         {
             line->expanded = !line->expanded;
+            app->ui_relayout_requested = true;
         }
     }
     g_inspect_pressed_dim = false;
@@ -3861,6 +3884,9 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
                 HitTraceGroup(&main, app->chat_sel.tool_msg))
             {
                 msg->trace_group_expanded = !msg->trace_group_expanded;
+                /* This handler runs after layout. Redraw alone would present
+                 * the old commands and consume the click's invalidation. */
+                app->ui_relayout_requested = true;
                 PicoAgent_TranscriptChanged(PicoHost_TranscriptAgent(app), app->chat_sel.tool_msg);
                 if (!msg->trace_group_expanded && app->chat_follow_bottom)
                 {
@@ -3882,6 +3908,7 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
                     else
                     {
                         msg->trace[t].expanded = !msg->trace[t].expanded;
+                        app->ui_relayout_requested = true;
                         PicoAgent_TranscriptChanged(PicoHost_TranscriptAgent(app), app->chat_sel.tool_msg);
                     }
                 }

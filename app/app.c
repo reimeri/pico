@@ -4324,6 +4324,30 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
     return commands;
 }
 
+/* Scrollbar commands read the previous completed Clay geometry. Reconcile
+ * both transcript panes when layout changes that input, even without a scroll
+ * correction or a change to the overflow boolean. Copy the offset, not Clay's
+ * mutable scrollPosition pointer. */
+typedef struct TranscriptScrollGeometry {
+    bool found;
+    float viewport, content, y;
+} TranscriptScrollGeometry;
+
+static TranscriptScrollGeometry TranscriptScrollSnapshot(Clay_String id)
+{
+    Clay_ScrollContainerData data = Clay_GetScrollContainerData(Clay_GetElementId(id));
+    return (TranscriptScrollGeometry){data.found, data.scrollContainerDimensions.height,
+                                      data.contentDimensions.height,
+                                      data.scrollPosition ? data.scrollPosition->y : 0};
+}
+
+static bool TranscriptScrollChanged(TranscriptScrollGeometry before, Clay_String id)
+{
+    TranscriptScrollGeometry after = TranscriptScrollSnapshot(id);
+    return before.found != after.found || fabsf(before.viewport - after.viewport) > 0.01f ||
+           fabsf(before.content - after.content) > 0.01f || fabsf(before.y - after.y) > 0.01f;
+}
+
 static void UpdateChatScrollbarDrag(PicoHost *app)
 {
     PicoScrollbar_UpdateDragOverlay(&app->chat_scrollbar, CLAY_STRING("ChatScroll"),
@@ -4757,7 +4781,13 @@ void PicoHost_Frame(PicoHost *app)
     if (MdView_ImagesChanged()) pico_host_request_redraw(app);
     if (!app->redraw_requested && !app->ui_relayout_requested)
         return;
+    /* A bounded reconciliation may have deferred work from the last frame.
+     * Its eventual stable layout must still be presented without new input. */
+    if (app->ui_relayout_requested)
+        pico_host_request_redraw(app);
 
+    TranscriptScrollGeometry chat_geometry = TranscriptScrollSnapshot(CLAY_STRING("ChatScroll"));
+    TranscriptScrollGeometry inspect_geometry = TranscriptScrollSnapshot(CLAY_STRING("SubagentChatScroll"));
     Clay_RenderCommandArray render_commands =
         RecoverClayLayoutIfNeeded(app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), frame_dt));
 
@@ -4827,7 +4857,9 @@ void PicoHost_Frame(PicoHost *app)
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     }
 
-    bool relayout = app->ui_relayout_requested;
+    bool relayout = app->ui_relayout_requested ||
+                    TranscriptScrollChanged(chat_geometry, CLAY_STRING("ChatScroll")) ||
+                    TranscriptScrollChanged(inspect_geometry, CLAY_STRING("SubagentChatScroll"));
     if (ClayLayoutUnusable(render_commands))
     {
         (void)PicoChat_TakeVirtualRelayout();
@@ -4861,12 +4893,15 @@ void PicoHost_Frame(PicoHost *app)
         }
         Pico_RememberClayScroll();
     }
-    if (relayout)
+    /* Measuring a shortened row may expose more rows, whose measurement in
+     * turn changes the extent. Reconcile without replaying input hooks. Bound
+     * the work and retain a pending layout if cold history needs another pump. */
+    for (int pass = 0; relayout && pass < 3; pass++)
     {
         pico_host_request_redraw(app);
-        fprintf(stderr, "clay-scroll: relayout follow=%d\n", app->chat_follow_bottom ? 1 : 0);
-        /* Clay has already generated command bounds with the prior offset.
-         * Rebuild once so the corrected offset is visible this frame. */
+        chat_geometry = TranscriptScrollSnapshot(CLAY_STRING("ChatScroll"));
+        inspect_geometry = TranscriptScrollSnapshot(CLAY_STRING("SubagentChatScroll"));
+        /* Rebuild commands with the corrected scroll and visibility plan. */
         render_commands = RecoverClayLayoutIfNeeded(
             app, PicoHost_LayoutShell(app, (float)GetScreenHeight(), 0.0f));
         if (ClayLayoutUnusable(render_commands))
@@ -4874,7 +4909,10 @@ void PicoHost_Frame(PicoHost *app)
             SkipClayPresent(render_commands);
             return;
         }
-        PicoChat_RecordVirtualScroll();
+        PicoChat_HarvestVirtualHeights(app);
+        relayout = PicoChat_TakeVirtualRelayout() || app->ui_relayout_requested ||
+                   TranscriptScrollChanged(chat_geometry, CLAY_STRING("ChatScroll")) ||
+                   TranscriptScrollChanged(inspect_geometry, CLAY_STRING("SubagentChatScroll"));
         PicoBrowser_AfterLayout(app);
         app->chat_overflow = PicoScrollbar_Overflows(CLAY_STRING("ChatScroll"));
         if (!Pico_NeedsClayReinit())
@@ -4882,6 +4920,9 @@ void PicoHost_Frame(PicoHost *app)
             Pico_RememberClayScroll();
         }
     }
+
+    if (relayout)
+        app->ui_relayout_requested = true;
 
     if (!PicoChatFind_PointerOver(app) && app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
         !PicoChatSel_HasSelection(app))

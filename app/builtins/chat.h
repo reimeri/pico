@@ -15,6 +15,11 @@ void PicoChat_CancelScrollRestore(struct PicoHost *app);
 void PicoChat_ForgetSessionScroll(struct PicoHost *app, const char *workspace, const char *session);
 /* Private shell integration: retain automatic shrink space, then correct before present. */
 void PicoChat_ResetBottomSpace(struct PicoHost *app);
+void PicoChat_BeginFrame(struct PicoHost *app);
+void PicoChat_PrepareRefinement(struct PicoHost *app, bool interacting);
+void PicoChat_BeginLayout(struct PicoHost *app);
+bool PicoChat_ViewportReady(struct PicoHost *app, bool unsettled);
+void PicoChat_DidPresent(struct PicoHost *app);
 void PicoChat_BeginScrollLayout(struct PicoHost *app);
 bool PicoChat_StabilizeScrollLayout(struct PicoHost *app);
 void PicoChat_HarvestVirtualHeights(struct PicoHost *app);

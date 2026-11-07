@@ -144,6 +144,12 @@ typedef struct ThinkLabelEntry {
 
 /* Navigation state, not catalog data. Only away sessions have an expiry;
  * reading the selected session never starts an automatic jump-to-bottom timer. */
+/* Refine at idle cadence, not display cadence. One row is indivisible: this
+ * deadline bounds admission between units, not synchronous work within a row. */
+#define CHAT_REFINEMENT_INTERVAL 0.1
+#define CHAT_REFINEMENT_INPUT_GRACE 0.15
+#define CHAT_REFINEMENT_TIME_SLICE 0.002
+
 #define CHAT_BOOKMARK_SECONDS (5.0 * 60.0)
 typedef struct ChatBookmark {
     struct ChatBookmark *next;
@@ -187,7 +193,19 @@ typedef struct ChatState {
     ToolWrapCacheSet main_tool_wrap;
     ToolWrapCacheSet inspect_tool_wrap;
     int inspect_virtual_ns;
+    uint64_t inspect_anchor_identity;
+    int inspect_anchor_message;
+    float inspect_anchor_offset;
+    bool inspect_anchor_valid;
+    bool inspect_restoring_anchor;
     bool virtual_relayout;
+    int refinement_remaining;
+    uint64_t refinement_frame;
+    double refinement_at;
+    double refinement_deadline;
+    bool refinement_timed;
+    bool main_laid_out;
+    bool inspect_laid_out;
     ChatBookmark *bookmarks;
     ChatBookmark visible_bookmark;
     ChatBookmark restore_bookmark;
@@ -199,6 +217,7 @@ typedef struct ChatState {
     float bottom_extent;
     float bottom_space;
     float bottom_input_y;
+    float bottom_input_extent;
     float bottom_view_height;
     float bottom_width;
     float bottom_font_scale;
@@ -236,6 +255,10 @@ static __thread ChatState *s_active_chat_state = NULL;
 static void InspectFollowScroll(void);
 
 static void RememberVisibleBookmark(ChatState *state);
+static bool BookmarkAnchorValid(const ChatBookmark *bookmark, const PicoAgent *agent);
+static TranscriptView MainTranscriptView(PicoHost *app);
+static bool InspectIsTopModal(PicoHost *app);
+static bool InspectCurrent(PicoHost *app, PicoSubagentInspect *out, const char **fallback);
 
 static bool IsSubagentTool(const PicoTraceLine *line)
 {
@@ -2403,6 +2426,30 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
     bool reset = !cache || !cache->configured || cache->identity != view->virtual_identity ||
                  view->message_count < old_count || cache->width != available_width ||
                  cache->font_scale != Pico_FontScale();
+    ChatState *state = s_active_chat_state;
+    if (view->id_ns == 0)
+    {
+        state->main_laid_out = true;
+        /* Reflow the current reading position by message/offset, not by its
+         * obsolete pixel prefix. Selection restoration already owns an anchor. */
+        if (reset && !view->app->chat_follow_bottom && !state->restoring_bookmark &&
+            state->visible_bookmark_valid && BookmarkAnchorValid(&state->visible_bookmark, view->owner))
+        {
+            state->restore_bookmark = state->visible_bookmark;
+            state->restoring_bookmark = true;
+        }
+    }
+    else
+    {
+        state->inspect_laid_out = true;
+        if (reset)
+        {
+            state->inspect_restoring_anchor = !state->inspect_follow && state->inspect_anchor_valid &&
+                state->inspect_anchor_identity == view->virtual_identity &&
+                state->inspect_anchor_message >= 0 && state->inspect_anchor_message < view->message_count;
+            if (!state->inspect_restoring_anchor) state->inspect_anchor_valid = false;
+        }
+    }
     PicoTranscriptVirtual_Begin(cache, view->virtual_identity, view->message_count,
                                 available_width, Pico_FontScale());
     if (!cache || cache->count != view->message_count)
@@ -2461,6 +2508,17 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
     float scroll_top = scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
     float viewport = scroll.found ? scroll.scrollContainerDimensions.height : 0.0f;
     int force_index = -1;
+    bool follow = view->id_ns == 0 ? view->app->chat_follow_bottom : g_inspect_follow;
+    if (follow)
+    {
+        /* Start at the intended end, even on a cold identity. Prefix estimates
+         * may change, but their absolute size must not send us through the top
+         * of the history before we can display the tail. */
+        float padding = view->id_ns == 0 ? CHAT_CONTENT_PAD_Y * 2 + TRANSCRIPT_BOTTOM_SPACER : 12;
+        scroll_top = fmaxf(0, PicoTranscriptVirtual_SpanHeight(cache, 0, cache->count,
+                                                             TRANSCRIPT_MESSAGE_GAP) + padding - viewport);
+        force_index = cache->count - 1;
+    }
     if (view->selectable &&
         (view->app->chat_sel.mouse_selecting || PicoChatSel_HasSelection(view->app)))
     {
@@ -2474,11 +2532,32 @@ static void RenderTranscript(const TranscriptView *view, float available_width)
                                                        TRANSCRIPT_MESSAGE_GAP) - bookmark->offset;
         force_index = bookmark->message;
     }
+    if (view->id_ns != 0 && state->inspect_restoring_anchor)
+    {
+        force_index = state->inspect_anchor_message;
+        scroll_top = PicoTranscriptVirtual_SpanHeight(cache, 0, force_index,
+                                                       TRANSCRIPT_MESSAGE_GAP) - state->inspect_anchor_offset;
+    }
     PicoTranscriptVirtual_Plan(cache, scroll_top, viewport,
                                viewport * TRANSCRIPT_OVERSCAN_VIEWPORTS,
                                force_index, TRANSCRIPT_MESSAGE_GAP);
 
     if (view->selectable) PicoChatFind_MountTargets(view->app, cache, TRANSCRIPT_MESSAGE_GAP);
+    /* The outer frame owns this allowance; no same-frame correction renews
+     * it. A cold identity/geometry must first present its mandatory viewport. */
+    bool background_visible = view->id_ns == 0 ? !PicoUi_ModalOpen(view->app) : InspectIsTopModal(view->app);
+    if (cache->presented && background_visible)
+    {
+        /* Foreground views may themselves be expensive. Start the cooperative
+         * window here so they cannot starve every eligible idle admission. */
+        if (state->refinement_timed && state->refinement_remaining > 0 &&
+            state->refinement_deadline == 0.0)
+            state->refinement_deadline = PicoClock_Monotonic() + CHAT_REFINEMENT_TIME_SLICE;
+        if (state->refinement_timed && state->refinement_deadline > 0.0 &&
+            PicoClock_Monotonic() >= state->refinement_deadline)
+            state->refinement_remaining = 0;
+        PicoTranscriptVirtual_Refine(cache, state->refinement_frame, &state->refinement_remaining);
+    }
     for (int j = 0; j < PicoTranscriptVirtual_MountedCount(cache); j++)
     {
         int i = PicoTranscriptVirtual_MountedIndex(cache, j);
@@ -2526,7 +2605,8 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
         Clay_GetScrollContainerData(Clay_GetElementId(scroll_id));
     float anchor_top = scroll.found && scroll.scrollPosition ? -scroll.scrollPosition->y : 0.0f;
     float anchor_delta = 0.0f;
-    bool measured = false;
+    float extent_delta = 0.0f;
+    float estimated_delta = 0.0f;
     TranscriptView ids = {.id_ns = id_ns};
     for (int j = 0; j < PicoTranscriptVirtual_MountedCount(cache); j++)
     {
@@ -2536,7 +2616,13 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
         {
             continue;
         }
-        measured = true;
+        if (cache->mount_revisions[i] != cache->revisions[i])
+        {
+            g_virtual_relayout = true;
+            continue;
+        }
+        float previous = PicoTranscriptVirtual_ItemHeight(cache, i);
+        bool estimated = cache->measure_all && i < cache->cold_count && cache->heights[i] <= 0.5f;
         float delta = preserve_anchor
                           ? PicoTranscriptVirtual_AnchorDelta(
                                 cache, i, element.boundingBox.height, anchor_top,
@@ -2547,15 +2633,24 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
         if (fabsf(PicoTranscriptVirtual_ItemHeight(cache, i) - element.boundingBox.height) > 0.01f)
             g_virtual_relayout = true;
         PicoTranscriptVirtual_RecordHeight(cache, i, element.boundingBox.height);
+        extent_delta += PicoTranscriptVirtual_ItemHeight(cache, i) - previous;
+        if (estimated) estimated_delta += PicoTranscriptVirtual_ItemHeight(cache, i) - previous;
         anchor_top += delta;
         anchor_delta += delta;
     }
     PicoTranscriptVirtual_FinishMeasure(cache);
-    /* Continue bounded cold-history work even if this batch happened to match
-     * the estimates exactly. Hidden transcripts cannot drain their queues and
-     * must not keep the host awake. */
-    if (measured && cache->dirty_count > 0)
-        g_virtual_relayout = true;
+    if (id_ns == 0 && cache->presented && estimated_delta != 0.0f)
+    {
+        /* Replacing an estimate is not a content fold. Shift the retained
+         * high-water mark by that correction instead of retaining fictitious
+         * blank space, while still smoothing real changes to measured rows. */
+        Clay_ElementData content = Clay_GetElementData(CLAY_ID("ChatContent"));
+        Clay_ElementData spacer = Clay_GetElementData(CLAY_ID("ChatStabilizationSpacer"));
+        if (content.found && spacer.found)
+            s_active_chat_state->bottom_extent = fmaxf(
+                s_active_chat_state->bottom_input_extent + estimated_delta,
+                content.boundingBox.height - spacer.boundingBox.height);
+    }
 
     if (!preserve_anchor || !scroll.found || !scroll.scrollPosition ||
         fabsf(anchor_delta) <= 0.01f)
@@ -2563,7 +2658,10 @@ static void HarvestTranscriptHeights(PicoTranscriptVirtual *cache, int id_ns,
         return;
     }
     float next = scroll.scrollPosition->y - anchor_delta;
-    float min_y = scroll.scrollContainerDimensions.height - scroll.contentDimensions.height;
+    /* Clamp against the new estimate, not yesterday's shorter extent: doing
+     * so would discard part of the correction when rows above us grow. */
+    float min_y = fminf(0, scroll.scrollContainerDimensions.height -
+                          (scroll.contentDimensions.height + extent_delta));
     if (min_y > 0.0f)
     {
         min_y = 0.0f;
@@ -2610,12 +2708,57 @@ void PicoChat_HarvestVirtualHeights(PicoHost *app)
      * Anchor correction may change it below, so retain the pre-correction
      * value until the corrected same-frame layout has completed. */
     PicoChat_RecordVirtualScroll();
-    HarvestTranscriptHeights(&g_main_virtual, 0, CLAY_STRING("ChatScroll"),
-                             !app->chat_follow_bottom);
-    if (g_inspect_n > 0)
+    TranscriptView main = MainTranscriptView(app);
+    if (s_active_chat_state->main_laid_out && g_main_virtual.configured)
     {
-        HarvestTranscriptHeights(&g_inspect_virtual, g_inspect_virtual_ns,
-                                 CLAY_STRING("SubagentChatScroll"), !g_inspect_follow);
+        if (main.virtual_identity != g_main_virtual.identity || main.message_count != g_main_virtual.count)
+            g_virtual_relayout = true;
+        else
+        {
+            for (int j = 0; j < PicoTranscriptVirtual_MountedCount(&g_main_virtual); j++)
+                RefreshMessageRevision(&main, &g_main_virtual, PicoTranscriptVirtual_MountedIndex(&g_main_virtual, j));
+            HarvestTranscriptHeights(&g_main_virtual, 0, CLAY_STRING("ChatScroll"), !app->chat_follow_bottom);
+        }
+    }
+    if (g_inspect_n > 0 && s_active_chat_state->inspect_laid_out && g_inspect_virtual.configured)
+    {
+        PicoSubagentInspect inspect = {0};
+        if (InspectCurrent(app, &inspect, NULL))
+        {
+            TranscriptView view = {.app = app, .messages = inspect.messages, .message_count = inspect.message_count,
+                .state = inspect.state, .activity = inspect.activity, .id_ns = g_inspect_n,
+                .owner = inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL};
+            uint64_t identity = RevisionText(TranscriptIdentity(&view), inspect.session_id);
+            if (identity != g_inspect_virtual.identity || view.message_count != g_inspect_virtual.count)
+                g_virtual_relayout = true;
+            else
+            {
+                for (int j = 0; j < PicoTranscriptVirtual_MountedCount(&g_inspect_virtual); j++)
+                    RefreshMessageRevision(&view, &g_inspect_virtual, PicoTranscriptVirtual_MountedIndex(&g_inspect_virtual, j));
+                HarvestTranscriptHeights(&g_inspect_virtual, g_inspect_virtual_ns,
+                                         CLAY_STRING("SubagentChatScroll"), !g_inspect_follow && !s_active_chat_state->inspect_restoring_anchor);
+                if (s_active_chat_state->inspect_restoring_anchor)
+                {
+                    TranscriptView ids = {.id_ns = g_inspect_virtual_ns};
+                    Clay_ElementData row = Clay_GetElementData(MessageId(&ids, s_active_chat_state->inspect_anchor_message));
+                    Clay_ElementData clip = Clay_GetElementData(CLAY_ID("SubagentChatScroll"));
+                    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SubagentChatScroll"));
+                    if (row.found && clip.found && scroll.scrollPosition)
+                    {
+                        float offset = fmaxf(s_active_chat_state->inspect_anchor_offset, -fmaxf(0, row.boundingBox.height - 1));
+                        float target = scroll.scrollPosition->y + clip.boundingBox.y - row.boundingBox.y + offset;
+                        target = fminf(0, fmaxf(scroll.scrollContainerDimensions.height - scroll.contentDimensions.height, target));
+                        if (fabsf(target - scroll.scrollPosition->y) > 0.01f)
+                        {
+                            scroll.scrollPosition->y = target;
+                            g_virtual_relayout = true;
+                        }
+                        else s_active_chat_state->inspect_restoring_anchor = false;
+                    }
+                }
+            }
+        }
+        else g_virtual_relayout = true;
         bool overflow = PicoScrollbar_Overflows(CLAY_STRING("SubagentChatScroll"));
         if (overflow != g_inspect_overflow)
         {
@@ -2636,6 +2779,106 @@ bool PicoChat_TakeVirtualRelayout(void)
 static ChatState *ChatScrollState(PicoHost *app)
 {
     return app ? (ChatState *)PicoPlugins_HostState(app, "chat") : NULL;
+}
+
+/* Frame admission is deliberately separate from BeginScrollLayout, which
+ * is called again for same-frame corrections and Clay recovery. */
+void PicoChat_BeginFrame(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    if (state)
+    {
+        state->refinement_remaining = 1;
+        state->refinement_frame++;
+        state->refinement_timed = false;
+    }
+}
+
+static bool RefinementPending(ChatState *state)
+{
+    PicoHost *app = state->app;
+    return (state->main_laid_out && state->main_virtual.configured &&
+            !PicoUi_ModalOpen(app) && state->main_virtual.dirty_count) ||
+           (state->inspect_laid_out && state->inspect_virtual.configured &&
+            pico_ui_modal_is_top(app, "inspect") && state->inspect_virtual.dirty_count);
+}
+
+/* Called after input/pumping and before the frame gate. No layout is needed
+ * just to check the idle deadline. UI corrections and interaction take priority. */
+void PicoChat_PrepareRefinement(PicoHost *app, bool interacting)
+{
+    ChatState *state = ChatScrollState(app);
+    if (!state) return;
+    state->refinement_remaining = 0;
+    state->refinement_timed = true;
+    state->refinement_deadline = 0.0;
+    double now = GetTime();
+    if (interacting)
+        state->refinement_at = fmax(state->refinement_at, now + CHAT_REFINEMENT_INPUT_GRACE);
+    if (!RefinementPending(state) || app->window_minimized) return;
+    if (state->refinement_at <= 0.0) state->refinement_at = now + CHAT_REFINEMENT_INTERVAL;
+    if (!interacting && !app->ui_relayout_requested && now >= state->refinement_at)
+    {
+        state->refinement_remaining = 1;
+        state->refinement_at = now + CHAT_REFINEMENT_INTERVAL;
+        pico_host_request_redraw(app);
+    }
+    pico_host_request_redraw_after(app, fmax(0.001, state->refinement_at - now));
+}
+
+void PicoChat_BeginLayout(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    if (state) state->main_laid_out = state->inspect_laid_out = false;
+}
+
+bool PicoChat_ViewportReady(PicoHost *app, bool unsettled)
+{
+    ChatState *state = ChatScrollState(app);
+    if (state && unsettled &&
+        ((state->main_laid_out && state->main_virtual.configured && !state->main_virtual.presented) ||
+         (state->inspect_laid_out && state->inspect_virtual.configured && !state->inspect_virtual.presented))) return false;
+    return !state ||
+        ((!state->main_laid_out || !state->main_virtual.configured || PicoTranscriptVirtual_ViewportReady(&state->main_virtual)) &&
+         (!state->inspect_laid_out || !state->inspect_virtual.configured || PicoTranscriptVirtual_ViewportReady(&state->inspect_virtual)));
+}
+
+void PicoChat_DidPresent(PicoHost *app)
+{
+    ChatState *state = ChatScrollState(app);
+    if (!state) return;
+    if (state->main_laid_out && PicoTranscriptVirtual_ViewportReady(&state->main_virtual))
+        state->main_virtual.presented = true;
+    if (state->inspect_laid_out && PicoTranscriptVirtual_ViewportReady(&state->inspect_virtual))
+        state->inspect_virtual.presented = true;
+    if (state->inspect_laid_out && !state->inspect_follow && !state->inspect_restoring_anchor)
+    {
+        Clay_ElementData clip = Clay_GetElementData(CLAY_ID("SubagentChatScroll"));
+        TranscriptView ids = {.id_ns = state->inspect_virtual_ns};
+        state->inspect_anchor_valid = false;
+        for (int j = 0; clip.found && j < PicoTranscriptVirtual_MountedCount(&state->inspect_virtual); j++)
+        {
+            int i = PicoTranscriptVirtual_MountedIndex(&state->inspect_virtual, j);
+            Clay_ElementData row = Clay_GetElementData(MessageId(&ids, i));
+            if (row.found && row.boundingBox.y + row.boundingBox.height > clip.boundingBox.y &&
+                row.boundingBox.y < clip.boundingBox.y + clip.boundingBox.height)
+            {
+                state->inspect_anchor_identity = state->inspect_virtual.identity;
+                state->inspect_anchor_message = i;
+                state->inspect_anchor_offset = row.boundingBox.y - clip.boundingBox.y;
+                state->inspect_anchor_valid = true;
+                break;
+            }
+        }
+    }
+    /* A separate future frame, never a same-frame reconciliation request.
+     * Other redraw causes (caret, streaming, hover) cannot renew admission. */
+    if (RefinementPending(state) && !app->window_minimized)
+    {
+        double now = GetTime();
+        if (state->refinement_at <= now) state->refinement_at = now + CHAT_REFINEMENT_INTERVAL;
+        pico_host_request_redraw_after(app, state->refinement_at - now);
+    }
 }
 
 static bool BookmarkMatches(const ChatBookmark *bookmark, const PicoAgent *agent)
@@ -2815,6 +3058,7 @@ void PicoChat_BeginScrollLayout(PicoHost *app)
     if (state)
     {
         BeginBookmarkRestore(state);
+        state->bottom_input_extent = state->bottom_extent;
         state->bottom_input_y = scroll.found && scroll.scrollPosition ? scroll.scrollPosition->y : 0.0f;
     }
 }
@@ -2843,13 +3087,13 @@ bool PicoChat_StabilizeScrollLayout(PicoHost *app)
                             fabsf(viewport - state->bottom_view_height) > 0.01f ||
                             fabsf(width - state->bottom_width) > 0.01f ||
                             state->bottom_font_scale != Pico_FontScale();
-    /* Cold offscreen estimates are provisional: never retain their old extent
-     * as permanent blank space when measured rows turn out shorter. Keep one
-     * final rebase after the last batch has been harvested. */
-    bool approximate = state->main_virtual.measure_all;
+    /* Before first presentation the extent is provisional. Thereafter harvest
+     * adjusts the high-water mark for replaced estimates, independently of
+     * real content folds that still need the normal retained-space behavior. */
+    bool approximate = state->main_virtual.measure_all && !state->main_virtual.presented;
     bool rebase = state->bottom_reset || geometry_changed ||
                   state->bottom_rebase_pending || approximate;
-    state->bottom_rebase_pending = geometry_changed || approximate;
+    state->bottom_rebase_pending = geometry_changed;
     state->bottom_reset = false;
     state->bottom_configured = true;
     state->bottom_view_height = viewport;
@@ -3090,6 +3334,8 @@ void PicoChat_UpdateInspectFollowFromUserScroll(PicoHost *app, float wheel_y)
         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatRow"))))
     {
         state->inspect_follow = false;
+        state->inspect_restoring_anchor = false;
+        state->inspect_anchor_valid = false;
     }
 }
 
@@ -4412,6 +4658,8 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
     if (g_inspect_bar.mouse_down)
     {
         g_inspect_follow = false;
+        s_active_chat_state->inspect_restoring_anchor = false;
+        s_active_chat_state->inspect_anchor_valid = false;
     }
     if (!InspectIsTopModal(app))
     {

@@ -14,8 +14,71 @@ static int Near(float actual, float expected)
     return fabsf(actual - expected) <= 0.01f;
 }
 
+/* These convergence cases explicitly opt into background measurement. */
+static void PlanAndRefine(PicoTranscriptVirtual *cache, float top, float viewport,
+                          float overscan, int force, float gap)
+{
+    PicoTranscriptVirtual_Plan(cache, top, viewport, overscan, force, gap);
+    int allowance = 32;
+    static uint64_t frame;
+    PicoTranscriptVirtual_Refine(cache, ++frame, &allowance);
+}
+
+static int TestForegroundAndRefinement(void)
+{
+    PicoTranscriptVirtual cache = {0};
+    const int count = 128;
+    PicoTranscriptVirtual_Begin(&cache, 1, count, 600, 1);
+    float tail = PicoTranscriptVirtual_SpanHeight(&cache, 0, count - 1, 8);
+    PicoTranscriptVirtual_Plan(&cache, tail, 40, 0, count / 2, 8);
+    if (PicoTranscriptVirtual_Mounted(&cache, 0) ||
+        !PicoTranscriptVirtual_Mounted(&cache, count - 1) ||
+        !PicoTranscriptVirtual_Mounted(&cache, count / 2))
+        goto failed;
+    int allowance = 1;
+    PicoTranscriptVirtual_Refine(&cache, 1, &allowance);
+    if (!PicoTranscriptVirtual_Mounted(&cache, 0)) goto failed;
+    PicoTranscriptVirtual_RecordHeight(&cache, 0, 120);
+    /* A correction pass spends the same allowance, not another batch. */
+    PicoTranscriptVirtual_Begin(&cache, 1, count, 600, 1);
+    tail = PicoTranscriptVirtual_SpanHeight(&cache, 0, count - 1, 8);
+    PicoTranscriptVirtual_Plan(&cache, tail, 40, 0, count / 2, 8);
+    PicoTranscriptVirtual_Refine(&cache, 1, &allowance);
+    if (PicoTranscriptVirtual_Mounted(&cache, 1) ||
+        !PicoTranscriptVirtual_Mounted(&cache, count / 2)) goto failed;
+    /* A failed measurement must remain eligible on a later frame. */
+    allowance = 1;
+    PicoTranscriptVirtual_Refine(&cache, 1, &allowance);
+    if (!PicoTranscriptVirtual_Mounted(&cache, 1)) goto failed;
+    PicoTranscriptVirtual_RecordHeight(&cache, 1, 0);
+    PicoTranscriptVirtual_Begin(&cache, 1, count, 600, 1);
+    allowance = 1;
+    PicoTranscriptVirtual_Refine(&cache, 1, &allowance);
+    if (!PicoTranscriptVirtual_Mounted(&cache, 1)) goto failed;
+    /* A revision changed after mounting cannot be cleaned by old geometry. */
+    PicoTranscriptVirtual_Begin(&cache, 2, count, 600, 1);
+    PicoTranscriptVirtual_SetRevision(&cache, count - 1, 1);
+    PicoTranscriptVirtual_Plan(&cache, tail, 40, 0, count - 1, 8);
+    float old_height = PicoTranscriptVirtual_ItemHeight(&cache, count - 1);
+    PicoTranscriptVirtual_SetRevision(&cache, count - 1, 2);
+    PicoTranscriptVirtual_RecordHeight(&cache, count - 1, old_height + 100);
+    if (PicoTranscriptVirtual_ViewportReady(&cache) ||
+        !Near(PicoTranscriptVirtual_ItemHeight(&cache, count - 1), old_height)) goto failed;
+    PicoTranscriptVirtual_Begin(&cache, 2, count, 600, 1);
+    PicoTranscriptVirtual_Plan(&cache, tail, 40, 0, count - 1, 8);
+    for (int i = 0; i < count; i++)
+        if (PicoTranscriptVirtual_Mounted(&cache, i)) PicoTranscriptVirtual_RecordHeight(&cache, i, old_height);
+    if (!PicoTranscriptVirtual_ViewportReady(&cache) || !cache.measure_all) goto failed;
+    PicoTranscriptVirtual_Free(&cache);
+    return 0;
+failed:
+    PicoTranscriptVirtual_Free(&cache);
+    return Fail("foreground planning, shared admission and failed-height retry must stay independent");
+}
+
 int main(void)
 {
+    if (TestForegroundAndRefinement()) return 1;
     PicoTranscriptVirtual cache = {0};
     /* An empty initial layout has no allocated tree. */
     PicoTranscriptVirtual_Begin(&cache, 1, 0, 600.0f, 1.0f);
@@ -27,7 +90,7 @@ int main(void)
     {
         PicoTranscriptVirtual_SetRevision(&cache, i, (uint64_t)(100 + i));
     }
-    PicoTranscriptVirtual_Plan(&cache, 0.0f, 80.0f, 0.0f, -1, gap);
+    PlanAndRefine(&cache, 0.0f, 80.0f, 0.0f, -1, gap);
     if (!PicoTranscriptVirtual_Mounted(&cache, 0) ||
         !PicoTranscriptVirtual_Mounted(&cache, 1) ||
         !PicoTranscriptVirtual_Mounted(&cache, 2))
@@ -72,7 +135,7 @@ int main(void)
     {
         PicoTranscriptVirtual_SetRevision(&cache, i, (uint64_t)(100 + i));
     }
-    PicoTranscriptVirtual_Plan(&cache, 60.0f, 50.0f, 0.0f, -1, gap);
+    PlanAndRefine(&cache, 60.0f, 50.0f, 0.0f, -1, gap);
     if (PicoTranscriptVirtual_Mounted(&cache, 0) ||
         !PicoTranscriptVirtual_Mounted(&cache, 1) ||
         PicoTranscriptVirtual_Mounted(&cache, 2))
@@ -92,7 +155,7 @@ int main(void)
     PicoTranscriptVirtual_SetRevision(&cache, 0, 999);
     PicoTranscriptVirtual_SetRevision(&cache, 1, 101);
     PicoTranscriptVirtual_SetRevision(&cache, 2, 102);
-    PicoTranscriptVirtual_Plan(&cache, 170.0f, 20.0f, 0.0f, -1, gap);
+    PlanAndRefine(&cache, 170.0f, 20.0f, 0.0f, -1, gap);
     if (!PicoTranscriptVirtual_Mounted(&cache, 0) ||
         PicoTranscriptVirtual_Mounted(&cache, 1) ||
         !PicoTranscriptVirtual_Mounted(&cache, 2))
@@ -106,7 +169,7 @@ int main(void)
     PicoTranscriptVirtual_SetRevision(&cache, 0, 999);
     PicoTranscriptVirtual_SetRevision(&cache, 1, 101);
     PicoTranscriptVirtual_SetRevision(&cache, 2, 102);
-    PicoTranscriptVirtual_Plan(&cache, 170.0f, 20.0f, 0.0f, 1, gap);
+    PlanAndRefine(&cache, 170.0f, 20.0f, 0.0f, 1, gap);
     if (!PicoTranscriptVirtual_Mounted(&cache, 1))
     {
         PicoTranscriptVirtual_Free(&cache);
@@ -118,7 +181,7 @@ int main(void)
     {
         PicoTranscriptVirtual_SetRevision(&cache, i, (uint64_t)(200 + i));
     }
-    PicoTranscriptVirtual_Plan(&cache, 170.0f, 20.0f, 0.0f, -1, gap);
+    PlanAndRefine(&cache, 170.0f, 20.0f, 0.0f, -1, gap);
     if (!cache.measure_all || !PicoTranscriptVirtual_Mounted(&cache, 0) ||
         !PicoTranscriptVirtual_Mounted(&cache, 1) ||
         !PicoTranscriptVirtual_Mounted(&cache, 2))
@@ -158,7 +221,7 @@ int main(void)
         {
             PicoTranscriptVirtual_Begin(&cache, 21, rows, 600.0f, 1.0f);
         }
-        PicoTranscriptVirtual_Plan(&cache, 0.0f, frames == 1 ? 0.0f : 80.0f,
+        PlanAndRefine(&cache, 0.0f, frames == 1 ? 0.0f : 80.0f,
                                    0.0f, rows - 1, gap);
         int mounted = 0;
         for (int i = 0; i < rows; i++)
@@ -186,7 +249,7 @@ int main(void)
     {
         PicoTranscriptVirtual_SetRevision(&cache, i, (uint64_t)(i + 1));
     }
-    PicoTranscriptVirtual_Plan(&cache, 0.0f, 80.0f, 0.0f, -1, gap);
+    PlanAndRefine(&cache, 0.0f, 80.0f, 0.0f, -1, gap);
     float estimated = PicoTranscriptVirtual_SpanHeight(&cache, 0, 1, gap) - gap;
     if (!cache.measure_all || PicoTranscriptVirtual_Mounted(&cache, rows / 2) ||
         !Near(PicoTranscriptVirtual_AnchorDelta(&cache, 0, estimated + 40.0f,
@@ -204,7 +267,7 @@ int main(void)
     PicoTranscriptVirtual_Begin(&cache, 44, 256, 600.0f, 1.0f);
     PicoTranscriptVirtual_SetRevision(&cache, 240, 1);
     PicoTranscriptVirtual_SetRevision(&cache, 120, 1);
-    PicoTranscriptVirtual_Plan(&cache, 0.0f, 40.0f, 0.0f, 199, gap);
+    PlanAndRefine(&cache, 0.0f, 40.0f, 0.0f, 199, gap);
     if (PicoTranscriptVirtual_MountedCount(&cache) != 4 ||
         PicoTranscriptVirtual_MountedIndex(&cache, 0) != 0 ||
         PicoTranscriptVirtual_MountedIndex(&cache, 1) != 120 ||
@@ -218,7 +281,7 @@ int main(void)
     PicoTranscriptVirtual_RecordHeight(&cache, 120, 100.0f);
     PicoTranscriptVirtual_RecordHeight(&cache, 240, 70.0f);
     PicoTranscriptVirtual_Begin(&cache, 44, 256, 600.0f, 1.0f);
-    PicoTranscriptVirtual_Plan(&cache, 0.0f, 40.0f, 0.0f, 199, gap);
+    PlanAndRefine(&cache, 0.0f, 40.0f, 0.0f, 199, gap);
     if (PicoTranscriptVirtual_MountedCount(&cache) != 2 ||
         !Near(PicoTranscriptVirtual_AnchorDelta(&cache, 120, 110.0f, 9000.0f, gap), 10.0f))
     {

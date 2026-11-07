@@ -4220,6 +4220,7 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
         }
     }
     PicoSidebar_BeginLayout(app);
+    PicoChat_BeginLayout(app);
     Clay_BeginLayout();
     PicoBrowser_BeginLayout(app);
     app->session_load_row_known = false;
@@ -4593,6 +4594,7 @@ void PicoHost_Frame(PicoHost *app)
         return;
     }
     app->frame_presented = false;
+    PicoChat_BeginFrame(app);
     double now = GetTime();
     float frame_dt = app->frame_at > 0.0 ? (float)(now - app->frame_at) : GetFrameTime();
     if (frame_dt < 0.0f)
@@ -4629,17 +4631,21 @@ void PicoHost_Frame(PicoHost *app)
     app->window_minimized = minimized;
     Vector2 mouse_delta = GetMouseWheelMoveV();
     Vector2 movement = GetMouseDelta();
+    bool interacting = movement.x != 0.0f || movement.y != 0.0f ||
+                       mouse_delta.x != 0.0f || mouse_delta.y != 0.0f;
     if (movement.x != 0.0f || movement.y != 0.0f || mouse_delta.x != 0.0f || mouse_delta.y != 0.0f)
         pico_host_request_redraw(app);
     for (int key = 0; key < 512; key++)
         if (IsKeyPressed(key) || IsKeyReleased(key) || IsKeyPressedRepeat(key))
         {
+            interacting = true;
             pico_host_request_redraw(app);
             break;
         }
     for (int button = 0; button < 7; button++)
         if (IsMouseButtonPressed(button) || IsMouseButtonReleased(button) || IsMouseButtonDown(button))
         {
+            interacting = true;
             pico_host_request_redraw(app);
             break;
         }
@@ -4777,7 +4783,10 @@ void PicoHost_Frame(PicoHost *app)
         if (data.found && data.scrollPosition &&
             (previous_scroll[i].x != data.scrollPosition->x ||
              previous_scroll[i].y != data.scrollPosition->y))
+        {
+            interacting = true;
             pico_host_request_redraw(app);
+        }
     }
     if (pane_wheel)
     {
@@ -4797,6 +4806,8 @@ void PicoHost_Frame(PicoHost *app)
      * scroll state persist across pumps, so next pump's hit queries keep
      * using the last computed bounds. Extension on_frame callbacks and all
      * pre-layout pumping above still run at the normal cadence. */
+    PicoChat_PrepareRefinement(app, interacting || bar_drag || app->chat_sel.mouse_selecting ||
+                              app->ui_drag_active || app->find.field.dragging);
     if (MdView_ImagesChanged()) pico_host_request_redraw(app);
     if (!app->redraw_requested && !app->ui_relayout_requested)
         return;
@@ -4952,6 +4963,14 @@ void PicoHost_Frame(PicoHost *app)
         return;
     }
 
+    /* A bounded correction may still be filling an underestimated viewport.
+     * Keep the last presented buffer rather than flash missing/dirty rows. */
+    if (!PicoChat_ViewportReady(app, relayout))
+    {
+        app->ui_relayout_requested = true;
+        pico_host_request_redraw_after(app, 0.001);
+        return;
+    }
     if (!app->redraw_requested)
         return;
     app->redraw_requested = false;
@@ -4971,4 +4990,5 @@ void PicoHost_Frame(PicoHost *app)
     if (restore_vsync)
         glfwSwapInterval(IsWindowState(FLAG_VSYNC_HINT) ? 1 : 0);
     app->frame_presented = true;
+    PicoChat_DidPresent(app);
 }

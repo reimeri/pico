@@ -315,7 +315,16 @@ static void Bounds(Clay_BoundingBox box, Clay_ElementId horizontal, bool tempora
 void PicoChatFind_MountTargets(PicoHost *app, PicoTranscriptVirtual *cache, float gap)
 {
     PicoChatFind *f = &app->find;
-    if (!f->open || (!f->nearest && !f->reveal)) return;
+    if (!f->open) return;
+    /* Search indexes retained display text, including trace labels. A query
+     * explicitly needs cold/changed rows even when they are not in view;
+     * never report missing matches merely because idle refinement has not
+     * reached them yet. Selection/search demand is foreground work. */
+    if (f->field.length > 0)
+        for (int i = 0; i < cache->count && i < f->search.message_count; i++)
+            if (!f->search.messages[i].text || cache->dirty[i])
+                PicoTranscriptVirtual_ForceMount(cache, i);
+    if (!f->nearest && !f->reveal) return;
     PicoChatSearch_Refresh(&f->search);
     if (!f->nearest)
     {

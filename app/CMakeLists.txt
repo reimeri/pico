@@ -1179,6 +1179,9 @@ if(BUILD_TESTING)
             -Wl,--wrap=glfwGetPlatform -Wl,--wrap=GetClipboardText -Wl,--wrap=SetClipboardText -Wl,--wrap=glfwPostEmptyEvent)
     endif()
     add_test(NAME pico_host_workspace_tests COMMAND pico_host_workspace_tests)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME pico_transcript_refinement_tests COMMAND pico_host_workspace_tests --cold-refinement)
+    endif()
 endif()
 
 set(_pico_ref_builtins

@@ -667,6 +667,16 @@ static bool CaptureChatStabilitySnapshot(bool with_sidebar, ChatStabilitySnapsho
     return true;
 }
 
+static bool ChatShellBoundsStable(const ChatStabilitySnapshot *a,
+                                 const ChatStabilitySnapshot *b, bool with_sidebar)
+{
+    return ShellBoxStable(a->root, b->root) && ShellBoxStable(a->body, b->body) &&
+           (!with_sidebar || ShellBoxStable(a->sidebar, b->sidebar)) &&
+           ShellBoxStable(a->right, b->right) && ShellBoxStable(a->main, b->main) &&
+           ShellBoxStable(a->chat, b->chat) && ShellBoxStable(a->composer, b->composer) &&
+           ShellBoxStable(a->footer, b->footer);
+}
+
 static bool ChatStabilitySnapshotStable(const ChatStabilitySnapshot *a,
                                         const ChatStabilitySnapshot *b,
                                         bool with_sidebar)
@@ -685,10 +695,18 @@ static bool ChatStabilitySnapshotStable(const ChatStabilitySnapshot *a,
 
 static void LayoutChatStabilityFrame(PicoHost *host, const Clay_Dimensions viewport)
 {
+    PicoChat_BeginFrame(host);
     Clay_SetLayoutDimensions(viewport);
     Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
-    (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
-    PicoChat_HarvestVirtualHeights(host);
+    bool relayout = false;
+    for (int pass = 0; pass < 4; pass++)
+    {
+        (void)PicoHost_LayoutShell(host, viewport.height, pass ? 0 : 1.0f / 60.0f);
+        PicoChat_HarvestVirtualHeights(host);
+        relayout = PicoChat_TakeVirtualRelayout();
+        if (!relayout) break;
+    }
+    if (PicoChat_ViewportReady(host, relayout)) PicoChat_DidPresent(host);
 }
 
 static int CheckChatViewportWrapping(PicoHost *host, PicoAgent *agent)
@@ -1272,19 +1290,20 @@ static int RunChatRetainedSpacerCase(bool with_sidebar)
     }
 
     /* Replacing all messages without changing the count must discard heights
-     * for offscreen rows too, not just for the visible last message. */
+     * for offscreen rows too, not just for the visible last message. Let idle
+     * refinement complete before comparing exact full-history extents. */
     host->chat_follow_bottom = false;
     PicoHost_ClearMessages(host, agent_id);
     for (int i = 0; i < 100; i++)
         PicoAgent_AddMessage(host, agent, PICO_ROLE_USER, "short");
-    for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+    for (int frame = 0; frame < agent->message_count * 2; frame++) LayoutChatStabilityFrame(host, viewport);
     Clay_ScrollContainerData old_scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     float old_height = old_scroll.contentDimensions.height;
     PicoHost_ClearMessages(host, agent_id);
     for (int i = 0; i < 100; i++)
         PicoAgent_AddMessage(host, agent, PICO_ROLE_USER,
                              "longer paragraph\n\nlonger paragraph\n\nlonger paragraph\n\nlonger paragraph");
-    for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+    for (int frame = 0; frame < agent->message_count * 2; frame++) LayoutChatStabilityFrame(host, viewport);
     Clay_ScrollContainerData new_scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     if (!old_scroll.found || !new_scroll.found ||
         new_scroll.contentDimensions.height <= old_height * 1.5f)
@@ -2943,7 +2962,9 @@ static int RunDockPanelShellCase(bool with_sidebar, bool changes)
             if (frame == 30) {
                 expected = current; expected_panel = panel.boundingBox;
                 expected_scroll = content.boundingBox; expected_strip = strip;
-            } else if (frame > 30 && (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+            } else if (frame > 30 && (!ChatShellBoundsStable(&expected, &current, with_sidebar) ||
+                !ShellBoxStable(expected.bottom, current.bottom) ||
+                fabsf(current.scroll_y - fminf(0, current.container_height - current.content_height)) > 0.01f ||
                 !ShellBoxStable(expected_strip, strip) ||
                 (panel.found && (!ShellBoxStable(expected_panel, panel.boundingBox) ||
                                  !ShellBoxStable(expected_scroll, content.boundingBox))))) goto done;
@@ -2966,11 +2987,13 @@ static int RunSettingsPanelShellCase(bool with_sidebar)
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static int RunToolGroupReleaseCase(bool with_sidebar, bool follow);
+static int TestColdTranscriptRefinement(bool with_sidebar);
 #endif
 
 static int TestBottomFollowShellGeometryStable(void)
 {
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (TestColdTranscriptRefinement(false) || TestColdTranscriptRefinement(true)) return 1;
     if (RunToolGroupReleaseCase(false, false) || RunToolGroupReleaseCase(true, false) ||
         RunToolGroupReleaseCase(false, true) || RunToolGroupReleaseCase(true, true)) return 1;
 #endif
@@ -4615,7 +4638,8 @@ static int RunExpandedToolFoldCase(bool with_sidebar)
         agent->messages[tool_message].trace[0].tool_done_t0 = pico_trace_now();
         host->chat_follow_bottom = true;
         PicoChat_ResetBottomSpace(host);
-        for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+        /* This case isolates folding, not changing offscreen estimates. */
+        for (int frame = 0; frame < agent->message_count * 2; frame++) LayoutChatStabilityFrame(host, viewport);
         Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
         Clay_ElementData tool = Clay_GetElementData(CLAY_IDI("MsgMain", tool_message));
         if (!scroll.found || !scroll.scrollPosition || !tool.found ||
@@ -4668,7 +4692,7 @@ static int RunExpandedToolFoldCase(bool with_sidebar)
     PicoAgent_SetToolOutputByCallId(agent, "fold-output", output, false, NULL);
     agent->messages[tool_message].trace[0].tool_done_t0 = pico_trace_now();
     host->chat_follow_bottom = true;
-    for (int frame = 0; frame < 8; frame++) LayoutChatStabilityFrame(host, viewport);
+    for (int frame = 0; frame < agent->message_count * 2; frame++) LayoutChatStabilityFrame(host, viewport);
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     host->chat_follow_bottom = false;
     scroll.scrollPosition->y = output_read_y;
@@ -18404,6 +18428,8 @@ static void InteractionFixtureFree(InteractionFixture *f)
     RmRf(f->dir); RmRf(f->cfg);
 }
 
+#include "transcript_refinement_test.c"
+
 #include "layout_invalidation_test.c"
 
 static int TestShellStripSettings(void)
@@ -21284,17 +21310,16 @@ static int RunToolGroupReleaseCase(bool with_sidebar, bool follow)
             phase = "presented geometry remains stable";
             ChatStabilitySnapshot expected;
             if (!CaptureChatStabilitySnapshot(with_sidebar, &expected)) goto done;
-            Clay_ElementData thumb = Clay_GetElementData(CLAY_ID("ChatScrollBarHandle"));
+            Clay_ElementData expected_group = Clay_GetElementData(MainTraceRowId(group_index, 0, "TraceGroupRow"));
             for (int frame = 0; frame < 8; frame++)
             {
                 pico_host_request_redraw(f.host);
                 PicoHost_Frame(f.host);
                 ChatStabilitySnapshot current;
-                Clay_ElementData next_thumb = Clay_GetElementData(CLAY_ID("ChatScrollBarHandle"));
+                Clay_ElementData current_group = Clay_GetElementData(MainTraceRowId(group_index, 0, "TraceGroupRow"));
                 if (!CaptureChatStabilitySnapshot(with_sidebar, &current) ||
-                    !ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
-                    thumb.found != next_thumb.found ||
-                    (thumb.found && !ShellBoxStable(thumb.boundingBox, next_thumb.boundingBox)))
+                    !ChatShellBoundsStable(&expected, &current, with_sidebar) ||
+                    !current_group.found || !ShellBoxStable(expected_group.boundingBox, current_group.boundingBox))
                     goto done;
             }
         }
@@ -21381,35 +21406,6 @@ done:
     g_find_wheel = (Vector2){0};
     InteractionFixtureFree(&f);
     if (!good) Fail("inspect group release must update its rows and scrollbar in the release frame");
-    return good ? 0 : 1;
-}
-
-static int TestDeferredTranscriptLayoutPresentsWithoutInput(void)
-{
-    InteractionFixture f = {0};
-    bool good = false;
-    if (!InteractionFixtureInit(&f)) goto done;
-    f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
-    f.host->chat_follow_bottom = false;
-    PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
-    for (int i = 0; i < 600; i++)
-        PicoAgent_AddMessage(f.host, agent, PICO_ROLE_ASSISTANT, "Cold history");
-    pico_host_request_redraw(f.host);
-    PicoHost_Frame(f.host);
-    int initial_presentations = g_presented_frames;
-    for (int i = 0; i < 32; i++) PicoHost_Frame(f.host);
-    if (g_presented_frames <= initial_presentations) goto done;
-    ChatStabilitySnapshot settled, forced;
-    if (!CaptureChatStabilitySnapshot(false, &settled)) goto done;
-    /* A later unrelated redraw must not finally repair unfinished measuring. */
-    pico_host_request_redraw(f.host);
-    PicoHost_Frame(f.host);
-    if (!CaptureChatStabilitySnapshot(false, &forced) ||
-        !ChatStabilitySnapshotStable(&settled, &forced, false)) goto done;
-    good = true;
-done:
-    InteractionFixtureFree(&f);
-    if (!good) Fail("deferred transcript measurement must finish and present without another input event");
     return good ? 0 : 1;
 }
 
@@ -21977,13 +21973,20 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestSessionScrollBookmarks())) return 1;
 #endif
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (argc == 2 && strcmp(argv[1], "--cold-refinement") == 0)
+        return PICO_TEST_RUN(TestColdTranscriptRefinement(false)) ||
+               PICO_TEST_RUN(TestColdTranscriptRefinement(true)) ||
+               PICO_TEST_RUN(TestRefinementScheduling()) ||
+               PICO_TEST_RUN(TestReadingAnchorDuringRefinement()) ||
+               PICO_TEST_RUN(TestInspectRefinementReflow()) ||
+               PICO_TEST_RUN(TestRefinementAfterLayoutMutation());
     if (argc == 2 && strcmp(argv[1], "--layout-invalidation") == 0)
         return TestLayoutInvalidation();
     if (argc == 1 && TestLayoutInvalidation()) return 1;
     if (argc == 2 && strcmp(argv[1], "--shell-geometry") == 0)
         return PICO_TEST_RUN(TestBottomFollowShellGeometryStable());
     if (argc == 2 && strcmp(argv[1], "--tool-group-release") == 0)
-        return TestInspectGroupReleaseUpdatesScrollbar() || TestDeferredTranscriptLayoutPresentsWithoutInput() || RunToolGroupReleaseCase(false, false) || RunToolGroupReleaseCase(true, false) ||
+        return TestInspectGroupReleaseUpdatesScrollbar() || TestColdTranscriptRefinement(false) || RunToolGroupReleaseCase(false, false) || RunToolGroupReleaseCase(true, false) ||
                RunToolGroupReleaseCase(false, true) || RunToolGroupReleaseCase(true, true);
     if (argc == 2 && strcmp(argv[1], "--question-panel") == 0)
         return PICO_TEST_RUN(RunQuestionPanelShellCase(false)) || PICO_TEST_RUN(RunQuestionPanelShellCase(true));
@@ -22085,7 +22088,10 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestExtensionSourceIdentity()) ||
         PICO_TEST_RUN(TestExtensionPendingRollbackCapacity())) return 1;
     if (PICO_TEST_RUN(TestInspectGroupReleaseUpdatesScrollbar())) return 1;
-    if (PICO_TEST_RUN(TestDeferredTranscriptLayoutPresentsWithoutInput())) return 1;
+    if (PICO_TEST_RUN(TestRefinementScheduling()) ||
+        PICO_TEST_RUN(TestReadingAnchorDuringRefinement()) ||
+        PICO_TEST_RUN(TestInspectRefinementReflow()) ||
+        PICO_TEST_RUN(TestRefinementAfterLayoutMutation())) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
         PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarModesAndPicker()) ||

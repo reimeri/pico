@@ -9,9 +9,14 @@ typedef struct PicoTranscriptVirtual {
     double *height_tree; /* Fenwick index of effective heights (including estimates). */
     uint64_t *revisions;
     unsigned char *dirty;
+    uint32_t *required_stamps;
+    uint64_t *mount_revisions;
     uint32_t *mount_stamps;
     int *mount_indices;
     int mount_count;
+    int *refinement_indices;
+    int refinement_count;
+    uint64_t refinement_frame;
     uint32_t mount_epoch;
     bool mount_sorted;
     int *dirty_next;
@@ -28,6 +33,9 @@ typedef struct PicoTranscriptVirtual {
     float font_scale;
     bool configured;
     bool measure_all;
+    int cold_count; /* Rows present when this geometry was invalidated. */
+    bool viewport_known;
+    bool presented; /* This identity/geometry has reached a valid presentation. */
     float last_scroll_y;
     bool scroll_position_known;
 } PicoTranscriptVirtual;
@@ -40,6 +48,9 @@ void PicoTranscriptVirtual_SetRevision(PicoTranscriptVirtual *cache, int index,
 void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
                                 float viewport_height, float overscan,
                                 int force_index, float message_gap);
+/* Add optional offscreen work, spending the caller's shared allowance.
+ * Viewport and explicit targets are always planned independently of it. */
+void PicoTranscriptVirtual_Refine(PicoTranscriptVirtual *cache, uint64_t frame, int *remaining);
 void PicoTranscriptVirtual_ForceMount(PicoTranscriptVirtual *cache, int index);
 bool PicoTranscriptVirtual_Mounted(const PicoTranscriptVirtual *cache, int index);
 /* Sorted mounted indices for spacer emission and height harvesting. */
@@ -58,6 +69,7 @@ float PicoTranscriptVirtual_AnchorDelta(const PicoTranscriptVirtual *cache,
                                         float scroll_top, float message_gap);
 void PicoTranscriptVirtual_RecordHeight(PicoTranscriptVirtual *cache, int index,
                                         float height);
+bool PicoTranscriptVirtual_ViewportReady(const PicoTranscriptVirtual *cache);
 void PicoTranscriptVirtual_FinishMeasure(PicoTranscriptVirtual *cache);
 
 #endif

@@ -4,7 +4,6 @@
 #include <string.h>
 
 #define PICO_TRANSCRIPT_ESTIMATED_HEIGHT 96.0f
-#define PICO_TRANSCRIPT_BACKGROUND_BATCH 32
 
 static bool SameGeometry(const PicoTranscriptVirtual *cache, float width, float font_scale)
 {
@@ -26,21 +25,27 @@ static bool Reserve(PicoTranscriptVirtual *cache, int count)
     double *tree = (double *)calloc((size_t)capacity + 1, sizeof(double));
     uint64_t *revisions = (uint64_t *)calloc((size_t)capacity, sizeof(uint64_t));
     unsigned char *dirty = (unsigned char *)calloc((size_t)capacity, 1);
+    uint32_t *required_stamps = (uint32_t *)calloc((size_t)capacity, sizeof(*required_stamps));
+    uint64_t *mount_revisions = (uint64_t *)calloc((size_t)capacity, sizeof(*mount_revisions));
     uint32_t *mount_stamps = (uint32_t *)calloc((size_t)capacity, sizeof(*mount_stamps));
+    int *refinement_indices = (int *)malloc((size_t)capacity * sizeof(*refinement_indices));
     int *mount_indices = (int *)malloc((size_t)capacity * sizeof(*mount_indices));
     int *dirty_next = (int *)malloc((size_t)capacity * sizeof(*dirty_next));
     int *dirty_prev = (int *)malloc((size_t)capacity * sizeof(*dirty_prev));
     int *timed_indices = (int *)malloc((size_t)capacity * sizeof(*timed_indices));
     int *timed_positions = (int *)calloc((size_t)capacity, sizeof(*timed_positions));
-    if (!heights || !tree || !revisions || !dirty || !mount_stamps ||
-        !mount_indices || !dirty_next || !dirty_prev ||
+    if (!heights || !tree || !revisions || !dirty || !required_stamps || !mount_revisions || !mount_stamps ||
+        !refinement_indices || !mount_indices || !dirty_next || !dirty_prev ||
         !timed_indices || !timed_positions)
     {
         free(heights);
         free(tree);
         free(revisions);
         free(dirty);
+        free(required_stamps);
+        free(mount_revisions);
         free(mount_stamps);
+        free(refinement_indices);
         free(mount_indices);
         free(dirty_next);
         free(dirty_prev);
@@ -53,7 +58,10 @@ static bool Reserve(PicoTranscriptVirtual *cache, int count)
         memcpy(heights, cache->heights, (size_t)cache->capacity * sizeof(float));
         memcpy(revisions, cache->revisions, (size_t)cache->capacity * sizeof(uint64_t));
         memcpy(dirty, cache->dirty, (size_t)cache->capacity);
+        memcpy(required_stamps, cache->required_stamps, (size_t)cache->capacity * sizeof(*required_stamps));
+        memcpy(mount_revisions, cache->mount_revisions, (size_t)cache->capacity * sizeof(*mount_revisions));
         memcpy(mount_stamps, cache->mount_stamps, (size_t)cache->capacity * sizeof(*mount_stamps));
+        memcpy(refinement_indices, cache->refinement_indices, (size_t)cache->refinement_count * sizeof(*refinement_indices));
         memcpy(mount_indices, cache->mount_indices, (size_t)cache->mount_count * sizeof(*mount_indices));
         memcpy(dirty_next, cache->dirty_next, (size_t)cache->capacity * sizeof(*dirty_next));
         memcpy(dirty_prev, cache->dirty_prev, (size_t)cache->capacity * sizeof(*dirty_prev));
@@ -65,7 +73,10 @@ static bool Reserve(PicoTranscriptVirtual *cache, int count)
     free(cache->height_tree);
     free(cache->revisions);
     free(cache->dirty);
+    free(cache->required_stamps);
+    free(cache->mount_revisions);
     free(cache->mount_stamps);
+    free(cache->refinement_indices);
     free(cache->mount_indices);
     free(cache->dirty_next);
     free(cache->dirty_prev);
@@ -81,7 +92,10 @@ static bool Reserve(PicoTranscriptVirtual *cache, int count)
     }
     cache->revisions = revisions;
     cache->dirty = dirty;
+    cache->required_stamps = required_stamps;
+    cache->mount_revisions = mount_revisions;
     cache->mount_stamps = mount_stamps;
+    cache->refinement_indices = refinement_indices;
     cache->mount_indices = mount_indices;
     cache->dirty_next = dirty_next;
     cache->dirty_prev = dirty_prev;
@@ -101,7 +115,10 @@ void PicoTranscriptVirtual_Free(PicoTranscriptVirtual *cache)
     free(cache->height_tree);
     free(cache->revisions);
     free(cache->dirty);
+    free(cache->required_stamps);
+    free(cache->mount_revisions);
     free(cache->mount_stamps);
+    free(cache->refinement_indices);
     free(cache->mount_indices);
     free(cache->dirty_next);
     free(cache->dirty_prev);
@@ -166,7 +183,8 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
     }
 
     bool reset = !cache->configured || cache->identity != identity ||
-                 count < cache->count || !SameGeometry(cache, width, font_scale);
+                 count < cache->count || (count > 0 && cache->count == 0) ||
+                 !SameGeometry(cache, width, font_scale);
     int old_count = reset ? 0 : cache->count;
     if (reset)
     {
@@ -179,6 +197,9 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
             memset(cache->dirty, 0, (size_t)count);
         }
         cache->measure_all = count > 0;
+        cache->cold_count = count;
+        cache->presented = false;
+        cache->refinement_count = 0;
         cache->dirty_head = cache->dirty_tail = -1;
         cache->dirty_count = 0;
         cache->seen_change_seq = 0;
@@ -203,10 +224,12 @@ void PicoTranscriptVirtual_Begin(PicoTranscriptVirtual *cache, uint64_t identity
         for (int i = old_count; i < count; i++)
             HeightChange(cache, i, PICO_TRANSCRIPT_ESTIMATED_HEIGHT);
     }
+    cache->viewport_known = false;
     cache->mount_count = 0;
     cache->mount_sorted = true;
     if (++cache->mount_epoch == 0)
     {
+        memset(cache->required_stamps, 0, (size_t)cache->capacity * sizeof(*cache->required_stamps));
         memset(cache->mount_stamps, 0, (size_t)cache->capacity * sizeof(*cache->mount_stamps));
         cache->mount_epoch = 1;
     }
@@ -259,6 +282,7 @@ void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
     {
         return;
     }
+    cache->viewport_known = viewport_height > 0.5f;
     if (scroll_top < 0.0f)
     {
         scroll_top = 0.0f;
@@ -293,24 +317,48 @@ void PicoTranscriptVirtual_Plan(PicoTranscriptVirtual *cache, float scroll_top,
     }
     if (force_index >= 0 && force_index < cache->count)
         PicoTranscriptVirtual_ForceMount(cache, force_index);
-    /* Visible/forced rows are never delayed. Measure the oldest offscreen
-     * invalidations, without searching through clean history. Do not dequeue
-     * until Harvest records a valid height: unsuccessful mounts retry. */
-    int budget = PICO_TRANSCRIPT_BACKGROUND_BATCH;
-    for (int i = cache->dirty_head; i >= 0 && budget > 0; i = cache->dirty_next[i])
+}
+
+void PicoTranscriptVirtual_Refine(PicoTranscriptVirtual *cache, uint64_t frame, int *remaining)
+{
+    if (!cache || !remaining) return;
+    if (cache->refinement_frame != frame)
+    {
+        cache->refinement_count = 0;
+        cache->refinement_frame = frame;
+    }
+    /* Shell stabilization may rebuild before the host harvests any heights.
+     * Keep previously admitted dirty rows alive without buying more work. */
+    for (int j = 0; j < cache->refinement_count; j++)
+    {
+        int i = cache->refinement_indices[j];
+        if (cache->dirty[i] && !PicoTranscriptVirtual_Mounted(cache, i))
+        {
+            PicoTranscriptVirtual_ForceMount(cache, i);
+            cache->required_stamps[i] = 0;
+        }
+    }
+    /* Admission is separate from viewport planning. The caller owns the
+     * allowance, so reconciliation need not grant another background batch.
+     * Mounting is not completion: only a valid harvested height clears dirty. */
+    for (int i = cache->dirty_head; i >= 0 && *remaining > 0; i = cache->dirty_next[i])
     {
         if (!PicoTranscriptVirtual_Mounted(cache, i))
         {
             PicoTranscriptVirtual_ForceMount(cache, i);
-            budget--;
+            cache->required_stamps[i] = 0;
+            cache->refinement_indices[cache->refinement_count++] = i;
+            (*remaining)--;
         }
     }
 }
 
 void PicoTranscriptVirtual_ForceMount(PicoTranscriptVirtual *cache, int index)
 {
-    if (!cache || index < 0 || index >= cache->count ||
-        cache->mount_stamps[index] == cache->mount_epoch) return;
+    if (!cache || index < 0 || index >= cache->count) return;
+    cache->required_stamps[index] = cache->mount_epoch;
+    if (cache->mount_stamps[index] == cache->mount_epoch) return;
+    cache->mount_revisions[index] = cache->revisions[index];
     cache->mount_stamps[index] = cache->mount_epoch;
     cache->mount_indices[cache->mount_count++] = index;
     cache->mount_sorted = false;
@@ -425,10 +473,27 @@ void PicoTranscriptVirtual_RecordHeight(PicoTranscriptVirtual *cache, int index,
     {
         return;
     }
+    /* Hooks may edit a row after layout and before harvest. Never clean that
+     * invalidation with the preceding revision's geometry. */
+    if (PicoTranscriptVirtual_Mounted(cache, index) &&
+        cache->mount_revisions[index] != cache->revisions[index]) return;
     double old = PicoTranscriptVirtual_ItemHeight(cache, index);
     cache->heights[index] = height;
     HeightChange(cache, index, (double)height - old);
     DirtyRemove(cache, index);
+}
+
+bool PicoTranscriptVirtual_ViewportReady(const PicoTranscriptVirtual *cache)
+{
+    if (!cache || !cache->configured) return false;
+    if (!cache->count) return true;
+    if (!cache->viewport_known) return false;
+    for (int j = 0; j < cache->mount_count; j++)
+    {
+        int i = cache->mount_indices[j];
+        if (cache->required_stamps[i] == cache->mount_epoch && cache->dirty[i]) return false;
+    }
+    return true;
 }
 
 void PicoTranscriptVirtual_FinishMeasure(PicoTranscriptVirtual *cache)

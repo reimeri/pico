@@ -58,9 +58,56 @@ static int TestStringEncoding(void)
     return 0;
 }
 
+/* Session tool payloads contain long ordinary runs separated by escapes.
+ * Check encoding against independent JSON text, then decode that fixture so
+ * matching bugs in encoder and decoder cannot hide each other. */
+static int TestLargeStringSpans(void)
+{
+    const struct { const char *text, *json; } cases[] = {
+        {"", ""},
+        {"\"\\/\b\f\n\r\t\x01\x7f ✓🙂", "\\\"\\\\/\\b\\f\\n\\r\\t\\u0001\x7f ✓🙂"},
+    };
+    const size_t run = 16 * 1024;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        size_t middle = strlen(cases[i].text), escaped = strlen(cases[i].json);
+        size_t text_len = run * 2 + middle, json_len = run * 2 + escaped + 2;
+        char *text = malloc(text_len + 1), *expected = malloc(json_len + 1);
+        if (!text || !expected) { free(text); free(expected); return 1; }
+        memset(text, 'a', run);
+        memcpy(text + run, cases[i].text, middle);
+        memset(text + run + middle, 'z', run);
+        text[text_len] = '\0';
+        expected[0] = '"';
+        memset(expected + 1, 'a', run);
+        memcpy(expected + 1 + run, cases[i].json, escaped);
+        memset(expected + 1 + run + escaped, 'z', run);
+        expected[json_len - 1] = '"';
+        expected[json_len] = '\0';
+
+        JsonBuf buf;
+        JsonBuf_Init(&buf);
+        JsonBuf_String(&buf, text);
+        char *encoded = JsonBuf_Steal(&buf);
+        bool encoded_ok = encoded && strcmp(encoded, expected) == 0;
+        JsonDoc doc;
+        bool parsed = JsonParse(&doc, expected, json_len) == 0;
+        char *decoded = parsed ? JsonStrDup(&doc, 0) : NULL;
+        bool decoded_ok = decoded && strcmp(decoded, text) == 0;
+        if (parsed) JsonFree(&doc);
+        free(encoded); free(decoded); free(text); free(expected);
+        if (!encoded_ok || !decoded_ok)
+        {
+            fprintf(stderr, "Large JSON strings must preserve ordinary runs and adjacent escape/UTF-8 boundaries\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
-    if (TestStringEncoding()) return 1;
+    if (TestStringEncoding() || TestLargeStringSpans()) return 1;
     JsonBuf buf;
     JsonBuf_Init(&buf);
     buf.data = (char *)malloc(64);

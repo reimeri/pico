@@ -234,6 +234,21 @@ void JsonBuf_String(JsonBuf *b, const char *s)
     for (size_t i = 0; i < len; i++)
     {
         unsigned char c = (unsigned char)s[i];
+        if (c >= 0x20 && c < 0x80 && c != '"' && c != '\\')
+        {
+            /* Copy ordinary ASCII together; retain scalar validation below
+             * for UTF-8 and the existing escaping rules for special bytes. */
+            size_t start = i;
+            do
+            {
+                i++;
+                if (i == len) break;
+                c = (unsigned char)s[i];
+            } while (c >= 0x20 && c < 0x80 && c != '"' && c != '\\');
+            JsonBuf_Append(b, s + start, i - start);
+            i--;
+            continue;
+        }
         if (c >= 0x80)
         {
             int bytes = Utf8SequenceLength((const unsigned char *)s + i, len - i);
@@ -755,7 +770,17 @@ char *JsonStrDup(const JsonDoc *doc, int tok)
     JsonBuf_Init(&b);
     for (int i = 0; i < n; i++)
     {
-        if (s[i] == '\\' && i + 1 < n)
+        if (s[i] != '\\')
+        {
+            /* The token is already parsed: only escapes need decoding.
+             * Copy the intervening bytes (including UTF-8) in one append. */
+            const char *escape = memchr(s + i, '\\', (size_t)(n - i));
+            int end = escape ? (int)(escape - s) : n;
+            JsonBuf_Append(&b, s + i, (size_t)(end - i));
+            i = end - 1;
+            continue;
+        }
+        if (i + 1 < n)
         {
             i++;
             switch (s[i])

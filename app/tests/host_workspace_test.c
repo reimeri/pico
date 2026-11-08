@@ -218,7 +218,8 @@ void __wrap_DrawCircleGradient(int x, int y, float radius, Color inner, Color ou
 }
 static int g_mouse_cursor;
 bool __real_IsWindowFocused(void);
-bool __wrap_IsWindowFocused(void) { return g_browser_resize_frame || __real_IsWindowFocused(); }
+static int g_window_focus_override = -1;
+bool __wrap_IsWindowFocused(void) { return g_window_focus_override >= 0 ? g_window_focus_override != 0 : g_browser_resize_frame || __real_IsWindowFocused(); }
 /* Do not let an unrelated persistence worker consume the UI allocation fault. */
 static __thread bool g_fail_frame_allocation;
 static int g_clay_failed_allocations;
@@ -1349,7 +1350,7 @@ done_host:
     return rc;
 }
 
-static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float viewport_width)
+static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float viewport_width, float sidebar_width)
 {
     const Clay_Dimensions viewport = {viewport_width, 1392};
     const int frames = 400;
@@ -1384,6 +1385,7 @@ static int RunShellStabilityCase(bool with_sidebar, bool with_browser, float vie
     memset(&host, 0, sizeof(host));
     memset(&workspace, 0, sizeof(workspace));
     memset(&agent, 0, sizeof(agent));
+    host.sidebar_panel_width = sidebar_width;
     workspace.host = &host;
     workspace.id = 1;
     workspace.state = PICO_WORKSPACE_OPEN;
@@ -3027,21 +3029,25 @@ static int TestBottomFollowShellGeometryStable(void)
 #endif
     if (RunSettingsPanelShellCase(false) || RunSettingsPanelShellCase(true) ||
         RunDockPanelShellCase(false, true) || RunDockPanelShellCase(true, true)) return 1;
-    if (RunShellStabilityCase(false, false, 1714) != 0)
+    if (RunShellStabilityCase(false, false, 1714, 0) != 0)
     {
         return 1;
     }
-    if (RunShellStabilityCase(true, false, 1714) != 0)
+    if (RunShellStabilityCase(true, false, 1714, 0) != 0)
     {
         return 1;
     }
-    if (RunShellStabilityCase(false, true, 1714) != 0 || RunShellStabilityCase(true, true, 1714) != 0)
+    if (RunShellStabilityCase(false, true, 1714, 0) != 0 || RunShellStabilityCase(true, true, 1714, 0) != 0)
         return 1;
     /* Cover a narrow chat and a window where the browser cap wins over its
      * normal minimum, while the find bar still fits in the chat pane. */
-    if (RunShellStabilityCase(true, true, 1000) != 0 ||
-        RunShellStabilityCase(true, true, 800) != 0)
+    if (RunShellStabilityCase(true, true, 1000, 0) != 0 ||
+        RunShellStabilityCase(true, true, 800, 0) != 0)
         return 1;
+    if (RunShellStabilityCase(true, false, 1714, 333.25f) ||
+        RunShellStabilityCase(true, true, 1714, 333.25f) ||
+        RunShellStabilityCase(false, true, 1714, 333.25f) ||
+        RunShellStabilityCase(true, true, 800, 1000)) return 1;
     if (RunChatRetainedSpacerCase(false) != 0)
     {
         return 1;
@@ -19537,6 +19543,7 @@ static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char
 
 #include "subagent_settings_test.c"
 #include "settings_panel_test.c"
+#include "sidebar_resize_test.c"
 #include "diff_panel_test.c"
 
 typedef enum PreferenceAction
@@ -22048,6 +22055,9 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--diff-panel") == 0)
         return PICO_TEST_RUN(TestDiffPanelInteraction()) || PICO_TEST_RUN(TestDiffPanelContext()) || PICO_TEST_RUN(TestDiffFileBands()) || PICO_TEST_RUN(RunDockPanelShellCase(false, true)) ||
                PICO_TEST_RUN(RunDockPanelShellCase(true, true));
+    if (argc == 2 && strcmp(argv[1], "--sidebar-resize") == 0)
+        return PICO_TEST_RUN(TestSidebarResize());
+    if (argc == 1 && PICO_TEST_RUN(TestSidebarResize())) return 1;
     if (argc == 2 && strcmp(argv[1], "--settings-panel") == 0)
         return PICO_TEST_RUN(TestSettingsPanelInteraction()) || PICO_TEST_RUN(TestSettingsPanelResize()) ||
                PICO_TEST_RUN(TestSettingsPanelBrowserSwitch()) || PICO_TEST_RUN(RunSettingsPanelShellCase(false)) ||

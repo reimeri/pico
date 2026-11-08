@@ -1748,7 +1748,7 @@ static void PasteClipboard(PicoComposer *c)
 
 void PicoComposer_HandleInput(PicoHost *app)
 {
-    if (PicoBrowser_BlocksKeyboard(app) || PicoSettingsUi_BlocksKeyboard(app) || PicoDiffUi_BlocksKeyboard(app)) return;
+    if (PicoHost_SidebarResizeBlocksInput(app) || PicoBrowser_BlocksKeyboard(app) || PicoSettingsUi_BlocksKeyboard(app) || PicoDiffUi_BlocksKeyboard(app)) return;
     s_active_composer_state = (ComposerState *)PicoPlugins_HostState(app, "composer");
     if (!s_active_composer_state || PicoUi_QuestionnaireOpen(app) || PicoUi_ModalOpen(app) || PicoChatFind_BlocksInput(app))
     {
@@ -2570,7 +2570,7 @@ static void ConsumeDroppedFiles(PicoHost *app)
         return;
     }
     FilePathList files = LoadDroppedFiles();
-    bool attach = app && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && !PicoClarification_View(app) && PicoHost_SelectedAgent(app) && !PicoUi_QuestionnaireOpen(app) && !PicoUi_ModalOpen(app);
+    bool attach = app && !PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && !PicoClarification_View(app) && PicoHost_SelectedAgent(app) && !PicoUi_QuestionnaireOpen(app) && !PicoUi_ModalOpen(app);
     if (attach && files.paths)
     {
         for (unsigned int i = 0; i < files.count; i++)
@@ -2597,7 +2597,7 @@ static void ComposerFrame(PicoHost *app, void *state, float dt)
     }
     PicoComposer_HandleInput(app);
     UpdatePreviewDisplay();
-    if (!PicoUi_ModalOpen(app))
+    if (!PicoUi_ModalOpen(app) && !PicoHost_SidebarResizeBlocksInput(app))
     {
         UpdateComposerScrollbarDrag(app);
     }

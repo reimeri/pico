@@ -405,6 +405,7 @@ void PicoSettingsUi_Input(PicoHost *host)
     SettingsState *s = s_active_settings_state;
     bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || click) s->pointer_claimed = false;
+    if (PicoHost_SidebarResizeBlocksInput(host)) return;
     if (!s->open) return;
     bool available = host->window_focused && !host->window_minimized && !PicoUi_ModalOpen(host);
     if (!available) {
@@ -2390,10 +2391,11 @@ static void SettingsOnFrame(PicoHost *app, void *state, float dt)
     s = s_active_settings_state;
     if (s->save)
     {
-        if (s->focused) while (GetCharPressed() != 0) {}
+        if (s->focused && !PicoHost_SidebarResizeBlocksInput(app)) while (GetCharPressed() != 0) {}
         pico_host_request_redraw_after(app, 1.0 / 30.0);
         return;
     }
+    if (PicoHost_SidebarResizeBlocksInput(app)) return;
     if (PicoUi_ModalOpen(app) && !pico_ui_modal_is_top(app, "settings-confirm"))
     {
         CancelModelDrag(s);

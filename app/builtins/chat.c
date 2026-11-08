@@ -3974,7 +3974,7 @@ static void InspectHandlePointer(PicoHost *app)
 void PicoChat_HandleToolRelease(PicoHost *app)
 {
     PicoAgent *active = PicoHost_TranscriptAgent(app);
-    if (!app || !active || IsMouseButtonDown(MOUSE_BUTTON_LEFT) || app->status_warn || PicoUi_ModalOpen(app) ||
+    if (!app || PicoHost_SidebarResizeBlocksInput(app) || !active || IsMouseButtonDown(MOUSE_BUTTON_LEFT) || app->status_warn || PicoUi_ModalOpen(app) ||
         !app->chat_sel.mouse_selecting || app->chat_sel.dragging || !app->chat_sel.pressed_tool ||
         app->chat_sel.tool_msg < 0 || app->chat_sel.tool_msg >= active->message_count)
     {
@@ -4023,6 +4023,7 @@ void PicoChat_HandlePointer(PicoHost *app, const PicoHookEvent *event, void *sta
         PicoChatSel_Clear(app);
         return;
     }
+    if (PicoHost_SidebarResizeBlocksInput(app)) return;
     InspectHandlePointer(app);
     InspectFollowScroll();
     PicoChatSel_Clamp(app);
@@ -4644,6 +4645,7 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
     }
     const PicoAgent *active = PicoHost_TranscriptAgentConst(app);
     if (PicoAgent_IsBusy(active)) pico_host_request_redraw(app);
+    if (PicoHost_SidebarResizeBlocksInput(app)) return;
     for (int i = 0; i < EMPTY_CARD_COUNT; i++)
     {
         PicoScrollbar_UpdateDrag(&s_active_chat_state->empty_card_bar[i], EmptyCardScrollId(i),

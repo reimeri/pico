@@ -1543,6 +1543,7 @@ static void AskUserOnFrame(PicoHost *app, void *state, float dt)
     if (!host)
         return;
     SyncPendingAsk(app, host);
+    if (PicoHost_SidebarResizeBlocksInput(app)) return;
     if (PicoClarification_View(app))
     {
         if (!PicoUi_ModalOpen(app))

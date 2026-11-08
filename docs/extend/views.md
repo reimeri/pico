@@ -96,6 +96,17 @@ Local image textures use a least-recently-used cache. Unused retained entries ar
 
 ## Slots
 
+The shell owns the left sidebar pane's width. Drag its right edge to resize it;
+the cursor and localized border glow indicate the resize target. It defaults to
+200 logical pixels, with a normal minimum of 160 and a maximum of 40% of the
+shell space available before allocating the sidebar (excluding the far-right
+icon strip). The maximum wins on narrow windows. The preferred width is global,
+survives restart and host-extension reload, and is not overwritten by passive
+window resizing. Sidebar views should adapt to their current parent allocation
+rather than assume a fixed width. Resize gestures consume pointer and keyboard
+input through release, including after Escape or focus-loss cancellation.
+
+
 The shell also owns an always-visible far-right icon strip outside the extension
 slots. It spans beside the footer, with settings at the bottom and a browser
 toggle at the top for user main conversations. The browser or global settings

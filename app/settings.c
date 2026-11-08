@@ -1000,9 +1000,9 @@ void PicoHostPreferences_Load(PicoHost *host)
             JsonStripComments(src, len);
             JsonDoc doc;
             if (JsonParse(&doc, src, len) == 0) {
-                const char *keys[] = {"settings_panel_width", "browser_panel_width", "diff_panel_width"};
-                float *widths[] = {&host->settings_panel_width, &host->browser_panel_width, &host->diff_panel_width};
-                for (int i = 0; i < 3; ++i) {
+                const char *keys[] = {"settings_panel_width", "browser_panel_width", "diff_panel_width", "sidebar_panel_width"};
+                float *widths[] = {&host->settings_panel_width, &host->browser_panel_width, &host->diff_panel_width, &host->sidebar_panel_width};
+                for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
                     int tok = JsonObjGet(&doc, 0, keys[i]);
                     char *raw = JsonRawDup(&doc, tok), *end = NULL;
                     double width = raw ? strtod(raw, &end) : 0;
@@ -1791,7 +1791,8 @@ static void PanelWidthSaveRun(void *state)
     save->saved = Pico_ConfigDir(dir, sizeof(dir)) && MkdirP(dir) &&
         UserSettingsPath(path, sizeof(path)) && PatchRootJson(path,
             save->panel == PICO_PANEL_BROWSER ? "browser_panel_width" :
-            save->panel == PICO_PANEL_DIFF ? "diff_panel_width" : "settings_panel_width", value);
+            save->panel == PICO_PANEL_DIFF ? "diff_panel_width" :
+            save->panel == PICO_PANEL_SIDEBAR ? "sidebar_panel_width" : "settings_panel_width", value);
 }
 
 static void PanelWidthSaveDone(PicoHost *host, void *state)
@@ -1803,7 +1804,8 @@ static void PanelWidthSaveDone(PicoHost *host, void *state)
 void PicoSettings_SavePanelWidth(PicoHost *host, PicoPanelWidth panel)
 {
     float width = panel == PICO_PANEL_BROWSER ? host->browser_panel_width :
-        panel == PICO_PANEL_DIFF ? host->diff_panel_width : host->settings_panel_width;
+        panel == PICO_PANEL_DIFF ? host->diff_panel_width :
+        panel == PICO_PANEL_SIDEBAR ? host->sidebar_panel_width : host->settings_panel_width;
     if (!isfinite(width) || width <= 0) return;
     PanelWidthSave *save = calloc(1, sizeof(*save));
     if (save) { save->panel = panel; save->width = width; }

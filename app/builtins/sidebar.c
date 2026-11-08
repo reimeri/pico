@@ -2720,7 +2720,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
     }
     SidebarBuildLiveSnapshot(s);
     EnsureFolderIcons(s);
-    s->row_width = PicoHost_SidebarContentWidth();
+    s->row_width = PicoHost_SidebarContentWidth(host);
 
     add_hover = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs")));
     float add_width = 8.0f + SidebarTextWidth("+", 1);
@@ -3723,6 +3723,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         SessionMenuInput(host, s);
         return;
     }
+    if (PicoHost_SidebarResizeBlocksInput(host)) return;
     bool drag_valid = !s->drag_press_pending ||
         (s->drag_from_picker == (host->sidebar_inbox_mode && !PicoHost_SelectedAgent(host)) &&
          s->drag_source_index >= 0 && s->drag_source_index < s->workspace_count &&

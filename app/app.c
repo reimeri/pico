@@ -4019,21 +4019,116 @@ enum
     SHELL_STRIP_WIDTH = 28,
 };
 
-float PicoHost_SidebarContentWidth(void)
+/* Space shared by sidebar, chat and dock, excluding the persistent strip. */
+static float ShellContentWidth(void)
 {
-    /* The sidebar view fills the fixed shell pane's horizontally padded interior. */
-    return SHELL_SIDEBAR_WIDTH - 2.0f * SHELL_SIDEBAR_PADDING;
+    return fmaxf(0, Clay_GetLayoutDimensions().width - 2.0f * SHELL_ROOT_PADDING -
+                    SHELL_STRIP_WIDTH - SHELL_BODY_GAP);
+}
+
+static float ClampSidebarWidth(float width)
+{
+    return fminf(ShellContentWidth() * 0.4f, fmaxf(160, width));
+}
+
+static float SidebarShellWidth(const PicoHost *host)
+{
+    return ClampSidebarWidth(host && host->sidebar_panel_width > 0 ?
+                             host->sidebar_panel_width : SHELL_SIDEBAR_WIDTH);
+}
+
+float PicoHost_SidebarContentWidth(const PicoHost *host)
+{
+    return fmaxf(0, SidebarShellWidth(host) - 2.0f * SHELL_SIDEBAR_PADDING);
 }
 
 float PicoHost_RightColumnWidth(const PicoHost *host)
 {
-    float width = Clay_GetLayoutDimensions().width - 2.0f * SHELL_ROOT_PADDING -
-                  SHELL_STRIP_WIDTH - SHELL_BODY_GAP;
+    float width = ShellContentWidth();
     if (host && host->view_count[PICO_SLOT_SIDEBAR] > 0)
-    {
-        width -= SHELL_SIDEBAR_WIDTH + SHELL_BODY_GAP;
+        width -= SidebarShellWidth(host) + SHELL_BODY_GAP;
+    return fmaxf(0, width);
+}
+
+static bool SidebarResizeAvailable(const PicoHost *host)
+{
+    return host->view_count[PICO_SLOT_SIDEBAR] > 0 && host->window_focused &&
+           !host->window_minimized && !PicoUi_ModalOpen(host);
+}
+
+static bool SidebarResizeHovered(const PicoHost *host)
+{
+    if (!SidebarResizeAvailable(host)) return false;
+    if (host->sidebar_resizing) return true;
+    if (host->ui_drag_active || PicoHost_SidebarResizeBlocksInput(host) ||
+         PicoBrowser_BlocksPointer(host) || PicoSettingsUi_BlocksPointer(host) || PicoDiffUi_BlocksPointer(host)) return false;
+    Clay_ElementData handle = Clay_GetElementData(CLAY_ID("SidebarResizeHandle"));
+    return handle.found && CheckCollisionPointRec(GetMousePosition(),
+        (Rectangle){handle.boundingBox.x, handle.boundingBox.y, handle.boundingBox.width, handle.boundingBox.height});
+}
+
+static void EndSidebarResize(PicoHost *host)
+{
+    PicoSettings_SavePanelWidth(host, PICO_PANEL_SIDEBAR);
+    host->sidebar_resizing = false;
+    host->ui_drag_active = false;
+    pico_host_request_redraw(host);
+}
+
+static void SidebarResizeInput(PicoHost *host)
+{
+    bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    /* A cancelled drag still owns its eventual release frame. */
+    if ((!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) || click)
+        host->sidebar_resize_pointer_claimed = false;
+    if (!SidebarResizeAvailable(host)) {
+        if (host->sidebar_resizing) {
+            host->sidebar_resize_pointer_claimed = true;
+            EndSidebarResize(host);
+        }
+        return;
     }
-    return width > 0.0f ? width : 0.0f;
+    if (!host->sidebar_resizing && (!click || !SidebarResizeHovered(host))) return;
+    if (!host->sidebar_resizing) {
+        host->sidebar_resizing = true;
+        host->sidebar_resize_start_x = GetMousePosition().x;
+        host->sidebar_resize_start_width = SidebarShellWidth(host);
+        host->ui_drag_active = true;
+    }
+    host->sidebar_resize_pointer_claimed = true;
+    if (!IsKeyPressed(KEY_ESCAPE))
+        host->sidebar_panel_width = ClampSidebarWidth(host->sidebar_resize_start_width +
+                                                     GetMousePosition().x - host->sidebar_resize_start_x);
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ESCAPE)) EndSidebarResize(host);
+    host->ui_relayout_requested = true;
+    pico_host_request_redraw(host);
+}
+
+static void DrawSidebarResizeGlow(PicoHost *host)
+{
+    if (!SidebarResizeAvailable(host)) return;
+    bool dragging = host->sidebar_resizing;
+    if (!dragging && (host->ui_drag_active || PicoHost_SidebarResizeBlocksInput(host) ||
+         PicoBrowser_BlocksPointer(host) || PicoSettingsUi_BlocksPointer(host) || PicoDiffUi_BlocksPointer(host))) return;
+    Clay_ElementData pane = Clay_GetElementData(CLAY_ID("Sidebar"));
+    if (!pane.found || pane.boundingBox.width <= 0 || pane.boundingBox.height <= 0) return;
+    Clay_BoundingBox bounds = pane.boundingBox;
+    float edge = bounds.x + bounds.width;
+    Vector2 mouse = GetMousePosition();
+    float center_y = fminf(bounds.y + bounds.height, fmaxf(bounds.y, mouse.y));
+    float distance = hypotf(mouse.x - edge, mouse.y - center_y);
+    const float proximity = 24, radius = 50;
+    if (!dragging && distance >= proximity) return;
+    float strength = dragging ? 1 : 1 - distance / proximity;
+    strength = strength * strength * (3 - 2 * strength);
+    Color accent = {(unsigned char)COLOR_LINK.r, (unsigned char)COLOR_LINK.g, (unsigned char)COLOR_LINK.b,
+                    (unsigned char)(180 * strength)};
+    /* Visual only: clip the flashlight to the inside of the sidebar edge. */
+    int strip_width = (int)fminf(2, floorf(bounds.width));
+    Pico_Scissor((int)floorf(edge) - strip_width, (int)ceilf(bounds.y), strip_width, (int)floorf(bounds.height));
+    DrawCircleGradient((int)roundf(edge), (int)roundf(center_y), radius,
+                       accent, (Color){accent.r, accent.g, accent.b, 0});
+    Pico_ScissorEnd();
 }
 
 float PicoHost_MainColumnWidth(const PicoHost *host)
@@ -4076,7 +4171,7 @@ static void EnsureShellIcons(PicoHost *host)
 
 static void ShellIconButton(PicoHost *host, Clay_ElementId id, PicoShellIcon icon, bool selected)
 {
-    bool hovered = !PicoUi_ModalOpen(host) && !PicoBrowser_BlocksPointer(host) && !PicoSettingsUi_BlocksPointer(host) && !PicoDiffUi_BlocksPointer(host) && Clay_PointerOver(id);
+    bool hovered = !PicoUi_ModalOpen(host) && !PicoHost_SidebarResizeBlocksInput(host) && !PicoBrowser_BlocksPointer(host) && !PicoSettingsUi_BlocksPointer(host) && !PicoDiffUi_BlocksPointer(host) && Clay_PointerOver(id);
     Texture2D *texture = &host->shell_icons[icon][selected || hovered];
     CLAY(id,
          {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(SHELL_STRIP_WIDTH), .height = CLAY_SIZING_FIXED(30)},
@@ -4121,7 +4216,7 @@ static void LayoutShellStrip(PicoHost *host)
 static void ShellInput(PicoHost *host)
 {
     if (!host->window_focused || host->window_minimized || PicoUi_ModalOpen(host) ||
-        PicoBrowser_BlocksPointer(host) || PicoSettingsUi_BlocksPointer(host) || PicoDiffUi_BlocksPointer(host) || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
+        PicoHost_SidebarResizeBlocksInput(host) || PicoBrowser_BlocksPointer(host) || PicoSettingsUi_BlocksPointer(host) || PicoDiffUi_BlocksPointer(host) || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
     if (Clay_PointerOver(CLAY_ID("ShellChanges"))) {
         if (PicoDiff_IsOpen(host)) PicoDiffUi_Close(host);
         else PicoDiffUi_Open(host);
@@ -4157,7 +4252,7 @@ static void LayoutLinkTooltip(PicoHost *app)
 {
     const char *target = app->hovered_link;
     if (!target || !*target || PicoUi_ModalOpen(app) || PicoChatFind_PointerOver(app) ||
-        PicoBrowser_BlocksPointer(app) || PicoSettingsUi_BlocksPointer(app) || PicoDiffUi_BlocksPointer(app)) return;
+        PicoHost_SidebarResizeBlocksInput(app) || PicoBrowser_BlocksPointer(app) || PicoSettingsUi_BlocksPointer(app) || PicoDiffUi_BlocksPointer(app)) return;
     Clay_Dimensions viewport = Clay_GetLayoutDimensions();
     if (viewport.width <= 32 || viewport.height <= 32) return;
     Clay_TextElementConfig config = {.fontId = FONT_MONO, .fontSize = PICO_FONT_CAPTION,
@@ -4253,10 +4348,14 @@ static Clay_RenderCommandArray LayoutShellPass(PicoHost *app, float viewport_hei
                      {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                                  .childGap = 8,
                                  .padding = {SHELL_SIDEBAR_PADDING, SHELL_SIDEBAR_PADDING, 8, 8},
-                                 .sizing = {.width = CLAY_SIZING_FIXED(SHELL_SIDEBAR_WIDTH), .height = CLAY_SIZING_PERCENT(1)}},
+                                 .sizing = {.width = CLAY_SIZING_FIXED(SidebarShellWidth(app)), .height = CLAY_SIZING_PERCENT(1)}},
                       .backgroundColor = COLOR_CONTENT_BG,
                       .cornerRadius = CLAY_CORNER_RADIUS(8)})
                 {
+                    CLAY(CLAY_ID("SidebarResizeHandle"),
+                         {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT, .offset = {.x = -4}, .zIndex = 1,
+                                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_TOP, .parent = CLAY_ATTACH_POINT_RIGHT_TOP}},
+                          .layout = {.sizing = {.width = CLAY_SIZING_FIXED(8), .height = CLAY_SIZING_PERCENT(1)}}}) {}
                     RunSlot(app, PICO_SLOT_SIDEBAR);
                 }
             }
@@ -4653,12 +4752,13 @@ void PicoHost_Frame(PicoHost *app)
     mouse_delta.x *= 5.0f;
     mouse_delta.y *= 5.0f;
 
+    SidebarResizeInput(app);
     PicoSettingsUi_Input(app);
     PicoDiffUi_Input(app);
     ShellInput(app);
     PicoBrowser_Input(app);
 
-    if (!PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && IsKeyPressed(KEY_F2))
+    if (!PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && IsKeyPressed(KEY_F2))
     {
         PicoExts_Toggle(app);
     }
@@ -4673,7 +4773,7 @@ void PicoHost_Frame(PicoHost *app)
     {
         TakeScreenshot("pico_screenshot.png");
     }
-    if (!PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && IsKeyPressed(KEY_F5))
+    if (!PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && IsKeyPressed(KEY_F5))
     {
         PicoHost_RequestReload(app);
     }
@@ -4682,7 +4782,7 @@ void PicoHost_Frame(PicoHost *app)
      * Remember ownership before callbacks so that same key cannot cancel a turn. */
     bool had_modal = pico_ui_modal_claimed(app);
     PicoPlugins_Poll(app);
-    if (!PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app)) PicoChatFind_HandleInput(app);
+    if (!PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app)) PicoChatFind_HandleInput(app);
     /* Builtin frame callbacks update scrollbar drags. Preserve that ownership
      * until Clay's scroll update so it cannot also drag the content. */
     PicoScrollbar_BeginFrame();
@@ -4701,7 +4801,7 @@ void PicoHost_Frame(PicoHost *app)
     bool had_warn = app->status_warn != NULL;
     bool had_complete = PicoComplete_IsOpen();
     had_modal = had_modal || pico_ui_modal_claimed(app);
-    if (!PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_modal) &&
+    if (!PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && PicoHost_AgentEscapeEnabled(app, had_warn, had_complete, had_modal) &&
         IsKeyPressed(KEY_ESCAPE))
     {
         PicoAgent *active = PicoHost_TranscriptAgent(app);
@@ -4728,12 +4828,12 @@ void PicoHost_Frame(PicoHost *app)
     bool over_chat = !PicoChatFind_PointerOver(app) && Clay_PointerOver(Clay_GetElementId(CLAY_STRING("ChatScroll")));
     bool over_sidebar = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarScroll")));
     bool modal_open = PicoUi_ModalOpen(app);
-    if (!modal_open)
+    if (!modal_open && !PicoHost_SidebarResizeBlocksInput(app))
     {
         UpdateChatScrollbarDrag(app);
     }
     bool bar_drag = PicoScrollbar_AnyDragging();
-    Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !bar_drag && !PicoBrowser_BlocksPointer(app) && !PicoSettingsUi_BlocksPointer(app) && !PicoDiffUi_BlocksPointer(app));
+    Clay_SetPointerState(mouse_position, IsMouseButtonDown(0) && !bar_drag && !PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksPointer(app) && !PicoSettingsUi_BlocksPointer(app) && !PicoDiffUi_BlocksPointer(app));
     Clay_SetLayoutDimensions((Clay_Dimensions){(float)GetScreenWidth(), (float)GetScreenHeight()});
     PicoChat_HandleToolRelease(app);
 
@@ -4774,7 +4874,7 @@ void PicoHost_Frame(PicoHost *app)
         previous_scroll[i] = (data.found && data.scrollPosition) ? *data.scrollPosition : (Clay_Vector2){0};
     }
     Clay_UpdateScrollContainers(
-        !bar_drag && !PicoBrowser_BlocksPointer(app) && !PicoSettingsUi_BlocksPointer(app) && !PicoDiffUi_BlocksPointer(app) && !over_settings_content &&
+        !bar_drag && !PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksPointer(app) && !PicoSettingsUi_BlocksPointer(app) && !PicoDiffUi_BlocksPointer(app) && !over_settings_content &&
             (modal_open || (!over_composer && !over_chat && !over_sidebar && !app->chat_sel.mouse_selecting)),
         (pane_wheel || sidebar_wheel || over_settings_content) ? (Clay_Vector2){0, 0} : wheel, frame_dt);
     for (size_t i = 0; i < SHELL_SCROLL_COUNT; i++)
@@ -4841,7 +4941,7 @@ void PicoHost_Frame(PicoHost *app)
         return;
     }
 
-    if (PicoBrowser_ResizeHovered(app) || PicoSettingsUi_ResizeHovered(app) || PicoDiffUi_ResizeHovered(app))
+    if (SidebarResizeHovered(app) || PicoBrowser_ResizeHovered(app) || PicoSettingsUi_ResizeHovered(app) || PicoDiffUi_ResizeHovered(app))
     {
         SetMouseCursor(MOUSE_CURSOR_RESIZE_EW);
     }
@@ -4871,7 +4971,7 @@ void PicoHost_Frame(PicoHost *app)
         SetMouseCursor(MOUSE_CURSOR_IBEAM);
     }
     else if (app->hovered_link || app->hovered_tool || app->hovered_clickable ||
-             (!PicoUi_ModalOpen(app) && !PicoBrowser_BlocksPointer(app) && !PicoSettingsUi_BlocksPointer(app) && !PicoDiffUi_BlocksPointer(app) &&
+             (!PicoUi_ModalOpen(app) && !PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksPointer(app) && !PicoSettingsUi_BlocksPointer(app) && !PicoDiffUi_BlocksPointer(app) &&
               (Clay_PointerOver(CLAY_ID("ShellChanges")) || Clay_PointerOver(CLAY_ID("ShellSettings")) || Clay_PointerOver(CLAY_ID("BrowserToggle")))))
     {
         SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
@@ -4950,7 +5050,7 @@ void PicoHost_Frame(PicoHost *app)
     if (relayout)
         app->ui_relayout_requested = true;
 
-    if (!PicoChatFind_PointerOver(app) && app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
+    if (!PicoHost_SidebarResizeBlocksInput(app) && !PicoChatFind_PointerOver(app) && app->hovered_link && IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !app->chat_sel.dragging &&
         !PicoChatSel_HasSelection(app))
     {
         if (!PicoHost_OpenExternal(app, app->hovered_link, true))
@@ -4983,6 +5083,7 @@ void PicoHost_Frame(PicoHost *app)
     BeginDrawing();
     ClearBackground((Color){(unsigned char)COLOR_BG.r, (unsigned char)COLOR_BG.g, (unsigned char)COLOR_BG.b, 255});
     Clay_Raylib_Render(render_commands, app->fonts);
+    DrawSidebarResizeGlow(app);
     PicoBrowser_AfterRender(app);
     pico_run_hooks(app, PICO_HOOK_AFTER_RENDER, pico_agent_active(app));
     PicoChatFind_DrawInput(app);

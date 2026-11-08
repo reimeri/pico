@@ -648,6 +648,7 @@ void PicoDiffUi_Input(PicoHost *host)
     if (!s) return;
     bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || click) s->pointer_claimed = false;
+    if (PicoHost_SidebarResizeBlocksInput(host)) return;
     if (!PicoDiff_IsOpen(host) || !host->window_focused || host->window_minimized || PicoUi_ModalOpen(host)) {
         if (s->resizing) { PicoSettings_SavePanelWidth(host, PICO_PANEL_DIFF); s->resizing = false; host->ui_drag_active = false; }
         return;
@@ -1086,7 +1087,7 @@ static void DiffWorkspaceOnFrame(PicoWorkspace *workspace, void *state, float dt
         s->resizing = false; s->pointer_claimed = false;
     }
     AdoptPending(s);
-    if (!visible || PicoUi_ModalOpen(workspace->host))
+    if (!visible || PicoUi_ModalOpen(workspace->host) || PicoHost_SidebarResizeBlocksInput(workspace->host))
     {
         return;
     }

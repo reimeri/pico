@@ -156,6 +156,10 @@ struct PicoHost {
     float settings_panel_width; /* Global preferred logical width, persisted across restarts. */
     float browser_panel_width;
     float diff_panel_width;
+    float sidebar_panel_width;
+    bool sidebar_resizing;
+    bool sidebar_resize_pointer_claimed; /* Through physical release, even after cancellation. */
+    float sidebar_resize_start_x, sidebar_resize_start_width;
     bool panel_widths_loaded;
     struct PicoBrowserService *browser; /* Lazy core-owned CEF service; survives extension reload. */
     PicoWorkspace *workspaces[PICO_MAX_WORKSPACES];
@@ -384,7 +388,7 @@ bool PicoHost_ProcessRetired(void);
 float PicoHost_RightColumnWidth(const PicoHost *host);
 float PicoHost_MainColumnWidth(const PicoHost *host);
 /* Available width of the shell-owned sidebar view during the current layout. */
-float PicoHost_SidebarContentWidth(void);
+float PicoHost_SidebarContentWidth(const PicoHost *host);
 /* The builtin questionnaire replaces composer input, but does not claim a modal. */
 bool PicoUi_QuestionnaireOpen(const PicoHost *host);
 Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *host, float viewport_height, float delta_time);
@@ -443,6 +447,12 @@ static inline PicoWorkspace *PicoHost_SelectedWorkspace(PicoHost *host)
 static inline const PicoWorkspace *PicoHost_SelectedWorkspaceConst(const PicoHost *host)
 {
     return PicoHost_SelectedWorkspace((PicoHost *)host);
+}
+
+/* Shell resize owns pointer and keyboard, including the release/Escape frame. */
+static inline bool PicoHost_SidebarResizeBlocksInput(const PicoHost *host)
+{
+    return host && host->sidebar_resize_pointer_claimed;
 }
 
 uint64_t PicoHost_AllocAskId(PicoHost *host);

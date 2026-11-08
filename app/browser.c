@@ -1865,6 +1865,7 @@ void PicoBrowser_Input(PicoHost *host)
         for (BrowserSession *other = s->sessions; other; other = other->next)
             if (!a || other->agent_id != a->id) CloseViewport(other);
     }
+    if (PicoHost_SidebarResizeBlocksInput(host)) return;
     if (ProfileInput(host)) return;
     if (s && s->resize_agent_id &&
         (!PicoAgent_IsUserMain(a) || s->resize_agent_id != a->id || !a->browser_expanded || (PicoSettingsUi_IsOpen(host) || PicoDiff_IsOpen(host)) ||

@@ -686,6 +686,17 @@ static bool ChatShellBoundsStable(const ChatStabilitySnapshot *a,
            ShellBoxStable(a->footer, b->footer);
 }
 
+/* Virtualized row estimates may refine without changing visible geometry.
+ * Check the bottom-follow relationship rather than freezing content extent
+ * and absolute scroll offset independently. */
+static bool ChatBottomFollowGeometryStable(const ChatStabilitySnapshot *a,
+                                          const ChatStabilitySnapshot *b, bool with_sidebar)
+{
+    return ChatShellBoundsStable(a, b, with_sidebar) && ShellBoxStable(a->bottom, b->bottom) &&
+           b->content_height > b->container_height &&
+           fabsf(b->scroll_y + b->content_height - b->container_height) <= 0.001f;
+}
+
 static bool ChatStabilitySnapshotStable(const ChatStabilitySnapshot *a,
                                         const ChatStabilitySnapshot *b,
                                         bool with_sidebar)
@@ -1628,6 +1639,7 @@ static int RunWorkspaceLessShellCase(void)
     Clay_BoundingBox expected_right = {0};
     Clay_BoundingBox expected_main = {0};
     Clay_BoundingBox expected_chat = {0};
+    Clay_BoundingBox expected_picker = {0};
     if (!memory || !mkdtemp(dir) || !mkdtemp(cfg))
     {
         free(memory);
@@ -1645,6 +1657,7 @@ static int RunWorkspaceLessShellCase(void)
     }
     WaitPluginLoad(host);
     host->preferences.chat_width = 0;
+    host->sidebar_inbox_mode = true;
     Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
     if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
     {
@@ -1675,20 +1688,18 @@ static int RunWorkspaceLessShellCase(void)
         Clay_ElementData right = Clay_GetElementData(CLAY_ID("RightColumn"));
         Clay_ElementData main = Clay_GetElementData(CLAY_ID("MainColumn"));
         Clay_ElementData chat = Clay_GetElementData(CLAY_ID("ChatScroll"));
+        Clay_ElementData picker = Clay_GetElementData(CLAY_ID("InboxProjectPicker"));
         if (!root.found || !body.found || !sidebar.found || !right.found || !main.found || !chat.found ||
-            !Clay_GetElementData(CLAY_ID("NoWorkspaceCard")).found ||
-            !Clay_GetElementData(CLAY_IDI("EmptyCard", 0)).found ||
-            !Clay_GetElementData(CLAY_IDI("EmptyCard", 1)).found ||
-            !Clay_GetElementData(CLAY_IDI("EmptyCard", 2)).found)
+            !picker.found || !Clay_GetElementData(CLAY_ID("InboxAddProject")).found)
         {
-            Fail("workspace-less shell must render sidebar and landing cards");
+            Fail("workspace-less shell must render sidebar and project picker");
             break;
         }
         if (Clay_GetElementData(CLAY_ID("ComposerAlign")).found ||
-            Clay_GetElementData(CLAY_ID("Footer")).found || host->hovered_clickable ||
+            Clay_GetElementData(CLAY_ID("Footer")).found ||
             pico_ui_modal_count(host) != 0)
         {
-            Fail("workspace-less landing card must be non-actionable and hide agent slots");
+            Fail("workspace-less project picker must hide agent slots without opening a modal");
             break;
         }
         if (frame == 0)
@@ -1699,13 +1710,15 @@ static int RunWorkspaceLessShellCase(void)
             expected_right = right.boundingBox;
             expected_main = main.boundingBox;
             expected_chat = chat.boundingBox;
+            expected_picker = picker.boundingBox;
         }
         else if (!ShellBoxStable(expected_root, root.boundingBox) ||
                  !ShellBoxStable(expected_body, body.boundingBox) ||
                  !ShellBoxStable(expected_sidebar, sidebar.boundingBox) ||
                  !ShellBoxStable(expected_right, right.boundingBox) ||
                  !ShellBoxStable(expected_main, main.boundingBox) ||
-                 !ShellBoxStable(expected_chat, chat.boundingBox))
+                 !ShellBoxStable(expected_chat, chat.boundingBox) ||
+                 !ShellBoxStable(expected_picker, picker.boundingBox))
         {
             Fail("workspace-less shell geometry drifted");
             break;
@@ -1918,6 +1931,8 @@ static int TestEmptyCardsTwoColumnTrim(void)
     }
     WaitPluginLoad(host);
     host->preferences.chat_width = 0;
+    /* Exercise landing cards, not the Inbox no-selection project picker. */
+    host->sidebar_inbox_mode = false;
     host->view_count[PICO_SLOT_SIDEBAR] = 0;
     host->view_count[PICO_SLOT_COMPOSER] = 0;
     host->view_count[PICO_SLOT_FOOTER] = 0;
@@ -2021,6 +2036,8 @@ static int TestEmptyCardsOverflowScroll(void)
     }
     WaitPluginLoad(host);
     host->preferences.chat_width = 0;
+    /* Exercise landing cards, not the Inbox no-selection project picker. */
+    host->sidebar_inbox_mode = false;
     host->view_count[PICO_SLOT_SIDEBAR] = 0;
     host->view_count[PICO_SLOT_COMPOSER] = 0;
     host->view_count[PICO_SLOT_FOOTER] = 0;
@@ -2852,14 +2869,16 @@ static int RunOverlayShellCase(bool with_sidebar)
             Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
             if (!scroll.found || !scroll.scrollPosition ||
                 scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
-            PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
-                                       scroll.contentDimensions.height, &scroll.scrollPosition->y);
+            /* Do not repair the offset before the same-frame pass: feedback
+             * must preserve bottom-follow even while offscreen row estimates
+             * refine after a width change. Content extent and absolute offset
+             * may change together; shell bounds and bottom pinning may not. */
             (void)PicoHost_LayoutShell(host, viewports[stage].height, 0);
             PicoChat_HarvestVirtualHeights(host);
             ChatStabilitySnapshot current;
             if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
             if (frame == 20) expected = current;
-            if (frame > 20 && !ChatStabilitySnapshotStable(&expected, &current, with_sidebar))
+            if (frame > 20 && !ChatBottomFollowGeometryStable(&expected, &current, with_sidebar))
             {
                 Fail("errors and notifications must not change bottom-follow shell geometry");
                 goto done;
@@ -4959,9 +4978,7 @@ static int TestChatCompletedToolRowDwells(void)
 
     for (int frame = 0; frame < 3; frame++)
     {
-        Clay_SetLayoutDimensions(viewport);
-        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
-        PicoChat_HarvestVirtualHeights(host);
+        LayoutChatStabilityFrame(host, viewport);
     }
     (void)TraceRowHeight(MainTraceRowId(0, 0, "ToolRow"), &f_tool);
     (void)TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
@@ -4974,9 +4991,7 @@ static int TestChatCompletedToolRowDwells(void)
     agent->messages[0].trace[0].tool_done_t0 = 0.0;
     for (int frame = 0; frame < 3; frame++)
     {
-        Clay_SetLayoutDimensions(viewport);
-        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
-        PicoChat_HarvestVirtualHeights(host);
+        LayoutChatStabilityFrame(host, viewport);
     }
     (void)TraceRowHeight(MainTraceRowId(0, 0, "ToolRow"), &f_tool);
     (void)TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
@@ -4997,9 +5012,7 @@ static int TestChatCompletedToolRowDwells(void)
     host->chat_follow_bottom = false;
     for (int frame = 0; frame < 4; frame++)
     {
-        Clay_SetLayoutDimensions(viewport);
-        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
-        PicoChat_HarvestVirtualHeights(host);
+        LayoutChatStabilityFrame(host, viewport);
         Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
         if (!scroll.found || !scroll.scrollPosition)
         {
@@ -5021,12 +5034,22 @@ static int TestChatCompletedToolRowDwells(void)
     {
         agent->messages[0].trace[t].tool_done_t0 = pico_trace_now() - 60.0;
     }
-    for (int frame = 0; frame < 3; frame++)
+    /* Expiry invalidates the offscreen row, but its measurement is admitted
+     * on a future frame rather than a same-frame layout correction. Wait for
+     * that row's collapsed group, not an unrelated estimate to shrink first. */
+    PICO_TEST_WAIT_LOOP("expired offscreen tool group is measured")
     {
+        PicoChat_BeginFrame(host);
         Clay_SetLayoutDimensions(viewport);
         (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+        (void)TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
         PicoChat_HarvestVirtualHeights(host);
+        if (f_group) break;
     }
+    /* Apply the harvested height before reading the scroll extent. The row
+     * need not remain mounted once its offscreen measurement is complete. */
+    (void)PicoHost_LayoutShell(host, viewport.height, 0);
+    PicoChat_HarvestVirtualHeights(host);
     Clay_ScrollContainerData after = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
     if (!after.found || after.contentDimensions.height >= dwelling_height - 1.0f)
     {
@@ -5063,9 +5086,7 @@ static int TestChatCompletedToolRowDwells(void)
     }
     for (int frame = 0; frame < 3; frame++)
     {
-        Clay_SetLayoutDimensions(viewport);
-        (void)PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
-        PicoChat_HarvestVirtualHeights(host);
+        LayoutChatStabilityFrame(host, viewport);
     }
     (void)TraceRowHeight(MainTraceRowId(0, 0, "ToolRow"), &f_tool);
     (void)TraceRowHeight(MainTraceRowId(0, 0, "TraceGroupRow"), &f_group);
@@ -18913,8 +18934,7 @@ static int RunWorkingBorderShellCase(bool with_sidebar)
         LayoutChatStabilityFrame(f.host, (Clay_Dimensions){1100, 600});
         Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
         if (!chat.found) goto done;
-        PicoScrollbar_PinToBottom(chat.scrollContainerDimensions.height, chat.contentDimensions.height,
-                                   &chat.scrollPosition->y);
+        /* Verify production bottom-follow without repairing the scroll offset. */
         Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 600, 0);
         Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0));
         Clay_ElementData status = Clay_GetElementData(CLAY_ID("FooterStatus"));
@@ -18943,7 +18963,7 @@ static int RunWorkingBorderShellCase(bool with_sidebar)
         }
         if (frame > 20)
         {
-            if (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+            if (!ChatBottomFollowGeometryStable(&expected, &current, with_sidebar) ||
                 !ShellBoxStable(expected_status, status.boundingBox)) goto done;
             if (with_sidebar && (!row.found ||
                 fabsf(row.boundingBox.width - expected_row.width) > 0.1f ||
@@ -18998,8 +19018,7 @@ static int RunSidebarModeShellCase(bool with_sidebar)
         LayoutChatStabilityFrame(f.host, (Clay_Dimensions){1100, 360});
         Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
         if (!scroll.found || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
-        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height,
-                                   &scroll.scrollPosition->y);
+        /* Verify production bottom-follow without repairing the scroll offset. */
         Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 360, 0);
         /* The real Inbox subtitle now includes the same fixed-size badge as
          * Projects. Its extra height must never feed shell bottom-follow. */
@@ -19031,7 +19050,7 @@ static int RunSidebarModeShellCase(bool with_sidebar)
             expected = current;
             sidebar_root = Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox;
         }
-        else if (frame > 20 && (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+        else if (frame > 20 && (!ChatBottomFollowGeometryStable(&expected, &current, with_sidebar) ||
             (with_sidebar && !ShellBoxStable(sidebar_root, Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox))))
         {
             goto done;
@@ -22000,6 +22019,7 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestSavedSubagentInspectLoadsOffThread()) ||
                PICO_TEST_RUN(TestResumeCompletionDoesNotScanOnUi());
     if (argc == 2 && strcmp(argv[1], "--link-tooltip") == 0) return PICO_TEST_RUN(TestChatLinkTooltip());
+    if (argc == 2 && strcmp(argv[1], "--tool-dwell") == 0) return PICO_TEST_RUN(TestChatCompletedToolRowDwells());
     if (argc == 2 && strcmp(argv[1], "--apikey") == 0) return PICO_TEST_RUN(TestApiKeyDialog());
     if (PICO_TEST_RUN(TestApiKeyDialog()) != 0) return 1;
 #ifdef PICO_TEST_CLOCK

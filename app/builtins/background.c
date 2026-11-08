@@ -6,6 +6,8 @@
 #include "json.h"
 #include "scrollbar.h"
 #include "agent.h"
+#include "wrapped_text.h"
+#include "text_ink.h"
 
 #include "clay/clay.h"
 
@@ -16,12 +18,22 @@
 #define BG_PILL_HEIGHT 42.0f
 #define BG_GAP 8.0f
 #define BG_ICON_SIZE 18
+#define BG_LIST_WIDTH 520.0f
+#define BG_LOG_WIDTH 640.0f
+#define BG_CARD_PADDING 20
+#define BG_ROW_PADDING 12
+#define BG_COMMAND_PADDING 10
 #define BG_LIST_NAME "background-list"
 #define BG_LOG_NAME "background-log"
 
 typedef struct BackgroundState {
     char pill_label[32];
     char selected_id[PICO_BG_ID_MAX];
+    char selected_command[PICO_BG_CMD_MAX + 1];
+    /* Clay borrows text until the render commands have been consumed. */
+    PicoBgJobInfo jobs[PICO_BG_MAX_RECORDS];
+    char badges[PICO_BG_MAX_RECORDS][3];
+    char status_details[PICO_BG_MAX_RECORDS][64];
     char log_copy[PICO_BG_LOG_MAX + 1];
     char log_caption[96];
     bool selected_running;
@@ -53,6 +65,92 @@ static Clay_String CStr(const char *s)
         s = "";
     }
     return (Clay_String){.length = (int32_t)strlen(s), .chars = s};
+}
+
+static float MeasureCommandText(void *user, const char *text, int length)
+{
+    Clay_StringSlice slice = {.chars = text, .baseChars = text, .length = length};
+    return Pico_MeasureTextUtf8(slice, user, NULL).width;
+}
+
+/* Clay's word wrapping cannot split long paths or arguments. Emit display-only
+ * slices of the original command, including every line even beyond one batch. */
+static void RenderCommand(const char *command, float width)
+{
+    Clay_TextElementConfig config = {.fontId = FONT_MONO,
+                                     .fontSize = PICO_FONT_CAPTION,
+                                     .textColor = COLOR_TEXT,
+                                     .lineHeight = Pico_FontPxU16(PICO_FONT_CAPTION_LINE),
+                                     .wrapMode = CLAY_TEXT_WRAP_NONE};
+    int length = (int)strlen(command);
+    int offset = 0;
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        while (offset < length)
+        {
+            PicoWrappedText wrapped = {0};
+            if (!PicoWrappedText_Prepare(&wrapped, command + offset, length - offset, width,
+                                        PICO_WRAPPED_TEXT_LINE_CAPACITY, 0, 0,
+                                        MeasureCommandText, &config)) break;
+            for (int i = 0; i < wrapped.line_count; i++)
+            {
+                PicoWrappedTextLine line = wrapped.lines[i];
+                Clay_String text = line.length > 0
+                    ? (Clay_String){.chars = command + offset + line.start, .length = line.length}
+                    : CLAY_STRING(" ");
+                CLAY_TEXT(text, CLAY_TEXT_CONFIG(config));
+            }
+            if (!wrapped.truncated || wrapped.line_count == 0) break;
+            PicoWrappedTextLine last = wrapped.lines[wrapped.line_count - 1];
+            offset += last.start + last.length;
+            if (offset < length && command[offset] == '\n') offset++;
+        }
+    }
+}
+
+static Clay_Color StatusColor(const PicoBgJobInfo *job)
+{
+    if (job->status == PICO_BG_RUNNING) return COLOR_STATUS_RUN;
+    if (job->status == PICO_BG_KILLED) return COLOR_MUTED;
+    return job->exit_code || job->term_signal ? COLOR_NOTICE_ERROR : COLOR_DIFF_ADD_TEXT;
+}
+
+static const char *StatusLabel(const PicoBgJobInfo *job)
+{
+    if (job->status == PICO_BG_RUNNING) return "Running";
+    return job->status == PICO_BG_KILLED ? "Stopped" : "Exited";
+}
+
+static Clay_Color BadgeFill(Clay_Color ink)
+{
+    Clay_Color base = COLOR_CONTENT_BG;
+    return (Clay_Color){base.r + (ink.r - base.r) * 0.16f,
+                        base.g + (ink.g - base.g) * 0.16f,
+                        base.b + (ink.b - base.b) * 0.16f, 255};
+}
+
+static Clay_Color HoverFill(Clay_Color base)
+{
+    Clay_Color ink = COLOR_TEXT;
+    return (Clay_Color){base.r + (ink.r - base.r) * 0.08f,
+                        base.g + (ink.g - base.g) * 0.08f,
+                        base.b + (ink.b - base.b) * 0.08f, base.a};
+}
+
+static void RenderJobBadge(Clay_String label, int index)
+{
+    float size = Pico_FontPx(20);
+    CLAY(CLAY_IDI("BackgroundJobBadge", index),
+         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size), .height = CLAY_SIZING_FIXED(size)},
+                     .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = BadgeFill(COLOR_LINK),
+          .cornerRadius = CLAY_CORNER_RADIUS(Pico_FontPx(4))})
+    {
+        CLAY_TEXT(label, CLAY_TEXT_CONFIG({.fontId = FONT_MONO_BOLD, .fontSize = 11,
+                                           .userData = (void *)&Pico_TextInkCentered,
+                                           .textColor = COLOR_LINK, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+    }
 }
 
 static void ResourcePath(const char *relative, char *out, size_t cap)
@@ -253,12 +351,14 @@ static void RefreshLogCopy(PicoBgTable *table, PicoAgentId agent_id, BackgroundS
         s->log_copy[0] = '\0';
     }
     s->selected_running = false;
+    s->selected_command[0] = '\0';
     job_n = PicoBgTable_CopyJobs(table, agent_id, jobs, PICO_BG_MAX_RECORDS);
     for (i = 0; i < job_n; i++)
     {
         if (strcmp(jobs[i].id, s->selected_id) == 0)
         {
             s->selected_running = jobs[i].status == PICO_BG_RUNNING;
+            snprintf(s->selected_command, sizeof(s->selected_command), "%s", jobs[i].command);
             break;
         }
     }
@@ -297,7 +397,7 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
     PicoHost *app = workspace ? workspace->host : NULL;
     PicoBgTable *table = TableForWorkspace(workspace);
     int running;
-    PicoBgJobInfo jobs[PICO_BG_MAX_RECORDS];
+    PicoBgJobInfo *jobs;
     int job_n;
     float sw;
     float sh;
@@ -310,6 +410,7 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
         return;
     }
 
+    jobs = s->jobs;
     running = PicoBgTable_RunningCount(table, selected_agent_id);
     if (running > 0)
     {
@@ -378,9 +479,9 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
         {
             CLAY(CLAY_ID("BackgroundListCard"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .padding = {20, 20, 16, 16},
+                             .padding = {BG_CARD_PADDING, BG_CARD_PADDING, 16, 16},
                              .childGap = 10,
-                             .sizing = {.width = CLAY_SIZING_FIXED(520), .height = CLAY_SIZING_FIT(0, sh - 80)}},
+                             .sizing = {.width = CLAY_SIZING_FIXED(BG_LIST_WIDTH), .height = CLAY_SIZING_FIT(0, sh - 80)}},
                   .backgroundColor = COLOR_CONTENT_BG,
                   .cornerRadius = CLAY_CORNER_RADIUS(8)})
             {
@@ -416,50 +517,84 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
                             for (i = 0; i < job_n; i++)
                             {
                                 PicoBgJobInfo *job = &jobs[i];
+                                size_t id_length = strlen(job->id);
+                                s->badges[i][0] = id_length ? job->id[0] : '?';
+                                s->badges[i][1] = id_length > 1 ? job->id[id_length - 1] : '\0';
+                                s->badges[i][2] = '\0';
+                                if (job->status == PICO_BG_RUNNING)
+                                    snprintf(s->status_details[i], sizeof(s->status_details[i]), "Process is running");
+                                else if (job->term_signal)
+                                    snprintf(s->status_details[i], sizeof(s->status_details[i]),
+                                             "Terminated by signal: %d", job->term_signal);
+                                else
+                                    snprintf(s->status_details[i], sizeof(s->status_details[i]),
+                                             "Exit code: %d", job->exit_code);
+                                Clay_Color status_color = StatusColor(job);
+                                bool row_hovered = pico_ui_modal_is_top(app, BG_LIST_NAME) &&
+                                                   Clay_PointerOver(CLAY_IDI("BackgroundRow", i));
                                 CLAY(CLAY_IDI("BackgroundRow", i),
-                                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
-                                                 .padding = {10, 10, 8, 8},
-                                                 .childGap = 8,
-                                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                     {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                                 .padding = CLAY_PADDING_ALL(BG_ROW_PADDING),
+                                                 .childGap = 10,
                                                  .sizing = {.width = CLAY_SIZING_GROW(0)}},
-                                      .backgroundColor = COLOR_CODE_BG,
-                                      .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                                      .backgroundColor = row_hovered ? HoverFill(COLOR_CODE_BG) : COLOR_CODE_BG,
+                                      .cornerRadius = CLAY_CORNER_RADIUS(8)})
                                 {
-                                    CLAY(CLAY_IDI("BackgroundRowMain", i),
-                                         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                                     .childGap = 2,
+                                    CLAY(CLAY_IDI("BackgroundRowHeader", i),
+                                         {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                                                     .childGap = 8,
+                                                     .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                                                      .sizing = {.width = CLAY_SIZING_GROW(0)}}})
                                     {
-                                        CLAY_TEXT(CStr(job->description[0] ? job->description : job->id),
-                                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                                    .fontSize = PICO_FONT_UI,
-                                                                    .textColor = COLOR_TEXT,
-                                                                    .wrapMode = CLAY_TEXT_WRAP_WORDS}));
-                                        CLAY_TEXT(CStr(job->id),
-                                                  CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
-                                                                    .fontSize = PICO_FONT_CAPTION,
-                                                                    .textColor = COLOR_LINK}));
-                                        CLAY_TEXT(CStr(PicoBgStatus_Name(job->status)),
-                                                  CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
-                                                                    .fontSize = PICO_FONT_CAPTION,
-                                                                    .textColor = job->status == PICO_BG_RUNNING
-                                                                                     ? COLOR_TEXT
-                                                                                     : COLOR_MUTED}));
-                                    }
-                                    if (job->status == PICO_BG_RUNNING)
-                                    {
-                                        CLAY(CLAY_IDI("BackgroundKill", i),
-                                             {.layout = {.padding = {10, 10, 6, 6},
-                                                         .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
-                                                                            .y = CLAY_ALIGN_Y_CENTER}},
-                                              .backgroundColor = COLOR_CODE_BG,
-                                              .cornerRadius = CLAY_CORNER_RADIUS(6)})
+                                        RenderJobBadge(CStr(s->badges[i]), i);
+                                        CLAY(CLAY_IDI("BackgroundRowTitle", i),
+                                             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}})
                                         {
-                                            CLAY_TEXT(CLAY_STRING("Stop"),
+                                            CLAY_TEXT(CStr(job->description[0] ? job->description : job->id),
                                                       CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
-                                                                        .fontSize = PICO_FONT_CAPTION,
-                                                                        .textColor = COLOR_TEXT}));
+                                                                        .fontSize = PICO_FONT_UI,
+                                                                        .textColor = COLOR_TEXT,
+                                                                        .wrapMode = CLAY_TEXT_WRAP_WORDS}));
                                         }
+                                        CLAY(CLAY_IDI("BackgroundStatus", i),
+                                             {.layout = {.padding = {8, 8, 4, 4}},
+                                              .backgroundColor = BadgeFill(status_color),
+                                              .cornerRadius = CLAY_CORNER_RADIUS(5)})
+                                        {
+                                            CLAY_TEXT(CStr(StatusLabel(job)),
+                                                      CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                                                        .fontSize = PICO_FONT_CAPTION,
+                                                                        .textColor = status_color,
+                                                                        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                        }
+                                        if (job->status == PICO_BG_RUNNING)
+                                        {
+                                            CLAY(CLAY_IDI("BackgroundKill", i),
+                                                 {.layout = {.padding = {10, 10, 4, 4},
+                                                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER,
+                                                                                .y = CLAY_ALIGN_Y_CENTER}},
+                                                  .backgroundColor = Clay_PointerOver(CLAY_IDI("BackgroundKill", i))
+                                                                         ? COLOR_ERROR_BG : COLOR_USER_BG_OVERLAY,
+                                                  .cornerRadius = CLAY_CORNER_RADIUS(5)})
+                                            {
+                                                CLAY_TEXT(CLAY_STRING("Stop"),
+                                                          CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                                            .fontSize = PICO_FONT_CAPTION,
+                                                                            .textColor = COLOR_TEXT,
+                                                                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                                            }
+                                        }
+                                    }
+                                    CLAY(CLAY_IDI("BackgroundCommand", i),
+                                         {.layout = {.padding = CLAY_PADDING_ALL(BG_COMMAND_PADDING),
+                                                     .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                                          .backgroundColor = row_hovered ? HoverFill(COLOR_BG) : COLOR_BG,
+                                          .cornerRadius = CLAY_CORNER_RADIUS(5)})
+                                    {
+                                        /* Reserve scrollbar width before its bounds are available. */
+                                        float command_width = BG_LIST_WIDTH - 2 * BG_CARD_PADDING -
+                                            2 * BG_ROW_PADDING - 2 * BG_COMMAND_PADDING - SCROLLBAR_GAP - SCROLLBAR_WIDTH;
+                                        RenderCommand(job->command, command_width);
                                     }
                                 }
                             }
@@ -473,6 +608,32 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
                     }
                 }
             }
+        }
+    }
+
+    if (pico_ui_modal_is_top(app, BG_LIST_NAME))
+    {
+        for (int i = 0; i < job_n; i++)
+        {
+            Clay_ElementId status = CLAY_IDI("BackgroundStatus", i);
+            if (!Clay_PointerOver(status)) continue;
+            CLAY(CLAY_ID("BackgroundStatusTip"),
+                 {.floating = {.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID,
+                               .parentId = status.id, .zIndex = 52,
+                               .offset = {.y = -6},
+                               .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_BOTTOM,
+                                                .parent = CLAY_ATTACH_POINT_RIGHT_TOP},
+                               .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+                  .layout = {.padding = {10, 10, 6, 6}},
+                  .backgroundColor = COLOR_BG,
+                  .border = {.color = COLOR_HR, .width = CLAY_BORDER_OUTSIDE(1)},
+                  .cornerRadius = CLAY_CORNER_RADIUS(5)})
+            {
+                CLAY_TEXT(CStr(s->status_details[i]),
+                          CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                                            .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE}));
+            }
+            break;
         }
     }
 
@@ -490,9 +651,9 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
         {
             CLAY(CLAY_ID("BackgroundLogCard"),
                  {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
-                             .padding = {20, 20, 16, 16},
+                             .padding = {BG_CARD_PADDING, BG_CARD_PADDING, 16, 16},
                              .childGap = 10,
-                             .sizing = {.width = CLAY_SIZING_FIXED(640), .height = CLAY_SIZING_FIT(0, sh - 80)}},
+                             .sizing = {.width = CLAY_SIZING_FIXED(BG_LOG_WIDTH), .height = CLAY_SIZING_FIT(0, sh - 80)}},
                   .backgroundColor = COLOR_CONTENT_BG,
                   .cornerRadius = CLAY_CORNER_RADIUS(8)})
             {
@@ -531,6 +692,15 @@ static void BackgroundRender(PicoWorkspace *workspace, PicoAgentId selected_agen
                                      .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIT(0)}},
                           .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                     {
+                        CLAY_TEXT(CLAY_STRING("Command"),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                    .fontSize = PICO_FONT_CAPTION,
+                                                    .textColor = COLOR_MUTED}));
+                        RenderCommand(s->selected_command, BG_LOG_WIDTH - 2 * BG_CARD_PADDING - SCROLLBAR_GAP - SCROLLBAR_WIDTH);
+                        CLAY_TEXT(CLAY_STRING("Output"),
+                                  CLAY_TEXT_CONFIG({.fontId = FONT_BOLD,
+                                                    .fontSize = PICO_FONT_CAPTION,
+                                                    .textColor = COLOR_MUTED}));
                         CLAY_TEXT(CStr(s->log_copy[0] ? s->log_copy : "(no output)"),
                                   CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
                                                     .fontSize = PICO_FONT_CAPTION,

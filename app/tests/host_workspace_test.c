@@ -7176,6 +7176,294 @@ done:
     return rc;
 }
 
+/* Inspect actual rendered text, scoped to the visible process panel. */
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+static bool BackgroundRenderedFill(Clay_RenderCommandArray *commands, Clay_ElementId id, Clay_Color *out)
+{
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(commands, i);
+        if (command->id == id.id && command->commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE)
+        {
+            *out = command->renderData.rectangle.backgroundColor;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool BackgroundFillEqual(Clay_Color a, Clay_Color b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+static bool BackgroundCommandTextVisible(Clay_RenderCommandArray *commands, Clay_BoundingBox panel,
+                                         const char *text, bool require_wrap)
+{
+    size_t offset = 0;
+    bool wrapped = false;
+    for (int i = 0; i < commands->length; i++)
+    {
+        Clay_RenderCommand *c = Clay_RenderCommandArray_Get(commands, i);
+        if (c->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ||
+            c->renderData.text.fontId != FONT_MONO || c->boundingBox.x < panel.x ||
+            c->boundingBox.y < panel.y || c->boundingBox.y >= panel.y + panel.height) continue;
+        Clay_StringSlice contents = c->renderData.text.stringContents;
+        if (contents.length <= 0 || (size_t)contents.length > strlen(text + offset) ||
+            memcmp(contents.chars, text + offset, (size_t)contents.length)) continue;
+        if (c->boundingBox.x + c->boundingBox.width > panel.x + panel.width + 0.5f ||
+            c->boundingBox.y + c->boundingBox.height > panel.y + panel.height + 0.5f) return false;
+        offset += (size_t)contents.length;
+        if (text[offset] && text[offset] != '\n') wrapped = true;
+        while (text[offset] == ' ' || text[offset] == '\n') offset++;
+        if (!text[offset]) return !require_wrap || wrapped;
+    }
+    return false;
+}
+#endif
+
+static int TestBackgroundCommandsVisible(void)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    char dir[] = "/tmp/pico-bg-command-XXXXXX", cfg[] = "/tmp/pico-bg-command-cfg-XXXXXX";
+    const char *commands[] = {
+        "printf 'first-output\\n'\n"
+        "# a long command with enough words to wrap across multiple lines in the process list and the log view without losing any of its contents\n"
+        "# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+        "# first-command-end",
+        "printf 'second-output\\n'\n# second-command-end",
+    };
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    int rc = 1;
+    Clay_SetCurrentContext(NULL);
+    if (!mkdtemp(dir) || !mkdtemp(cfg) || !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace;
+    PicoAgentId agent;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                     .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_main_agent_create(host, workspace, &options, &agent) != PICO_OK) goto done;
+    PicoBgTable *table = PicoWorkspace_Background(PicoHost_FindWorkspace(host, workspace));
+    for (int i = 0; i < 2; i++)
+    {
+        char *error = NULL;
+        char *result = PicoBgTable_Spawn(table, agent, dir, "Command visibility", commands[i], &error);
+        bool ok = result && !error;
+        free(result); free(error);
+        if (!ok) goto done;
+    }
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    RichText_SetMeasureFunction(Pico_MeasureTextUtf8, NULL);
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    g_find_press = g_find_down = false;
+    PicoComposer_SetText(host, "/background");
+    PicoHost_Submit(host);
+    for (int i = 0; i < 2; i++)
+    {
+        Clay_RenderCommandArray rendered = PicoHost_LayoutShell(host, 800, 0);
+        Clay_ElementData row = Clay_GetElementData(CLAY_IDI("BackgroundRow", i));
+        if (!row.found || !BackgroundCommandTextVisible(&rendered, row.boundingBox, commands[i], i == 0)) goto done;
+        g_find_pointer = (Vector2){row.boundingBox.x + 15, row.boundingBox.y + 15};
+        g_find_press = g_find_down = true;
+        Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+        pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent);
+        g_find_press = g_find_down = false;
+        if (!pico_ui_modal_is_top(host, "background-log")) goto done;
+        rendered = PicoHost_LayoutShell(host, 800, 0);
+        Clay_ElementData log = Clay_GetElementData(CLAY_ID("BackgroundLogScroll"));
+        if (!log.found || !BackgroundCommandTextVisible(&rendered, log.boundingBox, commands[i], i == 0)) goto done;
+        pico_ui_modal_pop(host, "background-log");
+        Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+    }
+    /* Commands taller than either viewport must stay complete and scrollable. */
+    PicoBgTable_ResetAgent(table, agent);
+    char tall_command[2048] = "";
+    for (int i = 0; i < 80; i++) strcat(tall_command, "# command padding\n");
+    strcat(tall_command, "# command-tail-visible");
+    char *error = NULL;
+    char *result = PicoBgTable_Spawn(table, agent, dir, "Tall command", tall_command, &error);
+    bool spawned = result && !error;
+    free(result); free(error);
+    if (!spawned) goto done;
+    for (int view = 0; view < 2; view++)
+    {
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        Clay_ElementId scroll_id = view == 0 ? CLAY_ID("BackgroundListScroll") : CLAY_ID("BackgroundLogScroll");
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(scroll_id);
+        if (!scroll.found || !scroll.scrollPosition ||
+            scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
+        scroll.scrollPosition->y = scroll.scrollContainerDimensions.height - scroll.contentDimensions.height;
+        Clay_RenderCommandArray rendered = PicoHost_LayoutShell(host, 800, 0);
+        Clay_ElementData panel = Clay_GetElementData(scroll_id);
+        if (!panel.found || !BackgroundCommandTextVisible(&rendered, panel.boundingBox,
+                                                          "# command-tail-visible", false)) goto done;
+        if (view == 0)
+        {
+            g_find_pointer = (Vector2){panel.boundingBox.x + 15,
+                                      panel.boundingBox.y + panel.boundingBox.height - 15};
+            g_find_press = g_find_down = true;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent);
+            g_find_press = g_find_down = false;
+            if (!pico_ui_modal_is_top(host, "background-log")) goto done;
+        }
+    }
+    rc = 0;
+done:
+    g_clay_frame_test = g_find_input_test = g_find_press = g_find_down = false;
+    if (host) pico_host_free(host);
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (rc) Fail("background list and log must show the selected job's wrapped monospace command");
+    return rc;
+#else
+    return 0;
+#endif
+}
+
+static int TestBackgroundRowPresentation(void)
+{
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    char dir[] = "/tmp/pico-bg-row-XXXXXX", cfg[] = "/tmp/pico-bg-row-cfg-XXXXXX";
+    const char *commands[] = {"sleep 60", "exit 7", "kill -TERM $$"};
+    const char *descriptions[] = {"Sleep for sixty seconds",
+        "A longer process description wraps without displacing the status badge or its action",
+        "Terminated job"};
+    const char *details[] = {"Process is running", "Exit code: 7", "Terminated by signal: 15"};
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    int rc = 1;
+    Clay_SetCurrentContext(NULL);
+    if (!mkdtemp(dir) || !mkdtemp(cfg) || !Pico_InitClay((Clay_Dimensions){1100, 800})) goto done;
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    PicoWorkspaceId workspace;
+    PicoAgentId agent;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true,
+                                     .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace) != PICO_OK ||
+        pico_main_agent_create(host, workspace, &options, &agent) != PICO_OK) goto done;
+    PicoBgTable *table = PicoWorkspace_Background(PicoHost_FindWorkspace(host, workspace));
+    for (int i = 0; i < 3; i++)
+    {
+        char *error = NULL;
+        char *result = PicoBgTable_Spawn(table, agent, dir, descriptions[i], commands[i], &error);
+        bool ok = result && !error;
+        free(result); free(error);
+        if (!ok) goto done;
+    }
+    PicoBgJobInfo jobs[3];
+    bool finished = false;
+    PICO_TEST_WAIT_LOOP("background row exit details")
+    {
+        PicoBgTable_Pump(table);
+        if (PicoBgTable_CopyJobs(table, agent, jobs, 3) == 3 &&
+            jobs[1].status != PICO_BG_RUNNING && jobs[2].status != PICO_BG_RUNNING)
+        { finished = true; break; }
+    }
+    if (!finished) goto done;
+    Clay_SetMeasureTextFunction(Pico_MeasureTextUtf8, NULL);
+    RichText_SetMeasureFunction(Pico_MeasureTextUtf8, NULL);
+    g_clay_frame_test = g_find_input_test = true;
+    g_find_key = -1;
+    g_find_press = g_find_down = false;
+    Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+    PicoComposer_SetText(host, "/background");
+    PicoHost_Submit(host);
+    for (int i = 0; i < 3; i++)
+    {
+        Clay_RenderCommandArray rendered = PicoHost_LayoutShell(host, 800, 0);
+        Clay_ElementData row = Clay_GetElementData(CLAY_IDI("BackgroundRow", i));
+        Clay_ElementData header = Clay_GetElementData(CLAY_IDI("BackgroundRowHeader", i));
+        Clay_ElementData badge = Clay_GetElementData(CLAY_IDI("BackgroundJobBadge", i));
+        Clay_ElementData title = Clay_GetElementData(CLAY_IDI("BackgroundRowTitle", i));
+        Clay_ElementData status = Clay_GetElementData(CLAY_IDI("BackgroundStatus", i));
+        Clay_ElementData command = Clay_GetElementData(CLAY_IDI("BackgroundCommand", i));
+        char abbreviation[] = {jobs[i].id[0], jobs[i].id[strlen(jobs[i].id) - 1], 0};
+        if (!row.found || !header.found || !badge.found || !title.found || !status.found || !command.found ||
+            !FindCardText(&rendered, abbreviation) || FindCardText(&rendered, jobs[i].id) ||
+            badge.boundingBox.x + badge.boundingBox.width > title.boundingBox.x ||
+            title.boundingBox.x + title.boundingBox.width > status.boundingBox.x ||
+            status.boundingBox.x + status.boundingBox.width > row.boundingBox.x + row.boundingBox.width ||
+            command.boundingBox.y < header.boundingBox.y + header.boundingBox.height ||
+            !ShellVerticallyContains(row.boundingBox, command.boundingBox) ||
+            !BackgroundCommandTextVisible(&rendered, command.boundingBox, commands[i], false) ||
+            Clay_GetElementData(CLAY_ID("BackgroundStatusTip")).found) goto done;
+        if (i == 0)
+        {
+            Clay_Color row_idle, command_idle, row_hover, command_hover;
+            if (!BackgroundRenderedFill(&rendered, CLAY_IDI("BackgroundRow", i), &row_idle) ||
+                !BackgroundRenderedFill(&rendered, CLAY_IDI("BackgroundCommand", i), &command_idle)) goto done;
+            /* Hovering nested command content highlights the whole clickable row. */
+            Clay_SetPointerState((Clay_Vector2){command.boundingBox.x + command.boundingBox.width / 2,
+                                                command.boundingBox.y + command.boundingBox.height / 2}, false);
+            for (int pass = 0; pass < 3; pass++)
+            {
+                rendered = PicoHost_LayoutShell(host, 800, 0);
+                if (!BackgroundRenderedFill(&rendered, CLAY_IDI("BackgroundRow", i), &row_hover) ||
+                    !BackgroundRenderedFill(&rendered, CLAY_IDI("BackgroundCommand", i), &command_hover) ||
+                    BackgroundFillEqual(row_idle, row_hover) || BackgroundFillEqual(command_idle, command_hover) ||
+                    !ShellBoxStable(row.boundingBox, Clay_GetElementData(CLAY_IDI("BackgroundRow", i)).boundingBox) ||
+                    !ShellBoxStable(command.boundingBox, Clay_GetElementData(CLAY_IDI("BackgroundCommand", i)).boundingBox)) goto done;
+            }
+            Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+            rendered = PicoHost_LayoutShell(host, 800, 0);
+            if (!BackgroundRenderedFill(&rendered, CLAY_IDI("BackgroundRow", i), &row_hover) ||
+                !BackgroundRenderedFill(&rendered, CLAY_IDI("BackgroundCommand", i), &command_hover) ||
+                !BackgroundFillEqual(row_idle, row_hover) || !BackgroundFillEqual(command_idle, command_hover)) goto done;
+        }
+        Clay_SetPointerState((Clay_Vector2){status.boundingBox.x + status.boundingBox.width / 2,
+                                            status.boundingBox.y + status.boundingBox.height / 2}, false);
+        for (int pass = 0; pass < 3; pass++)
+        {
+            rendered = PicoHost_LayoutShell(host, 800, 0);
+            if (!FindCardText(&rendered, details[i]) ||
+                !ShellBoxStable(row.boundingBox, Clay_GetElementData(CLAY_IDI("BackgroundRow", i)).boundingBox)) goto done;
+        }
+        Clay_SetPointerState((Clay_Vector2){0, 0}, false);
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        if (Clay_GetElementData(CLAY_ID("BackgroundStatusTip")).found) goto done;
+    }
+    /* Stop is an independent action, not a click-through to the log view. */
+    Clay_ElementData stop = Clay_GetElementData(CLAY_IDI("BackgroundKill", 0));
+    if (!stop.found) goto done;
+    g_find_pointer = (Vector2){stop.boundingBox.x + stop.boundingBox.width / 2,
+                              stop.boundingBox.y + stop.boundingBox.height / 2};
+    g_find_press = g_find_down = true;
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent);
+    g_find_press = g_find_down = false;
+    Clay_RenderCommandArray rendered = PicoHost_LayoutShell(host, 800, 0);
+    if (pico_ui_modal_has(host, "background-log") || Clay_GetElementData(CLAY_IDI("BackgroundKill", 0)).found ||
+        !FindCardText(&rendered, "Stopped")) goto done;
+    Clay_ElementData status = Clay_GetElementData(CLAY_IDI("BackgroundStatus", 0));
+    Clay_SetPointerState((Clay_Vector2){status.boundingBox.x + status.boundingBox.width / 2,
+                                        status.boundingBox.y + status.boundingBox.height / 2}, false);
+    rendered = PicoHost_LayoutShell(host, 800, 0);
+    if (!FindCardText(&rendered, "Terminated by signal: 9")) goto done;
+    rc = 0;
+done:
+    g_clay_frame_test = g_find_input_test = g_find_press = g_find_down = false;
+    if (host) pico_host_free(host);
+    Pico_FreeClay();
+    Clay_SetCurrentContext(previous);
+    unsetenv("XDG_CONFIG_HOME");
+    RmRf(cfg); RmRf(dir);
+    if (rc) Fail("background rows must separate identity, status, action and command with accurate hover details");
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 static int TestBackgroundJobsSurviveWorkspaceReload(void)
 {
     PicoHost *host = NULL;
@@ -22324,6 +22612,14 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestBusySlashCommandsOpenBackgroundWithoutJobs()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestBackgroundCommandsVisible()) != 0)
+    {
+        return 1;
+    }
+    if (PICO_TEST_RUN(TestBackgroundRowPresentation()) != 0)
     {
         return 1;
     }

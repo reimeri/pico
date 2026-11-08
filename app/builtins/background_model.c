@@ -1113,6 +1113,7 @@ int PicoBgTable_CopyJobs(PicoBgTable *table, PicoAgentId agent_id, PicoBgJobInfo
         snprintf(info->id, sizeof(info->id), "%s", job->id);
         snprintf(info->description, sizeof(info->description), "%s",
                  job->description ? job->description : "");
+        snprintf(info->command, sizeof(info->command), "%s", job->command ? job->command : "");
         info->status = job->status;
         info->exit_code = job->exit_code;
         info->term_signal = job->term_signal;

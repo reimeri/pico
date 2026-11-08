@@ -22,6 +22,7 @@ typedef enum PicoBgStatus {
 typedef struct PicoBgJobInfo {
     char id[PICO_BG_ID_MAX];
     char description[PICO_BG_DESC_MAX + 1];
+    char command[PICO_BG_CMD_MAX + 1];
     PicoBgStatus status;
     int exit_code;
     int term_signal;

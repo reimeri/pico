@@ -48,6 +48,7 @@ target_compile_options(raylib PRIVATE
 # pulls in the desktop backend) wraps glfwCreateWindow so
 # PICO_DISABLE_NATIVE_SCALE=1 can restore the 1:1 logical framebuffer.
 include(cmake/PicoRaylibStartup.cmake)
+include(cmake/PicoRaylibText.cmake)
 
 # GLFW 3.4 (bundled in raylib 5.5) aborts on Wayland file drag-over: dataOfferListener
 # only implements `offer`, so wl_data_offer.source_actions/action dispatch through a
@@ -1016,6 +1017,10 @@ if(BUILD_TESTING)
     target_compile_options(pico_font_symbols_tests PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(pico_font_symbols_tests PRIVATE -Wl,--gc-sections)
     target_link_libraries(pico_font_symbols_tests PRIVATE raylib)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(pico_font_symbols_tests PRIVATE PICO_FONT_METADATA_TEST_WRAPS=1)
+        target_link_options(pico_font_symbols_tests PRIVATE -Wl,--wrap=GetImageAlphaBorder)
+    endif()
     add_test(NAME pico_font_symbols_tests COMMAND pico_font_symbols_tests)
 
     add_executable(pico_chat_width_tests

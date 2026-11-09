@@ -788,4 +788,11 @@ public auth ABI is added. See [auth](auth.md#saving-api-keys-in-pico).
 (Roboto Mono Bold), alongside the proportional faces. Both use the host font
 cache and Unicode fallback; selecting a face does not opt into badge-specific
 ink centering. `Pico_FontAt` returns borrowed, host-owned font data: do not unload
-or mutate its glyphs, atlas, or images. See [Views: Fonts](views.md#fonts).
+or mutate its glyphs, atlas, or images. Atlas-owned codepoint indexes and
+precomputed glyph ink bounds share that lifetime and are discarded before
+atlas replacement/unload. Existing Raylib text APIs use the index transparently
+without changing `Font`'s ABI or missing-glyph behavior. Extension-owned fonts
+retain Raylib's ordinary behavior and ownership. Font-cache access and
+measurement remain main-thread UI operations; unrelated Raylib CPU-image work
+on another thread does not access the UI thread's font metadata registry.
+See [Views: Fonts](views.md#fonts).

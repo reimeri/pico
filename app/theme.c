@@ -1,5 +1,6 @@
 #include "theme_internal.h"
 #include "text_ink.h"
+#include "font_metadata.h"
 #include "docs_path.h"
 
 #include <math.h>
@@ -33,6 +34,7 @@ static int *g_codepoints = NULL;
 static int g_codepoint_count = 0;
 static int g_codepoint_capacity = 0;
 static Font g_fonts[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
+static PicoFontMetadata *g_font_metadata[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_ready[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static bool g_font_owned[FONT_COUNT][PICO_FONT_SIZE_SLOTS];
 static float g_font_scale = PICO_FONT_SCALE_DEFAULT;
@@ -414,9 +416,11 @@ Font Pico_FontAt(uint16_t fontId, uint16_t fontSize)
     }
     if (g_font_ready[fontId][idx] && g_font_owned[fontId][idx])
     {
-        /* Replace a slot rasterized for a previous device scale. */
+        /* Unregister before releasing the old atlas's identity/storage. */
+        PicoFontMetadata_Destroy(g_font_metadata[fontId][idx]);
         Pico_UnloadFont(g_fonts[fontId][idx]);
     }
+    g_font_metadata[fontId][idx] = owned ? PicoFontMetadata_Create(font) : NULL;
     g_fonts[fontId][idx] = font;
     g_font_ready[fontId][idx] = true;
     g_font_owned[fontId][idx] = owned;
@@ -521,6 +525,7 @@ Rectangle Pico_TextInkBounds(Font font, Clay_StringSlice text, float size, float
     float scale = size / font.baseSize;
     float pen = 0;
     bool found = false;
+    const Rectangle *glyph_ink = PicoFontMetadata_InkBounds(font);
     for (int pos = 0; pos < text.length;)
     {
         /* Raylib's decoder expects a terminated string, unlike Clay slices. */
@@ -534,8 +539,9 @@ Rectangle Pico_TextInkBounds(Font font, Clay_StringSlice text, float size, float
         pos += count;
         int index = GetGlyphIndex(font, cp);
         GlyphInfo glyph = font.glyphs[index];
-        Rectangle ink = glyph.image.data ? GetImageAlphaBorder(glyph.image, 0.0f) :
-                                          (Rectangle){0, 0, font.recs[index].width, font.recs[index].height};
+        Rectangle ink = glyph_ink ? glyph_ink[index] :
+                        glyph.image.data ? GetImageAlphaBorder(glyph.image, 0.0f) :
+                        (Rectangle){0, 0, font.recs[index].width, font.recs[index].height};
         if (cp != ' ' && cp != '\t' && ink.width > 0 && ink.height > 0)
         {
             ink.x = pen + (glyph.offsetX + ink.x) * scale;
@@ -673,6 +679,8 @@ void Pico_UnloadFonts(Font *fonts)
     {
         for (int i = 0; i < PICO_FONT_SIZE_SLOTS; i++)
         {
+            PicoFontMetadata_Destroy(g_font_metadata[face][i]);
+            g_font_metadata[face][i] = NULL;
             if (g_font_owned[face][i])
             {
                 Pico_UnloadFont(g_fonts[face][i]);

@@ -3,10 +3,22 @@
 #include "pico/theme.h"
 #include "text_ink.h"
 #include "docs_path.h"
+#include "font_metadata.h"
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef PICO_FONT_METADATA_TEST_WRAPS
+static int g_alpha_scans;
+Rectangle __real_GetImageAlphaBorder(Image image, float threshold);
+Rectangle __wrap_GetImageAlphaBorder(Image image, float threshold)
+{
+    g_alpha_scans++;
+    return __real_GetImageAlphaBorder(image, threshold);
+}
+#endif
 
 static int Fail(const char *message)
 {
@@ -188,6 +200,147 @@ static int TestBadgeFontAndOrdinaryText(void)
     return 0;
 }
 
+static int TestIndexedLookupAndStorageReuse(void)
+{
+    /* External fonts remain unordered and mutable under Raylib's original
+     * ownership rules. First match wins; a missing character uses the final
+     * '?' (or glyph zero when no '?' exists). */
+    GlyphInfo glyphs[] = {{.value = 0x03a9}, {.value = '?'}, {.value = 'A'}, {.value = '?'}};
+    Rectangle recs[4] = {{0}};
+    Font font = {.baseSize = 16, .glyphCount = 4, .glyphs = glyphs, .recs = recs};
+    const struct { int cp, expected; } cases[] = {{'A', 2}, {0x03a9, 0}, {'?', 1}, {'Z', 3}, {0x10ffff, 3}};
+    int rc = 0;
+    for (int indexed = 0; indexed < 2; indexed++)
+    {
+        PicoFontMetadata *metadata = indexed ? PicoFontMetadata_Create(font) : NULL;
+        if (indexed && !metadata) return Fail("font metadata creation failed");
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+            if (GetGlyphIndex(font, cases[i].cp) != cases[i].expected)
+                rc = Fail("indexed and ordinary Raylib fonts must retain lookup/fallback semantics");
+        PicoFontMetadata_Destroy(metadata);
+        if (rc) return rc;
+    }
+    /* Reuse the exact storage, not just a likely allocator-reused address. */
+    glyphs[0].value = 'Z';
+    glyphs[1].value = 'B';
+    glyphs[3].value = 'C';
+    if (GetGlyphIndex(font, 'Z') != 0 || GetGlyphIndex(font, 'B') != 1 ||
+        GetGlyphIndex(font, '?') != 0)
+        return Fail("unregistered/reused glyph storage must not inherit a former font's index");
+    PicoFontMetadata *metadata = PicoFontMetadata_Create(font);
+    if (!metadata) return Fail("reused font metadata creation failed");
+    int missing = GetGlyphIndex(font, '?');
+    PicoFontMetadata_Destroy(metadata);
+    if (missing != 0) return Fail("indexed fonts without '?' must fall back to glyph zero");
+    return 0;
+}
+
+static int TestExternalFontInk(void)
+{
+    unsigned char pixels[16] = {0};
+    pixels[7] = 1; /* Even minimum nonzero alpha contributes visible ink. */
+    GlyphInfo glyph = {.value = 'A', .advanceX = 2,
+        .image = {.data = pixels, .width = 2, .height = 2, .mipmaps = 1,
+                  .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8}};
+    Rectangle rec = {0, 0, 2, 2};
+    Font font = {.baseSize = 16, .glyphCount = 1, .glyphs = &glyph, .recs = &rec};
+    Clay_StringSlice text = {.chars = "A", .length = 1};
+    PicoFontMetadata *metadata = PicoFontMetadata_Create(font);
+    if (!metadata) return Fail("bitmap metadata creation failed");
+    Rectangle indexed = Pico_TextInkBounds(font, text, 16, 0);
+    PicoFontMetadata_Destroy(metadata);
+    if (indexed.x != 1 || indexed.y != 0 || indexed.width != 1 || indexed.height != 1)
+        return Fail("minimum nonzero alpha must be included in precomputed ink");
+    /* External fonts are not implicitly cached: changing their bitmap after
+     * unregistering must be reflected by the ordinary ink-query path. */
+    pixels[7] = 0; pixels[11] = 255;
+    Rectangle changed = Pico_TextInkBounds(font, text, 16, 0);
+    if (changed.x != 0 || changed.y != 1 || changed.width != 1 || changed.height != 1)
+        return Fail("external-font ink queries must reflect current bitmap contents");
+    /* Unhandled atlas formats must retain correct original alpha semantics,
+     * not inherit Raylib GetImageColor's float-RGBA red-as-alpha bug. */
+    float float_pixel[] = {0, 0, 0, 1};
+    glyph.image = (Image){.data = float_pixel, .width = 1, .height = 1, .mipmaps = 1,
+                          .format = PIXELFORMAT_UNCOMPRESSED_R32G32B32A32};
+    metadata = PicoFontMetadata_Create(font);
+    Rectangle float_ink = Pico_TextInkBounds(font, text, 16, 0);
+    PicoFontMetadata_Destroy(metadata);
+    if (float_ink.x != 0 || float_ink.y != 0 || float_ink.width != 1 || float_ink.height != 1)
+        return Fail("other image formats must preserve original alpha semantics");
+    return 0;
+}
+
+static int TestOwnedGlyphsAndInk(void)
+{
+    for (uint16_t face = 0; face < FONT_COUNT; face++)
+    {
+        Font font = Pico_FontAt(face, PICO_FONT_UI);
+        for (int i = 0; i < font.glyphCount; i++)
+            if (font.glyphs[GetGlyphIndex(font, font.glyphs[i].value)].value != font.glyphs[i].value)
+                return Fail("indexed owned fonts must resolve every loaded Unicode glyph");
+    }
+    Font font = Pico_FontAt(FONT_MONO_BOLD, PICO_FONT_UI);
+    Rectangle blank = Pico_TextInkBounds(font, (Clay_StringSlice){.chars = " \t", .length = 2},
+                                          Pico_FontPx(PICO_FONT_UI), 0);
+    if (blank.x != 0 || blank.y != 0 || blank.width != 0 || blank.height != 0)
+        return Fail("spaces and tabs must not acquire visible ink from fallback glyphs");
+    const char *labels[] = {"UI", "MW", "ΩЖ", "ÉÉ", "A ?", "東"};
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
+    {
+        Clay_StringSlice text = {.chars = labels[i], .length = (int32_t)strlen(labels[i])};
+        /* Independently union painted pixels rather than using the production
+         * alpha-border helper to calculate the expected placement. */
+        float pen = 0, left = INFINITY, top = INFINITY, right = -INFINITY, bottom = -INFINITY;
+        float size = Pico_FontPx(PICO_FONT_UI), scale = size / font.baseSize;
+        for (int pos = 0; pos < text.length;)
+        {
+            int bytes = 0, cp = GetCodepointNext(text.chars + pos, &bytes);
+            pos += bytes;
+            int index = GetGlyphIndex(font, cp);
+            GlyphInfo glyph = font.glyphs[index];
+            Color *pixels = LoadImageColors(glyph.image);
+            if (!pixels) return Fail("glyph pixel data unavailable");
+            if (cp != ' ' && cp != '\t')
+                for (int y = 0; y < glyph.image.height; y++)
+                    for (int x = 0; x < glyph.image.width; x++)
+                        if (pixels[y * glyph.image.width + x].a)
+                        {
+                            left = fminf(left, pen + (glyph.offsetX + x) * scale);
+                            top = fminf(top, (glyph.offsetY + y) * scale);
+                            right = fmaxf(right, pen + (glyph.offsetX + x + 1) * scale);
+                            bottom = fmaxf(bottom, (glyph.offsetY + y + 1) * scale);
+                        }
+            UnloadImageColors(pixels);
+            pen += (glyph.advanceX ? glyph.advanceX : font.recs[index].width) * scale + 1.25f;
+        }
+#ifdef PICO_FONT_METADATA_TEST_WRAPS
+        g_alpha_scans = 0;
+#endif
+        Rectangle ink = Pico_TextInkBounds(font, text, size, 1.25f);
+        if (fabsf(ink.x - left) > 0.001f || fabsf(ink.y - top) > 0.001f ||
+            fabsf(ink.width - (right - left)) > 0.001f || fabsf(ink.height - (bottom - top)) > 0.001f)
+            return Fail("precomputed ink bounds must match painted glyph pixels and spacing");
+#ifdef PICO_FONT_METADATA_TEST_WRAPS
+        if (g_alpha_scans) return Fail("owned-font ink queries must not rescan glyph bitmaps");
+#endif
+    }
+    return 0;
+}
+
+static int TestFontAtlasReplacement(void)
+{
+    float original = Pico_DeviceFontScale();
+    const float devices[] = {1.0f, 1.25f, 2.0f, 1.0f};
+    int rc = 0;
+    for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); i++)
+    {
+        Pico_SetDeviceFontScale(devices[i]);
+        if (TestOwnedGlyphsAndInk()) { rc = 1; break; }
+    }
+    Pico_SetDeviceFontScale(original);
+    return rc;
+}
+
 static int TestFontLifecycle(void)
 {
     Font fonts[FONT_COUNT];
@@ -236,6 +389,7 @@ int main(void)
     {
         return rc;
     }
-    if (TestBadgeFontAndOrdinaryText()) return 1;
+    if (TestBadgeFontAndOrdinaryText() || TestIndexedLookupAndStorageReuse() ||
+        TestExternalFontInk() || TestFontAtlasReplacement()) return 1;
     return TestFontLifecycle();
 }

@@ -41,6 +41,14 @@ alignment policy: ordinary text still uses advance widths and normal line metric
 Builtin project badges opt into a private ink-centering treatment; that treatment
 is not implied by choosing the bold monospace face in an extension.
 
+`Pico_FontAt` fonts are borrowed, immutable host resources. Existing Raylib
+`GetGlyphIndex`, measurement, and drawing calls automatically use the atlas's
+codepoint index; no alternate text API is required. Pico also retains per-glyph
+ink bounds for its private centering path. Both follow the atlas's lifetime and
+are rebuilt when it is replaced (for example, for a new device scale). Do not
+mutate or unload the returned glyphs, images, or atlas. Extension-owned Raylib
+fonts keep ordinary Raylib lookup behavior; they are not implicitly cached.
+
 ## Clay layout lifetime
 
 Pico owns the process-wide Clay context and its arena. Arena initialization, replacement, and destruction are host-internal; extensions emit layout through the normal Clay APIs and must not call `Clay_Initialize`, `Clay_SetCurrentContext`, or change Clay capacity limits.

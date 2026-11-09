@@ -220,7 +220,7 @@ struct PicoHost {
     bool frame_presented; /* The last frame called EndDrawing. */
     bool window_focused;
     bool window_minimized;
-    double redraw_at; /* Earliest pending animation deadline, or zero. */
+    double redraw_at; /* Earliest pending visual deadline, or zero. */
     double frame_at; /* Previous host frame start, including skipped presentations. */
     float frame_delta;
     bool debug_enabled;
@@ -415,6 +415,14 @@ void pico_host_wakeup(PicoHost *host);
  * worker pico_host_wakeup(). Callers compute `seconds` from the nearest
  * deadline and the idle floor. */
 void PicoHost_WaitIdle(PicoHost *host, double seconds);
+
+/* Builtin decorative animation demand, independent of agent busy state.
+ * Focused frames follow presentation; unfocused frames are capped at 60 Hz.
+ * Deadlines survive the current presentation, including layout-time requests. */
+void PicoHost_RequestAnimationFrame(PicoHost *host);
+/* Schedule only when an element intersects its clip and the viewport, using
+ * completed layout bounds. Returns whether visible animation was requested. */
+bool PicoHost_RequestElementAnimation(PicoHost *host, Clay_ElementId element, Clay_ElementId clip);
 
 /* UI adapters: selected agent's workspace, else the host's primary workspace. */
 static inline PicoWorkspace *PicoHost_SelectedWorkspace(PicoHost *host)

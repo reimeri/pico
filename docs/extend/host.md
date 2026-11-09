@@ -53,8 +53,13 @@ can obtain the host with `pico_workspace_host(workspace)`. The request is coales
 and presents the next full frame; it is not an immediate draw. Use
 `pico_host_request_redraw_after(host, seconds)` for a scheduled visual change
 such as the next caret blink. Repeated requests can bring the deadline forward.
-Do not request redraw unconditionally in an idle `on_frame` callback: that
-would restore the refresh-rate GPU load. A worker cannot call either function;
+Agent activity does not by itself redraw the window. Builtin animations request
+frames only while visible; they follow presentation while focused and request
+at most 60 frames per second while unfocused. Pending questions use static
+working indicators (focused text carets still blink). Content and input
+invalidations are not delayed by this animation policy.
+Do not request redraw unconditionally in an idle or busy `on_frame` callback:
+that would restore the refresh-rate CPU/GPU load. A worker cannot call either function;
 post through Pico's worker-to-main UI/event mechanism, then invalidate from
 main-thread adoption when it changes extension-owned UI state. See
 [views](views.md#contract) and [contracts](contracts.md#threads).

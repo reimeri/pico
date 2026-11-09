@@ -18772,6 +18772,8 @@ static void InteractionFixtureFree(InteractionFixture *f)
 
 #include "layout_invalidation_test.c"
 
+#include "animation_redraw_test.c"
+
 static int TestShellStripSettings(void)
 {
     InteractionFixture f = {0};
@@ -22330,6 +22332,10 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestReadingAnchorDuringRefinement()) ||
                PICO_TEST_RUN(TestInspectRefinementReflow()) ||
                PICO_TEST_RUN(TestRefinementAfterLayoutMutation());
+    if (argc == 2 && strcmp(argv[1], "--animation-redraw") == 0)
+        return PICO_TEST_RUN(TestBusyFramesFollowVisibleAnimationDemand()) ||
+               PICO_TEST_RUN(TestWaitingQuestionDoesNotAnimate()) ||
+               PICO_TEST_RUN(TestUnmountedThinkingDoesNotAnimate());
     if (argc == 2 && strcmp(argv[1], "--layout-invalidation") == 0)
         return TestLayoutInvalidation();
     if (argc == 1 && TestLayoutInvalidation()) return 1;
@@ -22465,6 +22471,9 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_SUCCESS)) != 0 ||
         PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_PARTIAL_FAILURE)) != 0 ||
         PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_NEWER_EVENT)) != 0) return 1;
+    if (PICO_TEST_RUN(TestBusyFramesFollowVisibleAnimationDemand()) ||
+        PICO_TEST_RUN(TestWaitingQuestionDoesNotAnimate()) ||
+        PICO_TEST_RUN(TestUnmountedThinkingDoesNotAnimate())) return 1;
     if (PICO_TEST_RUN(TestIdleFrameOnlyPresentsOnInvalidation()) != 0) return 1;
     if (PICO_TEST_RUN(TestIdleFrameRetainsChatScroll()) != 0) return 1;
     if (PICO_TEST_RUN(TestFrameRetriesFailedArenaReplacement()) != 0)

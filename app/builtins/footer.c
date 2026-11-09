@@ -888,7 +888,6 @@ static void RenderStatus(PicoHost *app)
                           .layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
                                                 .height = CLAY_SIZING_PERCENT(1)}},
                           .custom = {.customData = &decoration}}) {}
-            pico_host_request_redraw_after(app, 1.0 / 60.0);
         }
         else
         {
@@ -1070,6 +1069,8 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
         app->hovered_clickable = false;
         return;
     }
+    if (app->view_count[PICO_SLOT_FOOTER] > 0 && StatusKind(app) == FOOTER_STATUS_RUNNING)
+        PicoHost_RequestElementAnimation(app, CLAY_ID("FooterStatus"), CLAY_ID("Root"));
     bool own_menu_top = g_menu != FOOTER_MENU_NONE &&
                         pico_ui_modal_is_top(app, "footer-menu");
     bool own_worktree_top = g_worktree_open && pico_ui_modal_is_top(app, "worktree-create");

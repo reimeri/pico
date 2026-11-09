@@ -370,7 +370,6 @@ void PicoOverlay_OnFrame(PicoHost *app, void *state, float dt)
     }
     if (g_notify)
     {
-        pico_host_request_redraw(app); /* The toast progress bar changes with its TTL. */
         g_notify_ttl -= dt;
         if (g_notify_ttl <= 0.0f)
         {
@@ -464,6 +463,7 @@ static void OverlayAfterRender(PicoHost *app, const PicoHookEvent *event, void *
     {
         return;
     }
+    PicoHost_RequestElementAnimation(app, CLAY_ID("NotifyToast"), CLAY_ID("Root"));
     Clay_BoundingBox b = toast.boundingBox;
     float remaining = NotifyRemaining();
     float min_dim = b.width < b.height ? b.width : b.height;

@@ -192,6 +192,8 @@ typedef struct SidebarState
     uint64_t order_persist_generation;
     bool order_unsaved;
     float row_width;
+    Clay_ElementId *animation_elements;
+    int animation_count, animation_capacity;
     SidebarLabelChunk *label_chunks;
     SidebarLabelChunk *label_chunk;
     int label_used;
@@ -1498,6 +1500,25 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     }
 }
 
+/* Collect only emitted decorations, then test their completed bounds in
+ * AFTER_LAYOUT. Old-layout visibility would miss a newly mounted animation. */
+static void SidebarAnimateElement(SidebarState *s, Clay_ElementId id)
+{
+    if (s->animation_count == s->animation_capacity)
+    {
+        int capacity = s->animation_capacity ? s->animation_capacity * 2 : 32;
+        Clay_ElementId *elements = realloc(s->animation_elements, (size_t)capacity * sizeof(*elements));
+        if (!elements)
+        {
+            PicoHost_RequestAnimationFrame(s->host);
+            return;
+        }
+        s->animation_elements = elements;
+        s->animation_capacity = capacity;
+    }
+    s->animation_elements[s->animation_count++] = id;
+}
+
 static void RenderSessionSpinner(int row_id, float slot)
 {
     const int segments = 8;
@@ -1570,6 +1591,7 @@ static void RenderSessionDot(SidebarState *s, SidebarDotKind kind, int row_id, b
         if (loading)
         {
             RenderSessionSpinner(row_id, slot);
+            SidebarAnimateElement(s, CLAY_IDI("SidebarSessSpinner", row_id));
         }
         else if (pinned && kind == SIDEBAR_DOT_IDLE && s && s->pin_icon.id != 0)
         {
@@ -1587,6 +1609,8 @@ static void RenderSessionDot(SidebarState *s, SidebarDotKind kind, int row_id, b
         }
         else
         {
+            if (kind == SIDEBAR_DOT_RUNNING)
+                SidebarAnimateElement(s, CLAY_IDI("SidebarSessDot", row_id));
             CLAY(CLAY_IDI("SidebarSessDot", row_id),
                  {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(size),
                                         .height = CLAY_SIZING_FIXED(size)}},
@@ -2357,19 +2381,20 @@ static void DrawInboxWorkingBorder(Clay_BoundingBox bounds)
     rlEnd();
 }
 
-static void RenderInboxWorkingBorder(PicoHost *host)
+static void RenderInboxWorkingBorder(SidebarState *s, int index)
 {
     static CustomLayoutElement decoration = {
         .type = CUSTOM_LAYOUT_ELEMENT_TYPE_CALLBACK,
         .customData.draw = DrawInboxWorkingBorder,
     };
-    CLAY_AUTO_ID({.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
-                              .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT,
-                              .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
-                  .layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
-                                        .height = CLAY_SIZING_PERCENT(1)}},
-                  .custom = {.customData = &decoration}}) {}
-    pico_host_request_redraw_after(host, 1.0 / 60.0);
+    Clay_ElementId id = CLAY_IDI("SidebarInboxWorkingBorder", index);
+    CLAY(id, {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                           .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT,
+                           .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+               .layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
+                                     .height = CLAY_SIZING_PERCENT(1)}},
+               .custom = {.customData = &decoration}}) {}
+    SidebarAnimateElement(s, id);
 }
 
 static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
@@ -2407,7 +2432,7 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
             if (row->section == INBOX_WORKING)
-                RenderInboxWorkingBorder(host);
+                RenderInboxWorkingBorder(s, index);
             CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
                                      .sizing = {.width = CLAY_SIZING_GROW(0),
                                                 .height = CLAY_SIZING_FIXED(height - 10)}}})
@@ -2719,6 +2744,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
         return;
     }
     SidebarBuildLiveSnapshot(s);
+    s->animation_count = 0;
     EnsureFolderIcons(s);
     s->row_width = PicoHost_SidebarContentWidth(host);
 
@@ -3707,6 +3733,13 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     {
         return;
     }
+    for (int animation = 0; animation < s->animation_count; animation++)
+    {
+        if (PicoHost_RequestElementAnimation(host, s->animation_elements[animation], CLAY_ID("SidebarScroll")))
+            break;
+    }
+    if (host->view_count[PICO_SLOT_SIDEBAR] > 0 && s->inbox_transition_until > GetTime())
+        PicoHost_RequestElementAnimation(host, CLAY_ID("SidebarScroll"), CLAY_ID("Root"));
     if (s->edit_open)
     {
         if (pico_ui_modal_is_top(host, "sidebar-workspace-edit") &&
@@ -3951,6 +3984,8 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
     {
         return;
     }
+    /* A hidden sidebar emits no candidates in this frame. */
+    s->animation_count = 0;
     int64_t wall_now = (int64_t)time(NULL);
     if (host->sidebar_inbox_mode && s->inbox_age_redraw_at &&
         (wall_now >= s->inbox_age_redraw_at || wall_now < s->inbox_age_now))
@@ -3958,10 +3993,10 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         s->inbox_age_redraw_at = 0;
         pico_host_request_redraw(host);
     }
-    if (s->inbox_transition_until > 0)
+    if (s->inbox_transition_until > 0 && GetTime() >= s->inbox_transition_until)
     {
+        s->inbox_transition_until = 0;
         pico_host_request_redraw(host);
-        if (GetTime() >= s->inbox_transition_until) s->inbox_transition_until = 0;
     }
     SidebarStartCollapseSave(s);
     if (s->project_epoch != host->project_preference_epoch)
@@ -3976,16 +4011,6 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         s->dirty = true;
     }
     selected = PicoHost_SelectedAgentConst(host);
-    for (int i = 0; i < pico_agent_count(host); i++)
-    {
-        PicoAgentInfo info;
-        if (pico_agent_info(host, i, &info) &&
-            PicoAgent_IsBusy(PicoHost_FindAgent(host, info.id)))
-        {
-            pico_host_request_redraw(host);
-            break;
-        }
-    }
     if (s->order_persist_generation != 0)
     {
         PicoCatalogPersistStatus status = PicoCatalog_OrderPersistStatus(
@@ -4121,6 +4146,7 @@ static void SidebarShutdown(PicoHost *host, void *state)
     free(s->ui);
     free(s->inbox_rows);
     free(s->live_titles);
+    free(s->animation_elements);
     for (SidebarLabelChunk *chunk = s->label_chunks; chunk;)
     {
         SidebarLabelChunk *next = chunk->next;

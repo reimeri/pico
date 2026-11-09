@@ -2546,6 +2546,39 @@ void pico_host_request_redraw_after(PicoHost *host, double delay_seconds)
         host->redraw_at = at;
 }
 
+void PicoHost_RequestAnimationFrame(PicoHost *host)
+{
+    if (!host || host->window_minimized)
+        return;
+    /* Anchor all effects to the same frame start, not their draw time: a swap
+     * that already took one refresh must not add another full refresh of sleep.
+     * Do not use an immediate invalidation here; layout's request would be
+     * consumed by the current presentation instead of advancing the animation. */
+    double start = host->frame_at > 0.0 ? host->frame_at : GetTime();
+    double at = start + (host->window_focused ? 0.0 : 1.0 / 60.0);
+    if (host->redraw_at == 0.0 || at < host->redraw_at)
+        host->redraw_at = at;
+}
+
+bool PicoHost_RequestElementAnimation(PicoHost *host, Clay_ElementId element, Clay_ElementId clip)
+{
+    if (!host || host->window_minimized)
+        return false;
+    Clay_ElementData el = Clay_GetElementData(element);
+    Clay_ElementData bounds = Clay_GetElementData(clip);
+    if (!el.found || !bounds.found)
+        return false;
+    Clay_BoundingBox a = el.boundingBox, b = bounds.boundingBox;
+    float left = fmaxf(0.0f, fmaxf(a.x, b.x));
+    float top = fmaxf(0.0f, fmaxf(a.y, b.y));
+    float right = fminf((float)GetScreenWidth(), fminf(a.x + a.width, b.x + b.width));
+    float bottom = fminf((float)GetScreenHeight(), fminf(a.y + a.height, b.y + b.height));
+    if (right <= left || bottom <= top)
+        return false;
+    PicoHost_RequestAnimationFrame(host);
+    return true;
+}
+
 static void PicoHost_InitFields(PicoHost *host, Font *fonts, bool safe_mode)
 {
     memset(host, 0, sizeof(*host));

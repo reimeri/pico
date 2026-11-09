@@ -206,6 +206,7 @@ typedef struct ChatState {
     bool refinement_timed;
     bool main_laid_out;
     bool inspect_laid_out;
+    Clay_ElementId main_sheen, inspect_sheen; /* Emitted in this layout only. */
     ChatBookmark *bookmarks;
     ChatBookmark visible_bookmark;
     ChatBookmark restore_bookmark;
@@ -1151,6 +1152,11 @@ static void RenderThinkLine(const TranscriptView *view, PicoTraceLine *line, int
         view->app->hovered_tool = true;
     }
     bool live = ThinkBurstLive(view, message_index, trace_index);
+    if (live)
+    {
+        if (view->id_ns == 0) s_active_chat_state->main_sheen = label_id;
+        else s_active_chat_state->inspect_sheen = label_id;
+    }
     const char *label = ThinkHeaderText(line, live);
     Clay_Color color = hovered ? COLOR_TOOL_NAME_HOVER : COLOR_MUTED;
 
@@ -1198,6 +1204,8 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
 {
     Clay_ElementId row_id = ThinkSynthRowId(view, message_index);
     Clay_ElementId label_id = ThinkSynthId(view, message_index);
+    if (view->id_ns == 0) s_active_chat_state->main_sheen = label_id;
+    else s_active_chat_state->inspect_sheen = label_id;
     CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                              .childGap = 6,
                              .sizing = {.width = CLAY_SIZING_GROW(0)}}})
@@ -2829,7 +2837,11 @@ void PicoChat_PrepareRefinement(PicoHost *app, bool interacting)
 void PicoChat_BeginLayout(PicoHost *app)
 {
     ChatState *state = ChatScrollState(app);
-    if (state) state->main_laid_out = state->inspect_laid_out = false;
+    if (state)
+    {
+        state->main_laid_out = state->inspect_laid_out = false;
+        state->main_sheen = state->inspect_sheen = (Clay_ElementId){0};
+    }
 }
 
 bool PicoChat_ViewportReady(PicoHost *app, bool unsettled)
@@ -2847,6 +2859,12 @@ void PicoChat_DidPresent(PicoHost *app)
 {
     ChatState *state = ChatScrollState(app);
     if (!state) return;
+    /* Clay retains bounds for removed elements. Only the label emitted by
+     * this layout can demand another frame, not a virtualized-away live row. */
+    if (!PicoUi_ModalOpen(app) && state->main_sheen.id)
+        PicoHost_RequestElementAnimation(app, state->main_sheen, CLAY_ID("ChatScroll"));
+    if (InspectIsTopModal(app) && state->inspect_sheen.id)
+        PicoHost_RequestElementAnimation(app, state->inspect_sheen, CLAY_ID("SubagentChatScroll"));
     if (state->main_laid_out && PicoTranscriptVirtual_ViewportReady(&state->main_virtual))
         state->main_virtual.presented = true;
     if (state->inspect_laid_out && PicoTranscriptVirtual_ViewportReady(&state->inspect_virtual))
@@ -4330,7 +4348,8 @@ static void FormatLiveTimer(int ms, char *buf, size_t cap)
     snprintf(buf, cap, "%lds", sec);
 }
 
-static void DrawLiveTimerLabel(Clay_BoundingBox row, const Clay_BoundingBox *chevron, int ms)
+static void DrawLiveTimerLabel(const TranscriptView *view, Clay_BoundingBox clip,
+                               Clay_BoundingBox row, const Clay_BoundingBox *chevron, int ms)
 {
     char text[32];
     FormatLiveTimer(ms, text, sizeof(text));
@@ -4343,7 +4362,15 @@ static void DrawLiveTimerLabel(Clay_BoundingBox row, const Clay_BoundingBox *che
     Clay_BoundingBox anchor = chevron ? *chevron : row;
     float x = (chevron ? chevron->x + chevron->width : row.x + row.width) + 8.0f;
     float y = anchor.y + (anchor.height - size.y) * 0.5f;
+    Rectangle visible;
+    IntersectScissor(clip, (Clay_BoundingBox){x, y, size.x, size.y}, &visible);
+    if (visible.width <= 0.0f || visible.height <= 0.0f)
+        return;
     DrawTextEx(font, text, (Vector2){roundf(x), roundf(y)}, px, 0.0f, ClayToRay(COLOR_MUTED));
+    /* The label displays whole seconds, not a smooth animation. A pending
+     * question has static working indicators and must not keep repainting. */
+    if (!PicoAgent_AskUiOpen(view->owner))
+        pico_host_request_redraw_after(view->app, (1000 - ms % 1000) / 1000.0);
 }
 
 static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox clip)
@@ -4377,7 +4404,7 @@ static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox cli
             Clay_ElementId chevron_id =
                 line->is_tool ? ToolChevronId(view, i, t) : ThinkChevronId(view, i, t);
             Clay_ElementData chevron = Clay_GetElementData(chevron_id);
-            DrawLiveTimerLabel(row.boundingBox, chevron.found ? &chevron.boundingBox : NULL, live_ms);
+            DrawLiveTimerLabel(view, clip, row.boundingBox, chevron.found ? &chevron.boundingBox : NULL, live_ms);
         }
         bool has_source = msg->source && msg->source[0];
         bool live_llm = i == LastConversationMessage(view) && view->state == PICO_AGENT_LLM_WAIT;
@@ -4389,7 +4416,7 @@ static void DrawTraceLiveTimers(const TranscriptView *view, Clay_BoundingBox cli
             Clay_ElementData chevron = Clay_GetElementData(ThinkSynthChevronId(view, i));
             if (row.found)
             {
-                DrawLiveTimerLabel(row.boundingBox, chevron.found ? &chevron.boundingBox : NULL,
+                DrawLiveTimerLabel(view, clip, row.boundingBox, chevron.found ? &chevron.boundingBox : NULL,
                                    live_ms);
             }
         }
@@ -4485,8 +4512,11 @@ static void PicoChat_DrawLiveTimers(PicoHost *app)
     }
 }
 
-static void DrawThinkSheenLabel(Clay_ElementId label_id, Clay_BoundingBox clip, const char *text)
+static void DrawThinkSheenLabel(PicoHost *app, Clay_ElementId label_id, Clay_BoundingBox clip, const char *text)
 {
+    ChatState *state = ChatScrollState(app);
+    if (!state || (label_id.id != state->main_sheen.id && label_id.id != state->inspect_sheen.id))
+        return;
     Clay_ElementData el = Clay_GetElementData(label_id);
     if (!el.found || !text || !text[0])
     {
@@ -4558,11 +4588,11 @@ static void PicoChat_DrawThinkSheen(PicoHost *app)
     {
         int t = msg->trace_count - 1;
         PicoTraceLine *line = &msg->trace[t];
-        DrawThinkSheenLabel(ThinkLabelId(&main, last, t), scroll.boundingBox,
+        DrawThinkSheenLabel(app, ThinkLabelId(&main, last, t), scroll.boundingBox,
                             ThinkHeaderText(line, true));
         return;
     }
-    DrawThinkSheenLabel(ThinkSynthId(&main, last), scroll.boundingBox, LiveProviderLabel(&main));
+    DrawThinkSheenLabel(app, ThinkSynthId(&main, last), scroll.boundingBox, LiveProviderLabel(&main));
 }
 
 static void PicoChat_DrawInspectSheen(PicoHost *app)
@@ -4606,11 +4636,11 @@ static void PicoChat_DrawInspectSheen(PicoHost *app)
         ThinkHasBody(&msg->trace[msg->trace_count - 1]))
     {
         int t = msg->trace_count - 1;
-        DrawThinkSheenLabel(ThinkLabelId(&view, last, t), clip,
+        DrawThinkSheenLabel(app, ThinkLabelId(&view, last, t), clip,
                             ThinkHeaderText(&msg->trace[t], true));
         return;
     }
-    DrawThinkSheenLabel(ThinkSynthId(&view, last), clip, LiveProviderLabel(&view));
+    DrawThinkSheenLabel(app, ThinkSynthId(&view, last), clip, LiveProviderLabel(&view));
 }
 
 void PicoChat_DrawOverlay(PicoHost *app, const PicoHookEvent *event, void *state)
@@ -4643,8 +4673,6 @@ static void ChatOnFrame(PicoHost *app, void *state, float dt)
     {
         return;
     }
-    const PicoAgent *active = PicoHost_TranscriptAgentConst(app);
-    if (PicoAgent_IsBusy(active)) pico_host_request_redraw(app);
     if (PicoHost_SidebarResizeBlocksInput(app)) return;
     for (int i = 0; i < EMPTY_CARD_COUNT; i++)
     {

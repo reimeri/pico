@@ -123,6 +123,12 @@ change. A request coalesces with other requests and causes a full redraw at or
 after that frame/deadline. A request issued during `AFTER_RENDER` schedules a
 future frame, not recursion. Registration/reload invalidates the shell, but a
 running extension must explicitly invalidate its own subsequent UI changes.
+Being busy or waiting for user input is not a rendering invalidation. Builtin
+decorative animations schedule frames only for visible elements, following
+presentation while focused and capped at 60 Hz while unfocused; real input and
+content changes still invalidate immediately. Extension-owned animations must
+likewise explicitly request their next visible change rather than relying on
+agent activity to drive frames.
 Do not call these functions on workers or request a redraw on every idle pump:
 workers use `pico_ui_post` or other core queues and the main-thread adoption
 requests a redraw; extension-specific main-thread state changes need a request

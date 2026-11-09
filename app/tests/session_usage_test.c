@@ -1991,7 +1991,7 @@ static int TestCatalogChangeToken(void)
         return Fail("title rewrite did not change catalog token");
     }
     snprintf(before, sizeof(before), "%s", after);
-    if (PicoCatalog_SetCollapsed(ws_path, true) != 0 ||
+    if (PicoCatalog_SetProjectName(ws_path, "Renamed token project") != 0 ||
         !PicoCatalog_ReadChangeToken(after) || strcmp(before, after) == 0)
     {
         return Fail("catalog metadata write did not change token");
@@ -2075,19 +2075,6 @@ static int TestCatalog(void)
     }
     PicoCatalog_Free(list, n);
 
-    if (PicoCatalog_SetCollapsed(ws, true) != 0)
-    {
-        return Fail("set collapsed");
-    }
-    n = PicoCatalog_Scan(&list);
-    found = FindCatalogPath(list, n, ws);
-    if (!found || !found->collapsed)
-    {
-        PicoCatalog_Free(list, n);
-        return Fail("collapsed did not persist");
-    }
-    PicoCatalog_Free(list, n);
-
     if (PicoCatalog_SetSessionModel(ws, "catalogsess", "overlay-model", "low") != 0)
     {
         return Fail("set session model");
@@ -2110,7 +2097,7 @@ static int TestCatalog(void)
     n = PicoCatalog_ScanGrouped(&list);
     found = FindCatalogPath(list, n, ws);
     if (!found || strcmp(found->name, "My project") || !found->stashed ||
-        strcmp(found->path, ws) || found->session_count != 1)
+        strcmp(found->path, ws))
     {
         PicoCatalog_Free(list, n);
         return Fail("renamed stashed project keeps exact session routing");
@@ -2230,7 +2217,7 @@ static int TestCatalogSessionDelete(void)
             return Fail("session delete media");
         if (PicoCatalog_DeleteSession(&host, ws, "parentsess") != PICO_OK)
             return Fail("session delete");
-        n = PicoCatalog_ScanGrouped(&list);
+        n = PicoCatalog_Scan(&list);
         found = FindCatalogPath(list, n, ws);
         if (found)
         {
@@ -2794,29 +2781,6 @@ static int TestCatalogCacheCoversOlderSessions(void)
         return Fail("catalog listing stays at the visible session limit");
     }
     PicoCatalog_Free(catalog, catalog_n);
-    catalog_n = PicoCatalog_ScanGrouped(&catalog);
-    found = FindCatalogPath(catalog, catalog_n, ws);
-    if (!found || found->session_count != 10 || !found->has_more_sessions)
-    {
-        PicoCatalog_Free(catalog, catalog_n);
-        return Fail("sidebar initially loads only the newest session page");
-    }
-    PicoCatalog_Free(catalog, catalog_n);
-    PicoCatalogPage page = {0};
-    snprintf(page.path, sizeof(page.path), "%s", ws);
-    page.shown = PICO_MAX_CATALOG_SESSIONS + 10;
-    catalog_n = PicoCatalog_ScanGroupedPaged(&catalog, NULL, &page, 1);
-    found = FindCatalogPath(catalog, catalog_n, ws);
-    bool older_visible = false;
-    if (found)
-        for (int i = 0; i < found->session_count; i++)
-            if (strcmp(found->sessions[i].id, "old000") == 0) older_visible = true;
-    if (!found || !older_visible || found->has_more_sessions)
-    {
-        PicoCatalog_Free(catalog, catalog_n);
-        return Fail("sidebar More can reach older sessions beyond the former catalog cap");
-    }
-    PicoCatalog_Free(catalog, catalog_n);
     /* Updating an old session must not depend on it being in the visible page. */
     if (PicoCatalog_SetSessionModel(ws, "old000", "new-model", "") != 0)
         return Fail("update older session");
@@ -2960,38 +2924,40 @@ static int TestCatalogSnapshotDoesNotReconcile(void)
     agent.workspace = &workspace;
     agent.persistence = PICO_SESSION_DURABLE;
     if (PicoSession_LogUser(&host, &agent, "cached title", "cached title", NULL) !=
-        PICO_SESSION_WRITE_OK) goto done;
+        PICO_SESSION_WRITE_OK ||
+        PicoSession_LogInboxPending(&host, &agent, true) != PICO_SESSION_WRITE_OK) goto done;
     FILE *file = fopen(agent.session_path, "wb");
     if (!file) goto done;
     fprintf(file, "{\"type\":\"session\",\"version\":5,\"id\":\"%s\","
-                  "\"kind\":\"normal\",\"cwd\":\"%s\",\"title\":\"external title\"}\n",
+                  "\"kind\":\"normal\",\"cwd\":\"%s\",\"title\":\"external title\"}\n"
+                  "{\"type\":\"inbox_pending\",\"pending\":true}\n",
                   agent.session_id, ws);
     fclose(file);
     phase = "cached external title";
-    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    n = PicoCatalog_ReadGrouped(&list, NULL);
     const PicoCatalogWorkspace *found = FindCatalogPath(list, n, ws);
-    if (!found || found->session_count != 1 ||
-        strcmp(found->sessions[0].title, "cached title")) goto done;
+    if (!found || found->inbox_count != 1 ||
+        strcmp(found->inbox_sessions[0].title, "cached title")) goto done;
     PicoCatalog_Free(list, n); list = NULL;
     phase = "reconciled external title";
     n = PicoCatalog_ScanGrouped(&list);
     found = FindCatalogPath(list, n, ws);
-    if (!found || found->session_count != 1 ||
-        strcmp(found->sessions[0].title, "external title")) goto done;
+    if (!found || found->inbox_count != 1 ||
+        strcmp(found->inbox_sessions[0].title, "external title")) goto done;
     PicoCatalog_Free(list, n); list = NULL;
     phase = "deleted transcript";
     if (unlink(agent.session_path) != 0) goto done;
-    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    n = PicoCatalog_ReadGrouped(&list, NULL);
     found = FindCatalogPath(list, n, ws);
-    if (!found || found->session_count != 1) goto done;
+    if (!found || found->inbox_count != 1) goto done;
     PicoCatalog_Free(list, n); list = NULL;
     n = PicoCatalog_ScanGrouped(&list);
     found = FindCatalogPath(list, n, ws);
-    if (!found || found->session_count != 0) goto done;
+    if (!found || found->inbox_count != 0) goto done;
     PicoCatalog_Free(list, n); list = NULL;
     phase = "missing checkout";
     if (rmdir(ws) != 0) goto done;
-    n = PicoCatalog_ReadGroupedPaged(&list, NULL, NULL, 0);
+    n = PicoCatalog_ReadGrouped(&list, NULL);
     if (n != 0) goto done;
     result = 0;
 done:
@@ -3103,15 +3069,19 @@ static int TestCatalogPinMigration(int old_version)
     sqlite3_close(db); db = NULL;
     n = PicoCatalog_ScanGrouped(&list);
     const PicoCatalogWorkspace *group = FindCatalogPath(list, n, ws);
-    if (!group || strcmp(group->name, "Preserved preference") || group->session_count != 1 ||
-        group->sessions[0].pinned || group->inbox_count) goto done;
+    if (!group || strcmp(group->name, "Preserved preference") || group->inbox_count ||
+        group->session_count) goto done;
+    PicoCatalog_Free(list, n); list = NULL; n = 0;
+    n = PicoCatalog_Scan(&list);
+    group = FindCatalogPath(list, n, ws);
+    if (!group || group->session_count != 1 || group->sessions[0].pinned) goto done;
     time_t recency = group->sessions[0].mtime;
     PicoCatalog_Free(list, n); list = NULL; n = 0;
     if (PicoCatalog_SetPinned(ws, agent.session_id, true) != 0) goto done;
     n = PicoCatalog_ScanGrouped(&list);
     group = FindCatalogPath(list, n, ws);
     if (!group || group->inbox_count != 1 || !group->inbox_sessions[0].pinned ||
-        group->sessions[0].mtime != recency) goto done;
+        group->inbox_sessions[0].mtime != recency) goto done;
     PicoCatalog_Free(list, n); list = NULL; n = 0;
     /* Transcript updates/reconciliation must not overwrite presentation metadata. */
     if (PicoSession_LogUser(&host, &agent, "Continue", "Continue", NULL) != PICO_SESSION_WRITE_OK ||
@@ -3216,15 +3186,16 @@ static int TestCatalogSQLiteImport(void)
     if (!f) goto done;
     fprintf(f, "{\"type\":\"session\",\"version\":5,\"id\":\"imported\","
             "\"kind\":\"normal\",\"cwd\":\"%s\"}\n"
-            "{\"type\":\"message\",\"role\":\"user\",\"content\":\"import title\"}\n", first);
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":\"import title\"}\n"
+            "{\"type\":\"inbox_pending\",\"pending\":true}\n", first);
     fclose(f);
     if (PicoCatalog_Ensure(second) != 0) goto done; /* initializes and imports existing preferences */
     count = PicoCatalog_ScanGrouped(&catalog);
     group = FindCatalogPath(catalog, count, first);
     if (!group || count < 2 || strcmp(catalog[0].path, second) != 0 ||
         strcmp(group->name, "Imported project") != 0 || !group->stashed ||
-        !group->collapsed || group->session_count != 1 ||
-        strcmp(group->sessions[0].id, "imported") != 0 ||
+        group->inbox_count != 1 ||
+        strcmp(group->inbox_sessions[0].id, "imported") != 0 ||
         access(meta, F_OK) == 0 || access(project, F_OK) == 0 || access(order, F_OK) == 0 ||
         access(marker, F_OK) != 0)
         goto done;
@@ -3407,8 +3378,8 @@ static int TestInboxPendingRoundTrip(void)
     free(listed);
     catalog_n = PicoCatalog_ScanGrouped(&catalog);
     found = FindCatalogPath(catalog, catalog_n, wsdir);
-    if (!listed_pending || !found || found->session_count < 1 ||
-        !found->sessions[0].inbox_pending || !found->sessions[0].unseen_complete)
+    if (!listed_pending || !found || found->inbox_count < 1 ||
+        !found->inbox_sessions[0].inbox_pending || !found->inbox_sessions[0].unseen_complete)
     {
         PicoCatalog_Free(catalog, catalog_n);
         unlink(writer_agent.session_path);
@@ -3435,7 +3406,7 @@ static int TestInboxPendingRoundTrip(void)
         return Fail("catalog inbox acknowledgement write");
     }
     catalog = NULL;
-    catalog_n = PicoCatalog_ScanGrouped(&catalog);
+    catalog_n = PicoCatalog_Scan(&catalog);
     found = FindCatalogPath(catalog, catalog_n, wsdir);
     memset(&resumed, 0, sizeof(resumed));
     resumed.workspace = &writer_ws;
@@ -4408,7 +4379,6 @@ static int TestSessionTailRecovery(void)
     }
     return 0;
 }
-
 
 static int TestNativeCheckpointPersistence(void)
 {

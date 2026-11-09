@@ -67,13 +67,11 @@ typedef struct PicoCatalogWorkspace {
     bool missing;
     char name[PICO_CATALOG_NAME_MAX];
     int order;
-    bool collapsed;
     bool stashed; /* logical project group presentation state */
     PicoCatalogSession *sessions;
     int session_count;
     int session_capacity;
-    bool has_more_sessions;
-    /* Undismissed saved sessions, independent of the project history page. */
+    /* Saved Inbox sessions in grouped snapshots, independent of other history. */
     PicoCatalogSession *inbox_sessions;
     int inbox_count;
 } PicoCatalogWorkspace;
@@ -87,11 +85,6 @@ typedef struct PicoProjectPreference {
     int pending;
     uint64_t completed_epoch;
 } PicoProjectPreference;
-
-typedef struct PicoCatalogPage {
-    char path[4096];
-    int shown;
-} PicoCatalogPage;
 
 typedef struct PicoCatalogProjectMatch {
     char path[4096];
@@ -124,22 +117,17 @@ void PicoCatalog_Free(PicoCatalogWorkspace *list, int n);
  * periodically. Only the newest 256 checkout sessions are returned here.
  * Caller frees with PicoCatalog_Free. */
 int PicoCatalog_Scan(PicoCatalogWorkspace **out);
-/* Sidebar presentation grouped by logical Git project; Paged returns at most
- * the requested newest rows plus a has-more indicator for each project. */
+/* Sidebar catalog grouped by logical Git project. Populates inbox_sessions
+ * only; ordinary history remains available via session listing/search. */
 int PicoCatalog_ScanGrouped(PicoCatalogWorkspace **out);
 int PicoCatalog_ScanGroupedInterruptible(PicoCatalogWorkspace **out, const atomic_bool *cancelled);
-int PicoCatalog_ScanGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
-                                 const PicoCatalogPage *pages, int page_count);
 /* Indexed sidebar snapshot: no JSONL enumeration or reconciliation. Filters
  * missing normal checkout directories, retains missing linked worktrees, and
  * returns cached sessions until a successful background scan refreshes them. */
-int PicoCatalog_ReadGroupedPaged(PicoCatalogWorkspace **out, const atomic_bool *cancelled,
-                                 const PicoCatalogPage *pages, int page_count);
+int PicoCatalog_ReadGrouped(PicoCatalogWorkspace **out, const atomic_bool *cancelled);
 /* Missing token files report a valid empty token. Read failures return false. */
 bool PicoCatalog_ReadChangeToken(char out[PICO_CATALOG_CHANGE_TOKEN_MAX]);
 int PicoCatalog_Ensure(const char *workspace_path);
-/* Worker-side presentation write; publishes atomic, non-durable invalidation. */
-int PicoCatalog_SetCollapsed(const char *workspace_path, bool collapsed);
 /* Project identity is the canonical main checkout path, not a session checkout. */
 int PicoCatalog_SetProjectName(const char *project_path, const char *name);
 int PicoCatalog_SetProjectStashed(const char *project_path, bool stashed);

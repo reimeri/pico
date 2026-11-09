@@ -78,25 +78,24 @@ Supports `x86_64-linux` and `aarch64-linux`; the package puts GCC on `PATH` so e
 
 Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`. Use `/apikey <openai|hyper|xai>` to save a key in a masked dialog for future restarts, then `/login <provider> key` to select it. Saved keys are plaintext in your private `auth.json`; environment keys take precedence.
 
-## Projects and Inbox
+## Inbox
 
-Click the title at the top of the sidebar to switch modes. Pico starts in **Projects**
-by default and remembers your last-used mode across restarts. Switching modes leaves
-the selected conversation open and other sessions running.
+The sidebar shows **Inbox**, grouping active and undismissed sessions under
+**Needs input** (questions, approvals, and errors), **Working**, and **Completed**
+(finished or stopped turns). Its title is a label, not a mode switch.
 
-- **Projects** groups sessions by project, with the existing Stashed section.
-- **Inbox** groups active and undismissed sessions under **Needs input** (questions,
-  approvals, and errors), **Working**, and **Completed** (finished or stopped turns).
-  Rows include their project name and move between sections as work progresses.
+- Rows include their project name and move between sections as work progresses.
   A muted age beside the name (`12s`, `5m`, `2h`, `3d`) shows time since the last
   message, steering input, or question/approval answer—not selection or assistant
   activity. It updates automatically and survives restarts; sessions without a
   recorded user action show no age.
 - The checkmark beside **Completed** dismisses those sessions from Inbox, including
-  unread completions. Their history remains available in Projects.
-- In Inbox, **+** opens a centered project picker without stopping ongoing work.
+  unread completions, without deleting their saved history. Use `/resume` to
+  reopen saved sessions.
+- **+** opens a centered project picker without stopping ongoing work.
   Choose a non-stashed project to create a session, or return to its empty draft.
-  The picker also offers **Add project**.
+  The picker also offers **Add project**, project reordering by dragging, and
+  project settings by right-clicking a project.
 
 When you switch sessions (including between projects), Pico remembers your reading
 position for five minutes after you leave. Returning sooner restores that position,

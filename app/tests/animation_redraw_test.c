@@ -89,7 +89,6 @@ static int TestWaitingQuestionDoesNotAnimate(void)
     agent = PicoHost_FindAgent(f.host, f.agent);
     if (!ConfigureMatrixWorkspace(f.host, PicoHost_FindWorkspace(f.host, f.workspace), &state, true) ||
         !PicoSettings_SetModel(agent, "matrix-model")) goto done;
-    f.host->sidebar_inbox_mode = true;
     g_window_focus_override = 0; /* No focused text caret is entitled to blink. */
     PicoAgent_StartTurn(f.host, agent, "Ask for a choice");
     PICO_TEST_WAIT(!ask.id)

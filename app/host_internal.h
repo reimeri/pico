@@ -173,8 +173,6 @@ struct PicoHost {
     PicoChatFind find;
     PicoHostPreferences preferences;
     PicoImageSettings image_settings; /* guarded by settings_mu for worker reads */
-    bool sidebar_inbox_mode;
-    bool sidebar_mode_loaded;
     bool subagent_settings_reload_blocked; /* profile draft/confirmation or persistence owns Settings */
     bool settings_reload_blocked; /* save/failure modal owns its draft until applied or closed */
     struct PicoExtensionPreference *extension_preferences;

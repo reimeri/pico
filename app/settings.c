@@ -969,25 +969,6 @@ void PicoSettings_ReadPreferences(PicoHostPreferences *p)
 
 }
 
-bool PicoSettings_ReadSidebarInboxMode(void)
-{
-    char path[4096];
-    if (!UserSettingsPath(path, sizeof(path))) return true;
-    size_t len = 0;
-    char *src = Pico_ReadFile(path, &len);
-    if (!src) return true;
-    JsonStripComments(src, len);
-    JsonDoc doc;
-    bool inbox = true;
-    if (JsonParse(&doc, src, len) == 0)
-    {
-        inbox = !JsonEq(&doc, JsonObjGet(&doc, 0, "sidebar_mode"), "projects");
-        JsonFree(&doc);
-    }
-    free(src);
-    return inbox;
-}
-
 void PicoHostPreferences_Load(PicoHost *host)
 {
     if (!host) return;
@@ -1771,14 +1752,6 @@ static bool PatchRootJson(const char *path, const char *key, const char *json_va
     bool ok = PatchRootJsonUnlocked(path, key, json_value);
     SettingsLockRelease(lock_fd);
     return ok;
-}
-
-bool PicoSettings_WriteSidebarInboxMode(bool inbox)
-{
-    char path[4096], dir[4096];
-    return Pico_ConfigDir(dir, sizeof(dir)) && MkdirP(dir) &&
-           UserSettingsPath(path, sizeof(path)) &&
-           PatchRootJson(path, "sidebar_mode", inbox ? "\"inbox\"" : "\"projects\"");
 }
 
 typedef struct PanelWidthSave { PicoPanelWidth panel; bool saved; float width; } PanelWidthSave;

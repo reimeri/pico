@@ -227,6 +227,7 @@ add_executable(pico
     builtins/commands.c
     builtins/sessions.c
     builtins/files.c
+    file_index.c
     file_mention.c
     builtins/skills.c
     builtins/skill_load.c
@@ -786,6 +787,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME pico_session_usage_tests COMMAND pico_session_usage_tests)
 
+    add_executable(pico_file_index_bench EXCLUDE_FROM_ALL tests/file_index_bench.c file_index.c file_mention.c json.c)
+    target_include_directories(pico_file_index_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(pico_file_index_bench PRIVATE Threads::Threads)
+    pico_warnings_are_errors(pico_file_index_bench)
+
+    add_executable(pico_file_index_tests tests/file_index_test.c file_index.c file_mention.c json.c)
+    target_include_directories(pico_file_index_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(pico_file_index_tests PRIVATE Threads::Threads)
+    pico_warnings_are_errors(pico_file_index_tests)
+    add_test(NAME pico_file_index_tests COMMAND pico_file_index_tests)
+
     add_executable(pico_files_tests
         tests/files_test.c
         render_scale.c
@@ -796,6 +808,7 @@ if(BUILD_TESTING)
         builtins/spell.c
         spell_engine.c
         builtins/files.c
+        file_index.c
         file_mention.c
         app.c
         browser.c
@@ -854,6 +867,7 @@ if(BUILD_TESTING)
         builtins/spell.c
         spell_engine.c
         builtins/files.c
+        file_index.c
         file_mention.c
         app.c
         browser.c
@@ -1100,6 +1114,7 @@ if(BUILD_TESTING)
         builtins/sessions.c
         builtins/complete.c
         builtins/files.c
+        file_index.c
         file_mention.c
         builtins/skills.c
         builtins/skill_load.c

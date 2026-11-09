@@ -1,6 +1,7 @@
 #include "test_wait.h"
 #include "canonical.h"
 #include "complete_internal.h"
+#include "file_mention.h"
 #include "json.h"
 #include "sanitizer_detect.h"
 #include "pico/app.h"
@@ -40,8 +41,8 @@ PicoExt pico_ext_files(void);
 PicoExt pico_ext_composer(void);
 
 #ifdef PICO_TEST_FILE_KEYS
-static bool g_file_tab;
-bool __wrap_IsKeyPressed(int key) { return g_file_tab && key == KEY_TAB; }
+static bool g_file_tab, g_file_down;
+bool __wrap_IsKeyPressed(int key) { return (g_file_tab && key == KEY_TAB) || (g_file_down && key == KEY_DOWN); }
 #endif
 
 static void *g_files_state = NULL;
@@ -108,11 +109,19 @@ static bool WriteFile(const char *path, const char *body)
     return ok;
 }
 
+static int QueryComplete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *items, int max, void *state)
+{
+    int n = pico_files_complete(workspace, prefix, items, max, state);
+    if (n < 0) PicoTest_Wait(__func__, "asynchronous file suggestions");
+    while (n < 0) { PicoTest_Poll(); n = pico_files_complete(workspace, prefix, items, max, state); }
+    return n;
+}
+
 static bool QueryHas(PicoWorkspace *workspace, const char *prefix, const char *label)
 {
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
     memset(items, 0, sizeof(items));
-    int n = pico_files_complete(workspace, prefix, items, PICO_MAX_COMPLETE_ITEMS, NULL);
+    int n = QueryComplete(workspace, prefix, items, PICO_MAX_COMPLETE_ITEMS, NULL);
     for (int i = 0; i < n; i++)
     {
         if (strcmp(items[i].label, label) == 0)
@@ -177,7 +186,7 @@ static void TestMentionImagePart(void)
     rmdir(temp);
 }
 
-static void TestCompleteRebuildsAtTokenStart(void)
+static void TestCompletePinsTokenGeneration(void)
 {
     char temp[] = "/tmp/pico-files-XXXXXX";
     if (!mkdtemp(temp))
@@ -250,10 +259,14 @@ static void TestCompleteRebuildsAtTokenStart(void)
     Check(same_token_misses_new,
           "a file created after @ is typed stays out of the active token snapshot");
 
-    PicoComposer_ReplaceRange(app, 0, app->composer.length, "@");
-    PicoComplete_Refresh(app);
-    Check(QueryHas(workspace, "", "new.txt"),
-          "replacing a mention at the same offset starts a fresh file snapshot");
+    bool saw_new = false;
+    PICO_TEST_WAIT(!saw_new)
+    {
+        PicoComposer_ReplaceRange(app, 0, app->composer.length, "@");
+        PicoComplete_Refresh(app);
+        saw_new = QueryHas(workspace, "", "new.txt");
+    }
+    Check(saw_new, "a later token sees background file-index refreshes");
 
     ext.workspace_shutdown(workspace, g_files_state);
     g_files_state = NULL;
@@ -292,7 +305,7 @@ static void TestQuotedFileRoundTrip(void)
     SetComposer(host, composer, sizeof(composer), "@");
     PicoComplete_Refresh(host);
     PicoCompleteItem items[PICO_MAX_COMPLETE_ITEMS];
-    int count = pico_files_complete(workspace, "", items, PICO_MAX_COMPLETE_ITEMS, NULL);
+    int count = QueryComplete(workspace, "", items, PICO_MAX_COMPLETE_ITEMS, NULL);
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
     {
         const char *insert = NULL;
@@ -309,6 +322,8 @@ static void TestQuotedFileRoundTrip(void)
 #ifdef PICO_TEST_FILE_KEYS
     SetComposer(host, composer, sizeof(composer), "read @\"design obsolete.md\" after");
     host->composer.cursor = (int)strlen("read @\"design ");
+    PicoComplete_Refresh(host);
+    QueryComplete(workspace, "\"design ", items, PICO_MAX_COMPLETE_ITEMS, NULL);
     PicoComplete_Refresh(host);
     g_file_tab = true;
     bool accepted = PicoComplete_HandleKeys(host);
@@ -597,6 +612,146 @@ static void TestCompleteLongPathKeepsFilename(void)
     free(memory);
 }
 
+#ifdef PICO_TEST_FILE_KEYS
+typedef struct FilePopupFixture {
+    bool pending;
+    bool updated;
+} FilePopupFixture;
+
+static int UpdatingFileQuery(PicoHost *host, const char *prefix, PicoCompleteItem *out, int max, void *state)
+{
+    (void)host; (void)prefix;
+    FilePopupFixture *fixture = state;
+    if (fixture->pending) { PicoComplete_SetStatus("Searching workspace files…"); return -1; }
+    const char *paths[] = {"design notes.md", "notes-b.md", "notes-c.md"};
+    int count = fixture->updated ? 1 : 3;
+    if (count > max) count = max;
+    for (int n = 0; n < count; n++)
+    {
+        const char *path = fixture->updated ? "updated.md" : paths[n];
+        snprintf(out[n].label,sizeof(out[n].label),"%s",path);
+        PicoFileMention_Encode(path,out[n].insert,sizeof(out[n].insert));
+        out[n].detail[0] = 0;
+    }
+    return count;
+}
+
+static Clay_RenderCommandArray RenderFilePopup(PicoHost *host)
+{
+    Clay_BeginLayout();
+    CLAY(CLAY_ID("FilePopupTestRoot"),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .sizing = {.width = CLAY_SIZING_FIXED(400), .height = CLAY_SIZING_FIXED(400)}}})
+    {
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}}}) {}
+        CLAY(CLAY_ID("FilePopupTestParent"),
+             {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(48)}}})
+        { PicoComplete_Render(host); }
+    }
+    return Clay_EndLayout(0.0f);
+}
+
+static void TestPendingFilePopupKeepsRowsAndGeometry(void)
+{
+    Clay_Context *previous = Clay_GetCurrentContext();
+    uint32_t size = Clay_MinMemorySize(); void *memory = malloc(size);
+    Check(memory != NULL,"allocate popup layout arena"); if (!memory) return;
+    Clay_Arena arena = Clay_CreateArenaWithCapacityAndMemory(size,memory);
+    Clay_Initialize(arena,(Clay_Dimensions){400,400},(Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(CompleteMeasureText,NULL);
+    PicoHost host = {0}; char composer[64]; FilePopupFixture fixture = {0};
+    host.completers[0] = (PicoCompleter){.trigger='@',.host_query=UpdatingFileQuery,.state=&fixture};
+    host.completer_count = 1;
+    PicoComplete_Close(); PicoComplete_BeforeEdit(0,64);
+    SetComposer(&host,composer,sizeof(composer),"@notes"); PicoComplete_Refresh(&host);
+    RenderFilePopup(&host);
+    Clay_ElementData original = Clay_GetElementData(CLAY_ID("CompletePopup"));
+    bool stable = original.found;
+    fixture.pending = true;
+    for (int n = 0; n < 20; n++)
+    {
+        char text[64]; snprintf(text,sizeof(text),"@notes%d",n);
+        SetComposer(&host,composer,sizeof(composer),text); PicoComplete_Refresh(&host);
+        Clay_RenderCommandArray commands = RenderFilePopup(&host);
+        Clay_ElementData popup = Clay_GetElementData(CLAY_ID("CompletePopup"));
+        stable = stable && popup.found &&
+            fabsf(popup.boundingBox.x-original.boundingBox.x) < 0.01f &&
+            fabsf(popup.boundingBox.y-original.boundingBox.y) < 0.01f &&
+            fabsf(popup.boundingBox.width-original.boundingBox.width) < 0.01f &&
+            fabsf(popup.boundingBox.height-original.boundingBox.height) < 0.01f &&
+            FindTextCommand(&commands,"notes-c.md") &&
+            !FindTextCommand(&commands,"Searching workspace files…");
+    }
+    Check(stable,"typing while file queries are pending retains rows and stable popup bounds without loading flicker");
+    fixture.pending = false; fixture.updated = true; PicoComplete_Refresh(&host);
+    Clay_RenderCommandArray commands = RenderFilePopup(&host);
+    Check(FindTextCommand(&commands,"updated.md") && !FindTextCommand(&commands,"notes-c.md"),
+          "completed file query replaces the retained suggestions");
+    PicoComplete_Close(); Clay_SetCurrentContext(previous); free(memory);
+}
+
+static void TestPendingFileRowsCanBeAccepted(void)
+{
+    PicoHost host = {0}; char composer[256]; FilePopupFixture fixture = {0};
+    host.completers[0] = (PicoCompleter){.trigger='@',.host_query=UpdatingFileQuery,.state=&fixture};
+    host.completer_count = 1;
+    PicoComplete_Close(); PicoComplete_BeforeEdit(0,256);
+    SetComposer(&host,composer,sizeof(composer),"read @old after");
+    host.composer.cursor = (int)strlen("read @old"); PicoComplete_Refresh(&host);
+    g_file_down = true; PicoComplete_HandleKeys(&host); g_file_down = false;
+    fixture.pending = true;
+    SetComposer(&host,composer,sizeof(composer),"read @new-longer after");
+    host.composer.cursor = (int)strlen("read @new-longer"); PicoComplete_Refresh(&host);
+    g_file_tab = true; PicoComplete_HandleKeys(&host); g_file_tab = false;
+    Check(!strcmp(host.composer.text,"read @notes-b.md after"),
+          "pending refresh preserves the selected file and accepting replaces the current token with surrounding text intact");
+    PicoComplete_Close();
+}
+
+static void TestPendingFileRowsDoNotCrossTokensOrConversations(void)
+{
+    PicoHost host = {0}; char composer[64]; FilePopupFixture fixture = {0};
+    PicoWorkspace workspace = {.id=1,.host=&host};
+    PicoAgent first = {.id=1}, second = {.id=2};
+    workspace.agents[0] = &first; workspace.agents[1] = &second; workspace.count = 2;
+    host.workspaces[0] = &workspace; host.workspace_count = 1; host.selected_agent_id = first.id;
+    host.completers[0] = (PicoCompleter){.trigger='@',.host_query=UpdatingFileQuery,.state=&fixture};
+    host.completer_count = 1;
+    PicoComplete_Close(); PicoComplete_BeforeEdit(0,64);
+    SetComposer(&host,composer,sizeof(composer),"@old"); PicoComplete_Refresh(&host);
+    fixture.pending = true;
+    PicoComplete_BeforeEdit(0,host.composer.length);
+    SetComposer(&host,composer,sizeof(composer),"@new"); PicoComplete_Refresh(&host);
+    g_file_tab = true; PicoComplete_HandleKeys(&host); g_file_tab = false;
+    Check(!strcmp(host.composer.text,"@new"),"a new token cannot accept the previous token's retained files");
+    fixture.pending = false; PicoComplete_Refresh(&host);
+    fixture.pending = true; host.selected_agent_id = second.id; PicoComplete_Refresh(&host);
+    g_file_tab = true; PicoComplete_HandleKeys(&host); g_file_tab = false;
+    Check(!strcmp(host.composer.text,"@new"),"conversation changes cannot retain another conversation's suggestions");
+    PicoComplete_Close();
+}
+
+static int PendingFileQuery(PicoHost *host, const char *prefix, PicoCompleteItem *out, int max, void *state)
+{
+    (void)host; (void)prefix; (void)out; (void)max; (void)state;
+    PicoComplete_SetStatus("Searching workspace files…");
+    return -1;
+}
+static void TestPendingCompletionIsNotAnAttachment(void)
+{
+    PicoHost host = {0}; char composer[32];
+    host.completers[0] = (PicoCompleter){.trigger='@',.host_query=PendingFileQuery};
+    host.completer_count = 1;
+    SetComposer(&host,composer,sizeof(composer),"@notes");
+    PicoComplete_Refresh(&host);
+    bool visible = PicoComplete_IsOpen();
+    g_file_tab = true; PicoComplete_HandleKeys(&host); g_file_tab = false;
+    Check(visible && !strcmp(host.composer.text,"@notes"),
+          "pending completion feedback is visible but cannot be accepted as a file");
+    PicoComplete_Close();
+}
+#endif
+
 static int TestToolImagePath(void)
 {
     const char *path = "/tmp/tool images (x)&/<test>/screenshot.png";
@@ -617,8 +772,14 @@ int main(void)
     TestQuotedFileRoundTrip();
     TestBoundedMentions();
     TestMentionImagePart();
-    TestCompleteRebuildsAtTokenStart();
+    TestCompletePinsTokenGeneration();
     TestCompleteDetailDoesNotCoverLabel();
     TestCompleteLongPathKeepsFilename();
+#ifdef PICO_TEST_FILE_KEYS
+    TestPendingCompletionIsNotAnAttachment();
+    TestPendingFilePopupKeepsRowsAndGeometry();
+    TestPendingFileRowsCanBeAccepted();
+    TestPendingFileRowsDoNotCrossTokensOrConversations();
+#endif
     return g_failed;
 }

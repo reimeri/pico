@@ -14,6 +14,7 @@
 
 typedef struct CompleteState {
     bool open;
+    char status[256];
     bool dismissed;
     int dismissed_start;
     int dismissed_len;
@@ -24,6 +25,8 @@ typedef struct CompleteState {
     int active_token_start;
     char active_trigger;
     uint64_t token_id;
+    PicoWorkspaceId token_workspace;
+    PicoAgentId token_agent;
     int count;
     int scope_start;
     char scope_prefix[512];
@@ -45,8 +48,14 @@ static CompleteState *GetCompleteState(void)
 
 #define g_complete (*GetCompleteState())
 
+void PicoComplete_SetStatus(const char *status)
+{
+    snprintf(g_complete.status, sizeof(g_complete.status), "%s", status ? status : "");
+}
+
 void PicoComplete_Close(void)
 {
+    g_complete.status[0] = 0;
     g_complete.open = false;
     g_complete.count = 0;
     g_complete.selected = 0;
@@ -73,16 +82,26 @@ uint64_t PicoComplete_TokenId(void)
     return g_complete.token_id;
 }
 
-static void TrackToken(int start, char trigger)
+static void TrackToken(PicoHost *host, int start, char trigger)
 {
+    const PicoWorkspace *workspace = PicoHost_SelectedWorkspaceConst(host);
+    const PicoAgent *agent = PicoHost_SelectedAgentConst(host);
+    PicoWorkspaceId workspace_id = workspace ? workspace->id : 0;
+    PicoAgentId agent_id = agent ? agent->id : 0;
     if (g_complete.token_active && g_complete.active_token_start == start &&
-        g_complete.active_trigger == trigger)
+        g_complete.active_trigger == trigger && g_complete.token_workspace == workspace_id &&
+        g_complete.token_agent == agent_id)
     {
         return;
     }
+    /* Retained rows belong only to this token/conversation, never the next. */
+    PicoComplete_Close();
+    g_complete.dismissed = false;
     g_complete.token_active = true;
     g_complete.active_token_start = start;
     g_complete.active_trigger = trigger;
+    g_complete.token_workspace = workspace_id;
+    g_complete.token_agent = agent_id;
     g_complete.token_id++;
     if (g_complete.token_id == 0)
     {
@@ -324,7 +343,7 @@ void PicoComplete_Refresh(PicoHost *app)
         g_complete.token_active = false;
         return;
     }
-    TrackToken(start, app->composer.text[start]);
+    TrackToken(app, start, app->composer.text[start]);
     if (g_complete.dismissed && start == g_complete.dismissed_start &&
         app->composer.length == g_complete.dismissed_len)
     {
@@ -345,6 +364,9 @@ void PicoComplete_Refresh(PicoHost *app)
     memcpy(prefix, app->composer.text + start + 1, (size_t)plen);
     prefix[plen] = '\0';
 
+    char previous_status[sizeof(g_complete.status)];
+    memcpy(previous_status, g_complete.status, sizeof(previous_status));
+    g_complete.status[0] = 0;
     PicoCompleteItem raw[PICO_MAX_COMPLETE_ITEMS];
     int n = 0;
     if (comp->host_query)
@@ -361,18 +383,28 @@ void PicoComplete_Refresh(PicoHost *app)
     }
     if (n < 0)
     {
-        PicoComplete_Close();
-        return;
+        if (!g_complete.status[0]) { PicoComplete_Close(); return; }
+        if (comp->trigger == '@' && g_complete.open && g_complete.count > 0)
+        {
+            /* Keep the last displayed rows (and selection/status geometry)
+             * usable until this query completes. Acceptance replaces the
+             * CURRENT token range, not the prefix that produced these rows. */
+            memcpy(g_complete.status, previous_status, sizeof(g_complete.status));
+            g_complete.token_start = start;
+            g_complete.token_end = end;
+            return;
+        }
+        n = 0;
     }
     if (n > PICO_MAX_COMPLETE_ITEMS)
     {
         n = PICO_MAX_COMPLETE_ITEMS;
     }
-    if (n > 0)
+    if (n > 0 && comp->trigger != '@')
     {
         SortItems(raw, n, prefix);
     }
-    if (n == 0)
+    if (n == 0 && !g_complete.status[0])
     {
         PicoComplete_Close();
         return;
@@ -398,16 +430,18 @@ static void Accept(PicoHost *app)
     {
         return;
     }
+    const PicoCompleter *comp = NULL;
+    int start, end;
+    if (!ScanToken(app, &start, &end, &comp)) { PicoComplete_Close(); return; }
+    uint64_t displayed_token = g_complete.token_id;
+    TrackToken(app, start, app->composer.text[start]);
+    if (displayed_token != g_complete.token_id) return;
     int sel = g_complete.selected;
     if (sel < 0 || sel >= g_complete.count)
     {
         sel = 0;
     }
     const PicoCompleteItem *item = &g_complete.items[sel];
-    const PicoCompleter *comp = NULL;
-    int start = g_complete.token_start;
-    int end = g_complete.token_end;
-    ScanToken(app, &start, &end, &comp);
     if (comp && comp->host_accept && comp->host_accept(app, item, comp->state))
     {
         PicoComplete_Refresh(app);
@@ -589,7 +623,7 @@ static float CompleteLabelWidth(void)
 void PicoComplete_Render(PicoHost *app)
 {
     (void)app;
-    if (!g_complete.open || g_complete.count <= 0)
+    if (!g_complete.open)
     {
         return;
     }
@@ -613,6 +647,15 @@ void PicoComplete_Render(PicoHost *app)
           .backgroundColor = COLOR_CONTENT_BG,
           .cornerRadius = CLAY_CORNER_RADIUS(6)})
     {
+        if (g_complete.status[0])
+        {
+            Clay_String status = {.length = (int32_t)strlen(g_complete.status), .chars = g_complete.status};
+            CLAY_AUTO_ID({.layout = {.padding = {8, 8, 4, 4}, .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+            {
+                CLAY_TEXT(status, CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+                                                    .textColor = COLOR_MUTED}));
+            }
+        }
         for (int i = 0; i < g_complete.count; i++)
         {
             Clay_Color bg = i == g_complete.selected ? COLOR_CODE_BG : COLOR_CONTENT_BG;

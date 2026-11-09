@@ -40,6 +40,25 @@ not run composer preprocessing. Details: [completers](completers.md).
 
 Builtin file completion/submission share `@bare/path` and `@"escaped path"` representations. Simple bare paths contain ASCII letters/digits and `_`, `-`, `.`, `/`; names with spaces, other punctuation, or Unicode are quoted with JSON-style string escapes. Tokens start at whitespace/start-of-text and end at whitespace/end-of-text; quoted completion queries can span spaces, and accepting from inside an existing quote replaces its whole span. Invalid/incomplete/NUL-containing/oversized tokens never resolve a shortened prefix or rescan their interiors as attachments. Unrepresentable completion labels/insertions are omitted rather than truncated. Paths resolve against the explicit target workspace, not process CWD or later UI selection; existing bounded text/media attachment rules still apply. These are ordinary editable text mentions, not session-reference chips. See [completers](completers.md#builtin-file-mentions).
 
+Builtin `@` discovery and matching use core-owned workers with bounded UI-thread
+mailboxes; extension query/accept remain synchronous. Pending same-token file
+queries retain the displayed rows and selection without adding a loading row;
+those previous suggestions remain acceptable and replace the current mention,
+even if the edited prefix no longer matches them. A new token/conversation clears
+retained rows; completed results, including no matches, replace them. Its lazy
+workspace path index is reused across conversations and tokens. Each token pins the latest ready
+generation rather than forcing a rescan; query edits/backspacing search that
+complete generation, never a narrowed previous result set. Cached startup may be
+stale and reconciles in the background without an informational popup row;
+genuine failure feedback remains visible. New filesystem changes appear
+in later tokens, not by replacing a pinned generation. Git/rg ignore-aware
+discovery, explicit ignored-directory scopes, nested-project/symlink exclusions,
+watcher/reconciliation freshness, cache ownership and visible failure behavior are
+specified in [completers](completers.md#builtin-file-mentions). No file-count cutoff
+limits searchability. Workspace reload/close cancels the core service; workers
+retain only core-owned data until they have reaped children and freed snapshots,
+without calling extension code or waiting in main-thread callbacks.
+
 ## Markdown image resources
 
 `MdView_RenderDocument(doc, id_base, width)` treats `id_base` as a document-instance namespace. Supply distinct values for documents rendered in the same layout, and keep each value stable across layouts to preserve horizontal scroll state. Adjacent values are valid: block indices and element kinds are hashed within the namespace, not added to it. Rendering the same document twice requires two namespaces.

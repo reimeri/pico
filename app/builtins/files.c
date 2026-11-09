@@ -6,6 +6,7 @@
 #include "complete_internal.h"
 #include "session_ref.h"
 #include "file_mention.h"
+#include "file_index.h"
 #include "json.h"
 #include "path.h"
 #include "settings.h"
@@ -13,468 +14,37 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <stdatomic.h>
 
-#define FILES_MAX 8000
-#define FILES_PATH 512
 #define FILES_MAX_BYTES (1024 * 1024)
-#define FILES_WALK_DEPTH 12
-
-typedef struct FilesList {
-    char **files;
-    int file_count;
-    int file_cap;
-} FilesList;
-
-typedef struct FilesRebuildWorker {
-    atomic_bool cancelled;
-    PicoWorkspaceId workspace_id;
-    uint64_t token_id;
-    uint64_t serial;
-    char root[4096];
-    char **files;
-    int file_count;
-    int file_cap;
-} FilesRebuildWorker;
 
 typedef struct FilesState {
     PicoWorkspace *workspace;
-    char **files;
-    int file_count;
-    int file_cap;
-    bool scanned;
-    uint64_t token_id;
-    char root[4096];
-    uint64_t rebuild_serial;
-    FilesRebuildWorker *rebuild_worker;
-    char cache_prefix[512];
-    PicoCompleteItem cache_items[PICO_MAX_COMPLETE_ITEMS];
-    int cache_n;
-    int cache_max;
-    bool cache_valid;
+    PicoFileIndex *index;
 } FilesState;
-
-static bool SkipDirName(const char *name)
-{
-    if (!name || !name[0] || name[0] == '.')
-    {
-        return true;
-    }
-    return strcmp(name, "node_modules") == 0 || strcmp(name, "dist") == 0 || strcmp(name, "build") == 0 ||
-           strcmp(name, "target") == 0 || strcmp(name, "__pycache__") == 0;
-}
-
-static void FilesListClear(FilesList *s)
-{
-    if (!s)
-    {
-        return;
-    }
-    for (int i = 0; i < s->file_count; i++)
-    {
-        free(s->files[i]);
-    }
-    free(s->files);
-    s->files = NULL;
-    s->file_count = 0;
-    s->file_cap = 0;
-}
-
-static void FilesClear(FilesState *s)
-{
-    FilesList list;
-    if (!s)
-    {
-        return;
-    }
-    list.files = s->files;
-    list.file_count = s->file_count;
-    list.file_cap = s->file_cap;
-    FilesListClear(&list);
-    s->files = NULL;
-    s->file_count = 0;
-    s->file_cap = 0;
-    s->scanned = false;
-    s->cache_valid = false;
-}
-
-static void FilesAdd(FilesList *s, const char *rel)
-{
-    if (!s || !rel || !rel[0] || s->file_count >= FILES_MAX)
-    {
-        return;
-    }
-    if (s->file_count >= s->file_cap)
-    {
-        int cap = s->file_cap == 0 ? 32 : s->file_cap * 2;
-        char **next;
-        if (cap > FILES_MAX)
-        {
-            cap = FILES_MAX;
-        }
-        next = (char **)realloc(s->files, (size_t)cap * sizeof(char *));
-        if (!next)
-        {
-            return;
-        }
-        s->files = next;
-        s->file_cap = cap;
-    }
-    s->files[s->file_count] = JsonDup(rel);
-    if (s->files[s->file_count])
-    {
-        s->file_count++;
-    }
-}
-
-static bool FilesCancelled(const atomic_bool *cancelled)
-{
-    return cancelled && atomic_load(cancelled);
-}
-
-static void Walk(FilesList *s, const char *root, const char *rel, int depth, const atomic_bool *cancelled)
-{
-    if (depth > FILES_WALK_DEPTH || !s || s->file_count >= FILES_MAX || FilesCancelled(cancelled))
-    {
-        return;
-    }
-    char dir[4096];
-    if (rel[0])
-    {
-        snprintf(dir, sizeof(dir), "%s/%s", root, rel);
-    }
-    else
-    {
-        snprintf(dir, sizeof(dir), "%s", root);
-    }
-    DIR *d = opendir(dir);
-    if (!d)
-    {
-        return;
-    }
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL && s->file_count < FILES_MAX)
-    {
-        if (SkipDirName(ent->d_name) || strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-        {
-            continue;
-        }
-        char child[FILES_PATH];
-        if (!(rel[0] ? PicoPath_Format(child, sizeof(child), "%s/%s", rel, ent->d_name)
-                     : PicoPath_Format(child, sizeof(child), "%s", ent->d_name))) continue;
-        char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", root, child);
-        struct stat st;
-        if (stat(full, &st) != 0)
-        {
-            continue;
-        }
-        if (S_ISDIR(st.st_mode))
-        {
-            Walk(s, root, child, depth + 1, cancelled);
-        }
-        else if (S_ISREG(st.st_mode))
-        {
-            FilesAdd(s, child);
-        }
-    }
-    closedir(d);
-}
-
-static void FilesAdoptList(FilesState *s, FilesList *list)
-{
-    if (!s)
-    {
-        return;
-    }
-    FilesClear(s);
-    if (!list)
-    {
-        s->scanned = true;
-        return;
-    }
-    s->files = list->files;
-    s->file_count = list->file_count;
-    s->file_cap = list->file_cap;
-    list->files = NULL;
-    list->file_count = 0;
-    list->file_cap = 0;
-    s->scanned = true;
-    s->cache_valid = false;
-}
-
-static void FilesRebuild(FilesState *s, const char *root)
-{
-    FilesList list;
-    memset(&list, 0, sizeof(list));
-    if (!s)
-    {
-        return;
-    }
-    snprintf(s->root, sizeof(s->root), "%s", root ? root : "");
-    if (root && root[0])
-    {
-        Walk(&list, root, "", 0, NULL);
-    }
-    FilesAdoptList(s, &list);
-}
-
-static void *FilesRebuildRun(void *arg)
-{
-    FilesRebuildWorker *worker = (FilesRebuildWorker *)arg;
-    FilesList list;
-    memset(&list, 0, sizeof(list));
-    if (worker->root[0] && !atomic_load(&worker->cancelled))
-    {
-        Walk(&list, worker->root, "", 0, &worker->cancelled);
-    }
-    if (atomic_load(&worker->cancelled))
-    {
-        FilesListClear(&list);
-        return NULL;
-    }
-    worker->files = list.files;
-    worker->file_count = list.file_count;
-    worker->file_cap = list.file_cap;
-    return NULL;
-}
-
-static void FilesRebuildCancel(void *arg)
-{
-    atomic_store(&((FilesRebuildWorker *)arg)->cancelled, true);
-}
-
-static void FilesRebuildDestroy(void *arg)
-{
-    FilesRebuildWorker *worker = (FilesRebuildWorker *)arg;
-    FilesList list;
-    memset(&list, 0, sizeof(list));
-    list.files = worker->files;
-    list.file_count = worker->file_count;
-    list.file_cap = worker->file_cap;
-    FilesListClear(&list);
-    free(worker);
-}
-
-static void FilesRebuildCompleted(PicoHost *host, void *arg)
-{
-    FilesRebuildWorker *worker = (FilesRebuildWorker *)arg;
-    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, worker->workspace_id);
-    FilesState *s = workspace ? (FilesState *)PicoPlugins_WorkspaceState(workspace, "files") : NULL;
-    FilesList list;
-    if (s && s->rebuild_worker == worker)
-    {
-        s->rebuild_worker = NULL;
-    }
-    if (!s || s->rebuild_serial != worker->serial || atomic_load(&worker->cancelled))
-    {
-        return;
-    }
-    memset(&list, 0, sizeof(list));
-    list.files = worker->files;
-    list.file_count = worker->file_count;
-    list.file_cap = worker->file_cap;
-    worker->files = NULL;
-    worker->file_count = 0;
-    worker->file_cap = 0;
-    snprintf(s->root, sizeof(s->root), "%s", worker->root);
-    s->token_id = worker->token_id;
-    FilesAdoptList(s, &list);
-}
-
-static bool FilesHostCanTask(PicoHost *host)
-{
-    return host && host->ask_id_mu_ready && !host->terminal_shutdown;
-}
-
-static bool FilesStartRebuild(FilesState *s, PicoHost *host, const char *root, uint64_t token_id)
-{
-    FilesRebuildWorker *worker;
-    if (!s)
-    {
-        return false;
-    }
-    if (s->rebuild_worker)
-    {
-        atomic_store(&s->rebuild_worker->cancelled, true);
-        s->rebuild_worker = NULL;
-    }
-    s->rebuild_serial++;
-    if (s->rebuild_serial == 0)
-    {
-        s->rebuild_serial = 1;
-    }
-    FilesClear(s);
-    snprintf(s->root, sizeof(s->root), "%s", root ? root : "");
-    s->token_id = token_id;
-    if (!FilesHostCanTask(host) || !s->workspace)
-    {
-        FilesRebuild(s, root);
-        return true;
-    }
-    worker = (FilesRebuildWorker *)calloc(1, sizeof(*worker));
-    if (!worker)
-    {
-        return false;
-    }
-    worker->workspace_id = s->workspace->id;
-    worker->token_id = token_id;
-    worker->serial = s->rebuild_serial;
-    snprintf(worker->root, sizeof(worker->root), "%s", root ? root : "");
-    if (!PicoHost_StartTaskCompleted(host, FilesRebuildRun, worker, FilesRebuildCancel,
-                                     FilesRebuildCompleted, FilesRebuildDestroy))
-    {
-        free(worker);
-        return false;
-    }
-    s->rebuild_worker = worker;
-    return false;
-}
-
-static int Fold(int c)
-{
-    return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
-}
-
-static bool ContainsFold(const char *s, const char *needle)
-{
-    if (!needle || !needle[0])
-    {
-        return true;
-    }
-    for (; *s; s++)
-    {
-        const char *a = s;
-        const char *b = needle;
-        while (*a && *b && Fold((unsigned char)*a) == Fold((unsigned char)*b))
-        {
-            a++;
-            b++;
-        }
-        if (!*b)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-static const char *BaseName(const char *path)
-{
-    const char *slash = strrchr(path, '/');
-    return slash ? slash + 1 : path;
-}
 
 int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *out, int max, void *state)
 {
-    FilesState *s = (FilesState *)state;
-    if (!s)
+    FilesState *s = state ? state : PicoPlugins_WorkspaceState(workspace, "files");
+    if (!s || max <= 0) return 0;
+    char query[512];
+    if (!PicoFileMention_Query(prefix, query, sizeof(query))) return 0;
+    if (!s->index) s->index = PicoFileIndex_Open(PicoWorkspace_Path(s->workspace ? s->workspace : workspace));
+    PicoFileIndexResult result;
+    PicoFileIndex_Query(s->index, PicoComplete_TokenId(), query, &result);
+    PicoComplete_SetStatus(result.pending ? "Searching workspace files…" : result.status);
+    if (result.pending) return -1;
+    int count = 0;
+    for (int n = 0; n < result.count && count < max; n++)
     {
-        s = (FilesState *)PicoPlugins_WorkspaceState(workspace, "files");
+        if (!PicoFileMention_Encode(result.paths[n], out[count].insert, sizeof(out[count].insert))) continue;
+        snprintf(out[count].label, sizeof(out[count].label), "%s", result.paths[n]);
+        out[count].detail[0] = 0;
+        count++;
     }
-    if (!s)
-    {
-        return 0;
-    }
-    char decoded_prefix[512];
-    if (!PicoFileMention_Query(prefix, decoded_prefix, sizeof(decoded_prefix))) return 0;
-    prefix = decoded_prefix;
-    uint64_t token_id = PicoComplete_TokenId();
-    const char *root = (s->workspace && s->workspace->path[0]) ? s->workspace->path : s->root;
-    if (!root[0] && workspace)
-    {
-        root = PicoWorkspace_Path(workspace);
-    }
-    if (s->rebuild_worker && s->token_id == token_id && strcmp(s->root, root) == 0)
-    {
-        return -1;
-    }
-    if (!s->scanned || token_id != s->token_id || strcmp(s->root, root) != 0)
-    {
-        PicoHost *host = pico_workspace_host(s->workspace ? s->workspace : workspace);
-        FilesStartRebuild(s, host, root, token_id);
-        if (!s->scanned)
-        {
-            return -1;
-        }
-    }
-    if (s->cache_valid && s->cache_max == max &&
-        strcmp(s->cache_prefix, prefix ? prefix : "") == 0)
-    {
-        int n = s->cache_n;
-        if (n > max)
-        {
-            n = max;
-        }
-        if (n > 0)
-        {
-            memcpy(out, s->cache_items, (size_t)n * sizeof(*out));
-        }
-        return n;
-    }
-    int n = 0;
-    for (int pass = 0; pass < 2 && n < max; pass++)
-    {
-        for (int i = 0; i < s->file_count && n < max; i++)
-        {
-            const char *path = s->files[i];
-            bool prefix_hit = ContainsFold(path, prefix) || ContainsFold(BaseName(path), prefix);
-            if (!prefix_hit)
-            {
-                continue;
-            }
-            bool starts = true;
-            const char *p = prefix;
-            const char *s_str = path;
-            while (*p)
-            {
-                if (Fold((unsigned char)*s_str) != Fold((unsigned char)*p))
-                {
-                    starts = false;
-                    break;
-                }
-                s_str++;
-                p++;
-            }
-            if ((pass == 0 && !starts) || (pass == 1 && starts))
-            {
-                continue;
-            }
-            bool dup = false;
-            for (int j = 0; j < n; j++)
-            {
-                if (strcmp(out[j].label, path) == 0)
-                {
-                    dup = true;
-                    break;
-                }
-            }
-            if (dup)
-            {
-                continue;
-            }
-            if (strlen(path) >= sizeof(out[n].label) ||
-                !PicoFileMention_Encode(path, out[n].insert, sizeof(out[n].insert))) continue;
-            snprintf(out[n].label, sizeof(out[n].label), "%s", path);
-            out[n].detail[0] = '\0';
-            n++;
-        }
-    }
-    s->cache_n = n;
-    s->cache_max = max;
-    if (n > 0)
-    {
-        memcpy(s->cache_items, out, (size_t)n * sizeof(*out));
-    }
-    snprintf(s->cache_prefix, sizeof(s->cache_prefix), "%s", prefix ? prefix : "");
-    s->cache_valid = true;
-    return n;
+    return count;
 }
 
 static bool AlreadyAdded(char **paths, int n, const char *path)
@@ -689,7 +259,6 @@ static int FilesWorkspaceInit(PicoWorkspace *workspace, void **state_out)
         return 1;
     }
     s->workspace = workspace;
-    snprintf(s->root, sizeof(s->root), "%s", workspace ? workspace->path : "");
     *state_out = s;
     pico_workspace_add_completer(workspace, '@', false, pico_files_complete, NULL);
     pico_workspace_add_hook(workspace, PICO_HOOK_BEFORE_SUBMIT, FilesBeforeSubmit);
@@ -702,13 +271,7 @@ static void FilesWorkspaceShutdown(PicoWorkspace *workspace, void *state)
     FilesState *s = (FilesState *)state;
     if (s)
     {
-        if (s->rebuild_worker)
-        {
-            atomic_store(&s->rebuild_worker->cancelled, true);
-            s->rebuild_worker = NULL;
-        }
-        s->rebuild_serial++;
-        FilesClear(s);
+        PicoFileIndex_Close(s->index);
         free(s);
     }
 }

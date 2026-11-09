@@ -48,10 +48,70 @@ Each item:
 - Query/accept run on the **main thread** while typing.
 - Esc (or a click outside the popup) dismisses completions. Query stays skipped until the composer text changes or the cursor moves to a different token.
 - Max 16 completers (`PICO_MAX_COMPLETERS`). First match for a trigger wins (`bol_only` preferred when the cursor is at bol).
-- Builtins: `/` commands, `@` workspace files, `#` session references. Builtin `/resume` searches and initial `#` metadata snapshots run on core workers and may initially be empty; custom completer query/accept remain synchronous. `@` and `#` retain their discovered snapshot for an active token and filter it synchronously while typing; `/resume` may use a briefly stale cached search list.
+- Builtins: `/` commands, `@` workspace files, `#` session references. Builtin `/resume` searches and initial `#` metadata snapshots run on core workers and may initially be empty; custom completer query/accept remain synchronous. `#` filters its ready snapshot synchronously. Builtin `@` discovers and searches paths on core-owned workers and displays a nonselectable loading/status row when pending without previous suggestions. This is not a public asynchronous completer API. `/resume` may use a briefly stale cached search list.
 - Non-command triggers are recognized at token boundaries; normal tokens end at whitespace. Quoted `@"..."` file tokens can contain spaces; custom completers still receive their raw prefix after the trigger. A selected builtin project qualifier can contain spaces in its name, but its query still ends at whitespace. Existing `/` command completion includes arguments on the first composer line.
 
 ## Builtin file mentions
+
+File discovery uses a reusable, lazy **workspace-owned path index**, shared by
+conversations in that workspace. There is no file-count cutoff: the popup limit
+bounds displayed results, not which paths can be searched. Discovery, cache I/O,
+filesystem watching, directory-scope discovery, sorting, and matching run off the
+UI thread. Requests coalesce; superseded results cannot replace the current
+query. Ranking is case-insensitive ASCII: exact basename, basename prefix, path
+prefix, then path substring, with deterministic basename/path ordering within a tier.
+
+While a new file query is pending within the same token/conversation, the popup
+retains its previous suggestion rows, selection, and status instead of collapsing
+to a loading row. Those displayed suggestions remain selectable even if they no
+longer match the edited prefix; accepting replaces the current mention range.
+Completed results replace the rows normally, including closing on no matches.
+Moving to another token/workspace/conversation or dismissing the popup clears the
+retained rows. Initial loading without prior suggestions still shows Searching.
+
+A token pins the latest ready index generation, including across query edits and
+backspacing. A new token or conversation uses the latest ready generation, **not
+an obligatory fresh scan**. Initial discovery can show Loading. A persisted cache
+can serve a stale generation immediately after loading while reconciliation runs,
+without adding an informational cached-list row to the popup. Genuine failures
+still produce status feedback. Background changes do not replace an already pinned token. Start a new mention to see a newer index.
+
+Git projects enumerate tracked and non-ignored untracked files using Git; tracked
+files remain eligible even if ignored. Non-Git projects use ripgrep with hidden
+files enabled and ignore rules respected. Both commands use argv and NUL-delimited
+output, not shell interpolation. If neither discovery method succeeds, native
+traversal provides results with an explicit warning that ignore rules are not
+available; those fallback snapshots are not persisted. `.git` and `.pico` trees
+are always omitted. Deleted tracked paths, non-regular files, directory symlinks,
+and nested Git projects/submodules are not recursively indexed. Open a submodule
+as its own workspace. Long/unrepresentable completion paths are omitted rather
+than truncated. Explicit file mentions still resolve independently of the index.
+
+An explicit workspace-relative directory query, such as `@ignored-folder/name`,
+can discover an ignored directory on a worker. This scope is pinned while editing
+within that directory; changing directories changes the scope. Directory symlinks,
+parent traversal, internal trees and nested project boundaries are not traversed.
+This does not prevent explicitly submitting an otherwise valid file mention.
+
+Linux uses debounced inotify watches for indexed directories and their ancestors;
+watch sets are replaced on refresh. Periodic reconciliation also runs, including
+on other POSIX platforms or when watch capacity is exhausted. Changes inside an
+existing directory without indexed descendants (for example an empty directory),
+worktree Git metadata outside the root, global ignore changes and missed events
+may wait for the periodic scan (currently 30 seconds plus discovery time). A token
+must still be restarted to adopt that generation.
+
+Versioned, disposable caches live in `$XDG_CACHE_HOME/pico/files/` or
+`~/.cache/pico/files/`, never workspace session assets. They contain paths, not
+contents, validate the exact root and filesystem identity, and use atomic
+replacement. Cache corruption falls back to discovery. Resource/I/O failures
+produce a visible status and retain the previous usable index, never silently
+publish an arbitrarily truncated list. Construction has a per-snapshot memory
+budget; a service may retain both the latest and token-pinned snapshots while
+building a replacement or explicit scope. Workspace shutdown/reload cancels the
+core service without joining workers on the UI thread. Workers own their remaining
+state, reap subprocesses, and release it asynchronously; they invoke no extension
+callbacks. The extension registration and synchronous callback ABI are unchanged.
 
 File completion inserts `@src/file.c` for simple ASCII paths and a quoted mention
 such as `@"design notes.md"` for spaces, punctuation, or Unicode. Quotes and

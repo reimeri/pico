@@ -75,6 +75,23 @@ Relative image paths and file-link targets in chat resolve against the displayed
 
 The builtin OpenAI provider sends an advisory `x-codex-routing-hint` only on ChatGPT/Codex OAuth requests. It uses the turn's pinned model and requested tier (`model=<model>;tier=priority` with Fast on, `model=<model>` with Fast off), consistently across follow-ups, compaction, and retries. Invalid HTTP-header bytes omit the hint. It neither replaces the body tier nor reports the served tier, and is separate from the server-issued turn-local routing token. API-key/custom-endpoint requests do not send the hint.
 
+## Compaction outcomes and measurements
+
+ABI 31 adds value-owned `PicoLlmResult.compaction_usage` (`PicoCompactionUsage`).
+Only successful compaction responses may supply it; ordinary responses ignore
+it. `available` means reliable, comparable provider token counts for the complete
+history before and after replacement, including retained items and any seed,
+not request input/output usage or estimates. Unknown/invalid metadata is omitted
+without failing compaction. The host copies it from the worker result and
+persists it with the checkpoint; no ownership transfer or new callback is added.
+A success marker is derived from the committed checkpoint in live and saved
+transcripts; failure/cancellation notices do not replace model history. Success
+is never announced before durable commit. Force-cancellation requested by a
+compaction outcome message hook is deferred through outcome notification; a
+committed result still dispatches `AFTER_COMPACT` exactly once before stopping. The additional transcript notices
+participate in normal message hooks but never model input. See
+[providers](providers.md#compaction-status-and-measurements-abi-31).
+
 ## Reload and workspace quiescence
 
 Builtin software recommendations are base system-prompt text, not extension registrations. Executable availability is cached per workspace from Pico's inherited `PATH` on open and refreshed after successful quiescent reload; relative/empty entries resolve from the workspace directory. Model requests reuse that cache. See [workspace](workspace.md).

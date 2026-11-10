@@ -103,7 +103,9 @@ static int TestOpenAiNativeCompaction(bool oauth)
     snprintf(original_cache_key, sizeof(original_cache_key), "%s", PicoAgent_CacheKey(agent));
     phase = "native compaction";
     PicoAgent_Compact(host, agent);
-    if (!PumpUntilIdle(host, agent) || agent->state != PICO_AGENT_IDLE || !agent->tokens_unknown) goto done;
+    if (!PumpUntilIdle(host, agent) || agent->state != PICO_AGENT_IDLE || !agent->tokens_unknown ||
+        !agent->message_count || agent->messages[agent->message_count - 1].role != PICO_ROLE_NOTICE ||
+        strcmp(agent->messages[agent->message_count - 1].source, "Context compacted")) goto done;
     pthread_mutex_lock(&native_wire_mu);
     bool native_request = native_wire.compactions == 1 && native_wire.body &&
         !strstr(native_wire.body, "EPHEMERAL_NATIVE_CONTEXT") && strstr(native_wire.body, "compaction_trigger") &&
@@ -199,7 +201,7 @@ static int TestOpenAiNativeCompaction(bool oauth)
         g_replay_gate_stage = "catalog_before_upsert";
         g_replay_ready_fd = ready[1]; g_replay_continue_fd = proceed[0];
         PicoAgent_Compact(host, agent);
-        PICO_TEST_WAIT(agent->state != PICO_AGENT_ERROR && strcmp(agent->activity, "Saving compaction…")) {
+        PICO_TEST_WAIT(agent->state != PICO_AGENT_ERROR && strcmp(agent->activity, "Saving compacted context…")) {
             pico_host_pump(host);
         }
         bool pending = agent->state == PICO_AGENT_COMPACT_WAIT && TransferTestByte(ready[0], false);

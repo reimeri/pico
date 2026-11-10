@@ -492,6 +492,15 @@ typedef struct PicoLlmItem {
     char *item_id;
 } PicoLlmItem;
 
+/* Optional provider-measured sizes of the complete history before and after
+ * compaction, on the same tokenization/scope (including retained items/seed).
+ * Not request input/output usage or an estimate. Zero-initialize if unknown. */
+typedef struct PicoCompactionUsage {
+    bool available;
+    int before_tokens; /* > 0 when available */
+    int after_tokens;  /* >= 0 when available */
+} PicoCompactionUsage;
+
 typedef struct PicoLlmResult {
     char *error;
     char service_tier[32]; /* NUL-terminated actual reported tier; empty means unknown */
@@ -502,6 +511,7 @@ typedef struct PicoLlmResult {
     /* malloc'd JSON array: complete replacement canonical history, ending in
      * one provider_state item. Native compact only; mutually exclusive with items. */
     char *compaction_json;
+    PicoCompactionUsage compaction_usage; /* successful compaction only; copied by value */
     /* malloc'd replacement transport state for the next request in this turn.
      * NULL clears it. Adopted only on success; freed by pico_llm_result_free. */
     char *turn_state;

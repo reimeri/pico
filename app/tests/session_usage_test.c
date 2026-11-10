@@ -1772,16 +1772,17 @@ static int TestTranscriptMessageGroups(void)
 
 static bool NoticeTranscriptMatches(const PicoMessage *messages, int count)
 {
-    return count == 7 && messages[0].role == PICO_ROLE_USER &&
+    return count == 8 && messages[0].role == PICO_ROLE_USER &&
            messages[1].role == PICO_ROLE_ASSISTANT && strcmp(messages[1].source, "draft") == 0 &&
            messages[2].role == PICO_ROLE_NOTICE && messages[2].notice_severity == PICO_NOTICE_ERROR &&
            strcmp(messages[2].source, "notice-only-error") == 0 &&
            messages[3].role == PICO_ROLE_ASSISTANT && strcmp(messages[3].source, "continued") == 0 &&
            messages[4].role == PICO_ROLE_NOTICE && messages[4].notice_severity == PICO_NOTICE_INFO &&
            strcmp(messages[4].source, "notice-only-info") == 0 &&
-           messages[5].role == PICO_ROLE_NOTICE && messages[5].notice_severity == PICO_NOTICE_WARNING &&
-           strcmp(messages[5].source, "notice-only-warning") == 0 &&
-           messages[6].role == PICO_ROLE_ASSISTANT && strcmp(messages[6].source, "done") == 0;
+           messages[5].role == PICO_ROLE_NOTICE && !strcmp(messages[5].source, "Context compacted") &&
+           messages[6].role == PICO_ROLE_NOTICE && messages[6].notice_severity == PICO_NOTICE_WARNING &&
+           strcmp(messages[6].source, "notice-only-warning") == 0 &&
+           messages[7].role == PICO_ROLE_ASSISTANT && strcmp(messages[7].source, "done") == 0;
 }
 
 static int TestNoticePersistence(void)
@@ -1808,7 +1809,8 @@ static int TestNoticePersistence(void)
     g_replayed_history[0] = '\0';
     PicoSession_Start(&reader, &restored, PICO_SESSION_NEW, source.session_path);
     ok &= NoticeTranscriptMatches(restored.messages, restored.message_count) &&
-          !strstr(g_replayed_history, "notice-only-") && strstr(g_replayed_history, "done");
+          !strstr(g_replayed_history, "notice-only-") && !strstr(g_replayed_history, "Context compacted") &&
+          strstr(g_replayed_history, "done");
     PicoAgent_ClearMessages(&restored);
     unlink(source.session_path);
     PicoAgent ephemeral = {.persistence = PICO_SESSION_EPHEMERAL};
@@ -4393,6 +4395,58 @@ static int TestSessionTailRecovery(void)
     return 0;
 }
 
+static int TestCompactionTranscriptBoundary(void)
+{
+    PicoHost host = {0};
+    PicoAgent writer = {.persistence = PICO_SESSION_DURABLE}, restored = {.persistence = PICO_SESSION_DURABLE};
+    PicoHost_SetPath(&host, "/workspace");
+    bool ok = PicoSession_LogAssistant(&host, &writer, 1, "before compaction", NULL, NULL, NULL, NULL, 0) == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogCompaction(&host, &writer, "replacement history", 1000) == PICO_SESSION_WRITE_OK &&
+        PicoSession_LogAssistant(&host, &writer, 1, "after compaction", NULL, NULL, NULL, NULL, 0) == PICO_SESSION_WRITE_OK;
+    PicoMessage *loaded = NULL; int count = 0;
+    ok &= !PicoSession_LoadTranscript(PicoHost_PrimaryWorkspace(&host), writer.session_id, &loaded, &count) &&
+        count == 3 && !strcmp(loaded[0].source, "before compaction") &&
+        !strcmp(loaded[1].source, "Context compacted") && !strcmp(loaded[2].source, "after compaction");
+    PicoMessages_Free(loaded, count);
+    PicoSessionReplay *replay = PicoSession_ReplayPrepare(&host, writer.session_path, PICO_AGENT_MAIN);
+    if (replay) {
+        bool done = false;
+        while (!done) done = PicoSession_ReplayBatch(&host, &restored, replay, 1);
+        ok &= restored.message_count == 3 && !strcmp(restored.messages[0].source, "before compaction") &&
+            !strcmp(restored.messages[1].source, "Context compacted") &&
+            !strcmp(restored.messages[2].source, "after compaction");
+    } else ok = false;
+    PicoSession_ReplayFree(replay);
+    PicoAgent_ClearMessages(&restored); free(restored.messages);
+    unlink(writer.session_path);
+    return ok ? 0 : Fail("a compaction checkpoint must separate assistant fragments even when their saved group IDs match");
+}
+
+static int TestCompactionMeasurementPersistence(void)
+{
+    const struct { const char *metadata; const char *notice; } cases[] = {
+        {"{\"before_tokens\":1000,\"after_tokens\":0}", "Context compacted · 1000 → 0 tokens (100.0% reduction)"},
+        {"{\"before_tokens\":1000,\"after_tokens\":1200}", "Context compacted · 1000 → 1200 tokens (20.0% increase)"},
+        {"{\"before_tokens\":1000,\"after_tokens\":250.5}", "Context compacted"},
+        {"{\"before_tokens\":0,\"after_tokens\":0}", "Context compacted"},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        PicoHost host = {0}; PicoAgent writer = {.persistence = PICO_SESSION_DURABLE};
+        PicoAgent restored = {.persistence = PICO_SESSION_DURABLE};
+        PicoHost_SetPath(&host, "/workspace");
+        ok &= PicoSession_LogUser(&host, &writer, "history", NULL, NULL) == PICO_SESSION_WRITE_OK;
+        char record[512];
+        snprintf(record, sizeof(record), "{\"type\":\"compaction\",\"summary\":\"briefing\",\"tokens_before\":1000,\"compaction_usage\":%s}", cases[i].metadata);
+        ok &= AppendRaw(writer.session_path, record) &&
+            !PicoSession_Replay(&host, &restored, writer.session_path, false) && restored.message_count == 2 &&
+            !strcmp(restored.messages[1].source, cases[i].notice);
+        PicoAgent_ClearMessages(&restored); free(restored.messages);
+        unlink(writer.session_path);
+    }
+    return ok ? 0 : Fail("compaction sizes must survive replay, omit invalid metadata, and never report growth as savings");
+}
+
 static int TestNativeCheckpointPersistence(void)
 {
     const char *history = "[{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"retained task\"}]},"
@@ -4415,8 +4469,9 @@ static int TestNativeCheckpointPersistence(void)
         g_catalog_ready_fd = ready[1]; g_catalog_continue_fd = proceed[0];
         ok &= PicoSession_LogUser(&host, &agent, "before checkpoint", "before checkpoint", NULL) == PICO_SESSION_WRITE_OK;
         ok &= TransferByte(ready[0], false);
-        PicoSessionCheckpoint *first = PicoSession_QueueCompaction(&host, &agent, history, NULL, 1000);
-        PicoSessionCheckpoint *second = PicoSession_QueueCompaction(&host, &agent, history, NULL, 100);
+        PicoCompactionUsage usage = {.available = true, .before_tokens = 1000, .after_tokens = 250};
+        PicoSessionCheckpoint *first = PicoSession_QueueCompaction(&host, &agent, history, NULL, 1000, &usage);
+        PicoSessionCheckpoint *second = PicoSession_QueueCompaction(&host, &agent, history, NULL, 100, NULL);
         ok &= first && second && atomic_load(&first->status) == 0 && atomic_load(&second->status) == 0;
         ok &= PicoSession_LogUser(&host, &agent, "after checkpoint", "after checkpoint", NULL) == PICO_SESSION_WRITE_OK;
         if (fail) g_session_fail_stage = "append_write";
@@ -4431,7 +4486,16 @@ static int TestNativeCheckpointPersistence(void)
             g_replayed_history[0] = '\0';
             ok &= PicoSession_Replay(&host, &resumed, agent.session_path, false) == 0 &&
                 strstr(g_replayed_history, "persisted-native-state") && strstr(g_replayed_history, "after checkpoint") &&
-                !strstr(g_replayed_history, "original history") && !strstr(g_replayed_history, "before checkpoint");
+                !strstr(g_replayed_history, "original history") && !strstr(g_replayed_history, "before checkpoint") &&
+                resumed.message_count == 5 &&
+                !strcmp(resumed.messages[2].source, "Context compacted · 1000 → 250 tokens (75.0% reduction)") &&
+                !strcmp(resumed.messages[3].source, "Context compacted") &&
+                !strstr(g_replayed_history, "Context compacted");
+            PicoMessage *loaded = NULL; int count = 0;
+            ok &= !PicoSession_LoadTranscript(&ws, agent.session_id, &loaded, &count) && count == 5 &&
+                !strcmp(loaded[2].source, resumed.messages[2].source) &&
+                !strcmp(loaded[3].source, resumed.messages[3].source);
+            PicoMessages_Free(loaded, count);
             PicoAgent_ClearMessages(&resumed); free(resumed.messages); resumed.messages = NULL;
 #ifdef PICO_TEST_JSON_ALLOC
             PicoSessionReplay *prepared = PicoSession_ReplayPrepare(&host, agent.session_path, PICO_AGENT_MAIN);
@@ -4816,7 +4880,8 @@ int main(void)
     unlink(incomplete_child_path);
     unlink(child_agent.session_path);
     unlink(writer_agent.session_path);
-    if (PICO_TEST_RUN(TestBrowserProfilePersistence()) != 0 || PICO_TEST_RUN(TestNativeCheckpointPersistence()) != 0 || PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
+    if (PICO_TEST_RUN(TestCompactionTranscriptBoundary()) != 0 || PICO_TEST_RUN(TestCompactionMeasurementPersistence()) != 0 ||
+        PICO_TEST_RUN(TestBrowserProfilePersistence()) != 0 || PICO_TEST_RUN(TestNativeCheckpointPersistence()) != 0 || PICO_TEST_RUN(TestLlmResponseSessionState()) != 0 ||
         PICO_TEST_RUN(TestResumeLatestMain()) != 0 || PICO_TEST_RUN(TestSessionTailRecovery()) != 0 || PICO_TEST_RUN(TestThinkingRoundTrip()) != 0 || PICO_TEST_RUN(TestPartsReplay()) != 0 || PICO_TEST_RUN(TestToolImageReplayCompaction()) != 0 || PICO_TEST_RUN(TestInterruptedImageBatch()) != 0 ||
         PICO_TEST_RUN(TestTranscriptMessageGroups()) != 0 || PICO_TEST_RUN(TestNoticePersistence()) != 0 || PICO_TEST_RUN(TestMissingImageWarningPersistence()) != 0 || PICO_TEST_RUN(TestSteeringPersistence()) != 0 || PICO_TEST_RUN(TestSessionTitle()) != 0 ||
         PICO_TEST_RUN(TestSessionDisplayTitle()) != 0 ||

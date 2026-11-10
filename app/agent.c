@@ -240,6 +240,9 @@ struct PicoAgentRt {
     bool compacting;
     bool compact_no_tools;
     bool compact_native;
+    bool compact_notice_pending; /* exactly one terminal outcome per attempt */
+    bool compact_notifying; /* defer cancellation while outcome callbacks settle */
+    PicoCompactionUsage compact_usage;
     PicoInputItem *compact_input;
     int compact_input_count;
     PicoSessionCheckpoint *compact_checkpoint;
@@ -632,6 +635,7 @@ static char *EncodeResult(const PicoLlmResult *r)
     if (r && r->compaction_json) {
         JsonBuf_Puts(&b, ",\"compaction\":"); JsonBuf_Puts(&b, r->compaction_json);
     }
+    if (r) PicoUsage_WriteCompaction(&b, &r->compaction_usage);
     JsonBuf_Putc(&b, '}');
     return JsonBuf_Steal(&b);
 }
@@ -2979,7 +2983,15 @@ static void SavePartialAssistant(PicoHost *app, PicoAgent *agent)
 static void ApplyCancel(PicoHost *app, PicoAgent *agent)
 {
     PicoAgentRt *rt = agent->runtime;
-    if (rt->compact_checkpoint) return;
+    if (rt->compact_checkpoint || rt->compact_notifying) return;
+    if (rt->compact_notice_pending) {
+        rt->compact_notice_pending = false;
+        rt->compact_notifying = true;
+        PicoAgent_AddNoticePersisted(app, agent, PICO_NOTICE_INFO,
+                                     "Compaction cancelled · Previous context retained");
+        if (agent->runtime != rt) return;
+        rt->compact_notifying = false;
+    }
     if (rt->compacting)
     {
         GoIdle(app, agent);
@@ -3068,8 +3080,17 @@ static void PollCompaction(PicoHost *app, PicoAgent *agent)
     ClearCompactStage(rt);
     agent->tokens_used = 0; agent->tokens_cached = 0; agent->tokens_unknown = native;
     free(agent->compact_summary); agent->compact_summary = NULL;
+    rt->compact_notice_pending = false;
+    rt->compact_notifying = true;
+    char notice[256];
+    PicoUsage_FormatCompaction(notice, sizeof(notice), &rt->compact_usage);
+    PicoAgent_AddNotice(app, agent, PICO_NOTICE_INFO, notice, NULL);
+    if (agent->runtime != rt) return;
     pico_run_hooks(app, PICO_HOOK_AFTER_COMPACT, agent->id);
-    if (agent->runtime == rt) ContinueAfterCompact(app, agent);
+    if (agent->runtime == rt) {
+        rt->compact_notifying = false;
+        ContinueAfterCompact(app, agent);
+    }
 }
 
 static void ApplyCompaction(PicoHost *app, PicoAgent *agent, const char *summary, const char *native_json)
@@ -3097,14 +3118,14 @@ static void ApplyCompaction(PicoHost *app, PicoAgent *agent, const char *summary
      * the actual write outcome, never discarding an accepted checkpoint. */
     rt->compacting = true;
     rt->compact_checkpoint = PicoSession_QueueCompaction(app, agent, native_json ? history.data : NULL,
-                                                        summary, agent->tokens_used);
+                                                        summary, agent->tokens_used, &rt->compact_usage);
     JsonBuf_Free(&history);
     if (!rt->compact_checkpoint) {
         ClearCompactStage(rt); SetErrorState(app, agent, "Could not persist compaction checkpoint; previous context was retained");
         return;
     }
     snprintf(rt->compact_session_id, sizeof(rt->compact_session_id), "%s", agent->session_id);
-    SetActivity(app, agent, "Saving compaction…");
+    SetActivity(app, agent, "Saving compacted context…");
     PollCompaction(app, agent);
 }
 
@@ -3128,7 +3149,9 @@ static void StartCompact(PicoHost *app, PicoAgent *agent)
     FlushStreamReparse(app, agent);
     rt->stream_msg = -1;
     agent->state = PICO_AGENT_COMPACT_WAIT;
-    SetActivity(app, agent, "Compacting…");
+    rt->compact_notice_pending = true;
+    rt->compact_usage = (PicoCompactionUsage){0};
+    SetActivity(app, agent, "Compacting context…");
     free(agent->compact_summary);
     agent->compact_summary = NULL;
     if (!agent->clarification) pico_run_hooks(app, PICO_HOOK_ON_COMPACT, agent->id);
@@ -3196,7 +3219,14 @@ static void SetErrorState(PicoHost *app, PicoAgent *agent, const char *msg)
     rt->compacting = false;
     rt->compact_no_tools = false;
     agent->activity[0] = '\0';
-    PicoHost_AddNotice(app, agent->id, PICO_NOTICE_ERROR, agent->error);
+    if (rt->compact_notice_pending) {
+        rt->compact_notice_pending = false;
+        JsonBuf notice; JsonBuf_Init(&notice);
+        JsonBuf_Puts(&notice, "Compaction failed · Previous context retained\n\n");
+        JsonBuf_Puts(&notice, agent->error);
+        PicoHost_AddNotice(app, agent->id, PICO_NOTICE_ERROR, notice.data ? notice.data : agent->error);
+        JsonBuf_Free(&notice);
+    } else PicoHost_AddNotice(app, agent->id, PICO_NOTICE_ERROR, agent->error);
     pico_run_hooks(app, PICO_HOOK_ON_ERROR, agent->id);
     agent->settling_error = false;
 }
@@ -3877,6 +3907,12 @@ static void OnLlmDone(PicoHost *app, PicoAgent *agent, PicoAgentEv *ev)
     }
     if (rt->compacting)
     {
+        rt->compact_usage = (PicoCompactionUsage){0};
+        JsonDoc usage_doc;
+        if (ev->payload && !JsonParse(&usage_doc, ev->payload, strlen(ev->payload))) {
+            rt->compact_usage = PicoUsage_ReadCompaction(&usage_doc, 0);
+            JsonFree(&usage_doc);
+        }
         SweepProvisionalRows(agent, rt);
         NotifyLlmResponse(app, agent, ev, true);
         if (agent->runtime != rt) return;
@@ -4811,7 +4847,9 @@ void PicoAgent_ForceCancel(PicoHost *app, PicoAgent *agent)
         return;
     }
 
-    if (old->compact_checkpoint) { PicoAgent_Cancel(agent); return; }
+    /* Outcome notices are callback boundaries too. Finish their lifecycle
+     * notifications before a force-cancel may retire/replace this runtime. */
+    if (old->compact_checkpoint || old->compact_notifying) { PicoAgent_Cancel(agent); return; }
     PicoWorkspace *workspace = agent->workspace;
     PicoAgent_Cancel(agent); /* invalidates steering at request time */
     PicoAgent_ReapRetired(workspace);
@@ -5361,7 +5399,7 @@ void PicoAgent_PumpBounded(PicoHost *app, PicoAgent *agent, int *budget)
 
     if (status_dirty && (agent->state == PICO_AGENT_LLM_WAIT || agent->state == PICO_AGENT_COMPACT_WAIT))
         SetActivity(app, agent, provider_status[0] ? provider_status :
-                    agent->state == PICO_AGENT_COMPACT_WAIT ? "Compacting…" : "Thinking…");
+                    agent->state == PICO_AGENT_COMPACT_WAIT ? "Compacting context…" : "Thinking…");
 
     if (stream && stream_len && rt->stream_msg >= 0)
     {

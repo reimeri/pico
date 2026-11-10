@@ -1338,6 +1338,7 @@ static bool ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
     }
     else if (strcmp(type, "compaction") == 0)
     {
+        if (active_group) *active_group = -1;
         agent->tokens_used = 0;
         agent->tokens_cached = 0;
         bool native = JsonEq(doc, JsonObjGet(doc, obj, "kind"), "native");
@@ -1353,6 +1354,11 @@ static bool ReplayLine(PicoHost *app, PicoAgent *agent, const JsonDoc *doc, int 
             PicoAgent_PushHistoryBriefing(agent, summary ? summary : "");
             free(summary);
         }
+        PicoCompactionUsage usage = PicoUsage_ReadCompaction(doc, obj);
+        char notice[256];
+        PicoUsage_FormatCompaction(notice, sizeof(notice), &usage);
+        /* The checkpoint is the durable success marker, not a second event. */
+        PicoAgent_AddNotice(app, agent, PICO_NOTICE_INFO, notice, NULL);
     }
     else if (strcmp(type, "browser_profile") == 0)
     {
@@ -1869,7 +1875,8 @@ static PicoSessionReplay *ReplayRead(FILE *f, PicoAgentKind kind,
                     }
                 }
             }
-            else if (JsonEq(doc, JsonObjGet(doc, 0, "type"), "notice"))
+            else if (JsonEq(doc, JsonObjGet(doc, 0, "type"), "notice") ||
+                     JsonEq(doc, JsonObjGet(doc, 0, "type"), "compaction"))
             {
                 free(assembled); assembled = NULL; assembled_len = 0; group = -1;
             }
@@ -2714,6 +2721,15 @@ int PicoSession_LoadTranscript(const PicoWorkspace *workspace, const char *id,
             }
             free(content);
         }
+        else if (type && strcmp(type, "compaction") == 0)
+        {
+            active_group = -1;
+            PicoCompactionUsage usage = PicoUsage_ReadCompaction(&doc, 0);
+            char notice[256];
+            PicoUsage_FormatCompaction(notice, sizeof(notice), &usage);
+            failed = !LoadedAddMessage(&messages, &count, &capacity, PICO_ROLE_NOTICE, notice);
+            if (!failed) messages[count - 1].notice_severity = PICO_NOTICE_INFO;
+        }
         else if (type && strcmp(type, "message") == 0)
         {
             char *role = JsonObjStr(&doc, 0, "role");
@@ -3301,7 +3317,7 @@ void PicoSession_CheckpointRelease(PicoSessionCheckpoint *checkpoint)
 }
 
 PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *agent,
-    const char *history_json, const char *summary, int tokens_before)
+    const char *history_json, const char *summary, int tokens_before, const PicoCompactionUsage *usage)
 {
     if (!app || !agent || (!summary && !history_json)) return NULL;
     if (history_json) {
@@ -3324,7 +3340,9 @@ PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *age
     } else {
         JsonBuf_Puts(&b, ",\"summary\":"); JsonBuf_String(&b, summary);
     }
-    JsonBuf_Puts(&b, ",\"tokens_before\":"); JsonBuf_Int(&b, tokens_before); JsonBuf_Putc(&b, '}');
+    JsonBuf_Puts(&b, ",\"tokens_before\":"); JsonBuf_Int(&b, tokens_before);
+    PicoUsage_WriteCompaction(&b, usage);
+    JsonBuf_Putc(&b, '}');
     char *line = JsonBuf_Steal(&b);
     if (!line) { PicoSession_CheckpointRelease(checkpoint); return NULL; }
     PicoSessionWriteResult result;

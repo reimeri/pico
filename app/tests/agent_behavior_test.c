@@ -156,6 +156,7 @@ typedef struct TestState {
 static bool FakeNativeCompaction(PicoHost *host, const PicoModel *model, void *state);
 static bool g_native_mode, g_checkpoint_defer, g_checkpoint_fail;
 static PicoSessionCheckpoint *g_pending_checkpoint;
+static PicoCompactionUsage g_compaction_usage, g_checkpoint_usage;
 static const char kNativeHistory[] =
     "[{\"type\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"retained native task\"}]},"
     "{\"type\":\"provider_state\",\"provider\":\"test\",\"format\":\"test.compaction.v1\","
@@ -204,6 +205,7 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.logged_tool_ids[0] = '\0';
     g_native_mode = false; g_checkpoint_defer = false; g_checkpoint_fail = false;
     g_pending_checkpoint = NULL;
+    g_compaction_usage = g_checkpoint_usage = (PicoCompactionUsage){0};
     g_test.mode = mode;
     g_test.provider_tool_limit = tool_limit;
     g_test.provider_tools_issued = 0;
@@ -431,6 +433,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
     snprintf(tool_args, sizeof(tool_args), "%s", g_test.issue_tool_args);
     pthread_mutex_unlock(&g_test.mu);
 
+    if (turn->compact) out->compaction_usage = g_compaction_usage;
     if (turn->native_compact) {
         if (fail) { out->error = JsonDup("native compaction failed"); return PICO_LLM_FAIL; }
         out->compaction_json = JsonDup(kNativeHistory);
@@ -1681,9 +1684,10 @@ PicoSessionWriteResult PicoSession_LogCompaction(PicoHost *app, PicoAgent *agent
 }
 
 PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *agent,
-    const char *history_json, const char *summary, int tokens_before)
+    const char *history_json, const char *summary, int tokens_before, const PicoCompactionUsage *usage)
 {
-    (void)app; (void)agent; (void)history_json; (void)summary; (void)tokens_before;
+    (void)app; (void)agent; (void)history_json; (void)summary; (void)tokens_before; (void)usage;
+    g_checkpoint_usage = usage ? *usage : (PicoCompactionUsage){0};
     if (g_checkpoint_fail) return NULL;
     PicoSessionCheckpoint *checkpoint = calloc(1, sizeof(*checkpoint));
     if (!checkpoint) return NULL;
@@ -4515,6 +4519,17 @@ static int TestUsageNormalizationAndSaturation(void)
                : Fail(name, "usage or cumulative percentage was not normalized or saturated");
 }
 
+static int CountNoticePrefix(const PicoAgent *agent, const char *prefix)
+{
+    int count = 0;
+    for (int i = 0; i < agent->message_count; ++i) {
+        const PicoMessage *message = &agent->messages[i];
+        if (message->role == PICO_ROLE_NOTICE && message->source &&
+            !strncmp(message->source, prefix, strlen(prefix))) count++;
+    }
+    return count;
+}
+
 static int TestAfterCompact(void)
 {
     const char *name = "after compact then turn end";
@@ -4537,7 +4552,8 @@ static int TestAfterCompact(void)
     bool ok = g_test.life_after_compact == 1 && g_test.life_turn_end == 1 && g_test.life_cancel == 0 &&
               g_test.life_error == 0 && TestAgent(&app)->tokens_used == 0 && TestAgent(&app)->tokens_cached == 0 &&
               TestAgent(&app)->session_input_tokens == 200 && TestAgent(&app)->session_cached_tokens == 80 &&
-              g_test.usage_log_count == 2;
+              g_test.usage_log_count == 2 && CountNoticePrefix(TestAgent(&app), "Context compacted") == 1 &&
+              !strcmp(TestAgent(&app)->messages[TestAgent(&app)->message_count - 1].source, "Context compacted");
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "compaction did not retain cumulative usage or fire lifecycle hooks");
 }
@@ -6510,7 +6526,9 @@ static int TestNativeCompactionFailure(void)
         PicoAgent_StartTurn(&app, agent, "keep this original context"); ok &= WaitForIdle(&app);
         g_test.provider_fail = !persistence; g_checkpoint_fail = persistence;
         PicoAgent_Compact(&app, agent);
-        ok &= WaitForIdle(&app) && agent->state == PICO_AGENT_ERROR;
+        ok &= WaitForIdle(&app) && agent->state == PICO_AGENT_ERROR &&
+              CountNoticePrefix(agent, "Compaction failed · Previous context retained") == 1 &&
+              CountNoticePrefix(agent, "Context compacted") == 0;
         PicoAgent_DismissError(agent); g_test.provider_fail = false; g_checkpoint_fail = false;
         PicoAgent_StartTurn(&app, agent, "recover without fallback");
         ok &= WaitForIdle(&app) && g_test.last_input && strstr(g_test.last_input, "keep this original context") &&
@@ -6532,7 +6550,8 @@ static int TestNativeCheckpointSettlement(void)
         PICO_TEST_WAIT(!g_pending_checkpoint && agent->state != PICO_AGENT_ERROR) {
             PicoAgent_Pump(&app, agent); SleepOneMs();
         }
-        ok &= g_pending_checkpoint && agent->state == PICO_AGENT_COMPACT_WAIT && g_test.life_after_compact == 0;
+        ok &= g_pending_checkpoint && agent->state == PICO_AGENT_COMPACT_WAIT && g_test.life_after_compact == 0 &&
+              CountNoticePrefix(agent, "Context compacted") == 0;
         PicoAgent_ForceCancel(&app, agent);
         ok &= agent->state == PICO_AGENT_COMPACT_WAIT;
         if (g_pending_checkpoint) {
@@ -6542,6 +6561,9 @@ static int TestNativeCheckpointSettlement(void)
         ok &= WaitForIdle(&app);
         ok &= outcome > 0 ? (g_test.life_after_compact == 1 && g_test.life_cancel == 1) :
                              (agent->state == PICO_AGENT_ERROR && g_test.life_after_compact == 0);
+        ok &= CountNoticePrefix(agent, "Context compacted") == (outcome > 0) &&
+              CountNoticePrefix(agent, "Compaction failed") == (outcome < 0) &&
+              CountNoticePrefix(agent, "Compaction cancelled") == 0;
         PicoAgent_DismissError(agent); g_checkpoint_defer = false;
         PicoAgent_StartTurn(&app, agent, "inspect settled context"); ok &= WaitForIdle(&app);
         ok &= g_test.last_input && (outcome > 0 ? strstr(g_test.last_input, "encrypted-native") != NULL :
@@ -6551,6 +6573,84 @@ static int TestNativeCheckpointSettlement(void)
     return ok ? 0 : Fail("native checkpoint cancellation", "cancellation ignored the checkpoint write outcome");
 }
 
+static bool g_force_on_compaction_notice;
+static void ForceCancelCompactionNotice(PicoWorkspace *workspace, const PicoHookEvent *event, void *state)
+{
+    (void)state;
+    PicoAgent *agent = PicoHost_FindAgent(workspace->host, event->agent_id);
+    if (!g_force_on_compaction_notice || !agent || !agent->message_count) return;
+    const PicoMessage *message = &agent->messages[agent->message_count - 1];
+    if (message->role != PICO_ROLE_NOTICE ||
+        (strncmp(message->source, "Context compacted", 17) && strncmp(message->source, "Compaction cancelled", 20))) return;
+    g_force_on_compaction_notice = false;
+    PicoAgent_ForceCancel(workspace->host, agent);
+}
+
+static int TestCompactionMeasurements(bool native)
+{
+    ResetTest(TEST_SINGLE, 0);
+    g_native_mode = native; g_checkpoint_defer = true;
+    g_compaction_usage = (PicoCompactionUsage){.available = true, .before_tokens = 120000, .after_tokens = 30000};
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    PicoAgent *agent = TestAgent(&app);
+    /* Exercise the same lifecycle in a child as well as a main session. */
+    if (native) agent->kind = PICO_AGENT_SUBAGENT;
+    g_force_on_compaction_notice = true;
+    TestAddHook(&app, PICO_HOOK_ON_MESSAGE, ForceCancelCompactionNotice);
+    PicoAgent_PushHistoryUser(agent, "context to compact");
+    PicoAgent_Compact(&app, agent);
+    PICO_TEST_WAIT(!g_pending_checkpoint && agent->state != PICO_AGENT_ERROR) {
+        PicoAgent_Pump(&app, agent); SleepOneMs();
+    }
+    bool ok = g_pending_checkpoint && agent->state == PICO_AGENT_COMPACT_WAIT &&
+        !strcmp(agent->activity, "Saving compacted context…") &&
+        CountNoticePrefix(agent, "Context compacted") == 0 &&
+        g_checkpoint_usage.available && g_checkpoint_usage.before_tokens == 120000 &&
+        g_checkpoint_usage.after_tokens == 30000;
+    /* Later pumps must keep the saving phase until the write settles. */
+    for (int i = 0; i < 3; ++i) {
+        PicoAgent_Pump(&app, agent);
+        ok &= !strcmp(agent->activity, "Saving compacted context…") &&
+            CountNoticePrefix(agent, "Context compacted") == 0;
+    }
+    if (g_pending_checkpoint) {
+        atomic_store(&g_pending_checkpoint->status, 1);
+        PicoSession_CheckpointRelease(g_pending_checkpoint); g_pending_checkpoint = NULL;
+    }
+    ok &= WaitForIdle(&app) && CountNoticePrefix(agent, "Context compacted") == 1 &&
+        !strcmp(agent->messages[agent->message_count - 1].source,
+                "Context compacted · 120000 → 30000 tokens (75.0% reduction)") &&
+        g_test.life_after_compact == 1 && g_test.life_cancel == 1 && !g_force_on_compaction_notice &&
+        CountNoticePrefix(agent, "Compaction cancelled") == 0;
+    PicoAgent_StartTurn(&app, agent, "continue with compacted history");
+    ok &= WaitForIdle(&app) && g_test.last_input && !strstr(g_test.last_input, "Context compacted") &&
+        CountNoticePrefix(agent, "Context compacted") == 1;
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("compaction measurements", "result appeared before commit, lost sizes, duplicated, or entered model context");
+}
+
+static int TestCompactionCancelled(bool force)
+{
+    ResetTest(TEST_STEERING_BLOCK, 0);
+    PicoHost app; InitApp(&app); AddLifeHooks(&app);
+    PicoAgent *agent = TestAgent(&app);
+    g_force_on_compaction_notice = true;
+    TestAddHook(&app, PICO_HOOK_ON_MESSAGE, ForceCancelCompactionNotice);
+    PicoAgent_PushHistoryUser(agent, "original context survives cancellation");
+    PicoAgent_Compact(&app, agent);
+    bool ok = WaitForBlock(&app) && agent->state == PICO_AGENT_COMPACT_WAIT;
+    if (force) PicoAgent_ForceCancel(&app, agent); else PicoAgent_Cancel(agent);
+    SteeringRelease();
+    ok &= WaitForIdle(&app) && CountNoticePrefix(agent, "Compaction cancelled · Previous context retained") == 1 &&
+        CountNoticePrefix(agent, "Context compacted") == 0 && g_test.life_cancel == 1 &&
+        !strcmp(g_test.notice_log_text, "Compaction cancelled · Previous context retained") && !g_force_on_compaction_notice;
+    PicoAgent_StartTurn(&app, agent, "continue original context");
+    ok &= WaitForIdle(&app) && g_test.last_input && strstr(g_test.last_input, "original context survives cancellation") &&
+        !strstr(g_test.last_input, "Compaction cancelled");
+    PicoHost_Shutdown(&app);
+    return ok ? 0 : Fail("compaction cancellation notice", "outcome was lost, duplicated, not persisted, or entered context");
+}
+
 int main(void)
 {
     char composer_dir[] = "/tmp/pico-composer-fixture-XXXXXX";
@@ -6558,6 +6658,8 @@ int main(void)
     g_composer_image_path = pico_canonical_persist_bytes(composer_dir, image_fixtures[0].extension,
         image_fixtures[0].data, image_fixtures[0].size);
     if (!g_composer_image_path) return 1;
+    if (PICO_TEST_RUN(TestCompactionMeasurements(false)) || PICO_TEST_RUN(TestCompactionMeasurements(true)) ||
+        PICO_TEST_RUN(TestCompactionCancelled(false)) || PICO_TEST_RUN(TestCompactionCancelled(true))) return 1;
     if (PICO_TEST_RUN(TestNativeCompactionLifecycle()) || PICO_TEST_RUN(TestNativeCompactionFailure()) ||
         PICO_TEST_RUN(TestNativeCheckpointSettlement())) return 1;
     int failed = 0;

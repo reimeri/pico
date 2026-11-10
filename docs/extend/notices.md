@@ -34,6 +34,15 @@ During a streamed response, a notice appears immediately; its session write wait
 until the preceding assistant response is saved or the stream ends. A provider
 failure preserves partial output and adds a separate Error notice.
 
+Compaction outcomes also use transcript-only notices. Successful compaction is
+represented by the committed compaction checkpoint itself, not a separate notice
+event: live rendering, resume, and saved-transcript inspection derive the same
+Info marker (including for older checkpoints). Reliable optional provider sizes
+add before/after tokens and a percentage; unavailable sizes show only **Context
+compacted**. Failure/cancellation before commit leaves an ordinary outcome
+notice and retains the previous context. See
+[compaction measurements](providers.md#compaction-status-and-measurements-abi-31).
+
 `PicoHost_AddMessage` remains for user/assistant transcript content and does not
 persist that content or add provider history by itself. It does not accept the
 notice role: use `PicoHost_AddNotice` to supply severity and persistence together.

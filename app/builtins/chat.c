@@ -1235,6 +1235,28 @@ static void RenderSyntheticThink(const TranscriptView *view, int message_index)
     ViewBreak(view);
 }
 
+/* This is a transient tail, not an assistant message or a virtualized record.
+ * Compaction can start after a complete answer, or without any visible messages. */
+static void RenderCompactionStatus(const TranscriptView *view)
+{
+    if (view->state != PICO_AGENT_COMPACT_WAIT) return;
+    const char *activity = view->owner ? view->owner->activity : view->activity;
+    bool saving = activity && !strcmp(activity, "Saving compacted context…");
+    CLAY(CLAY_IDI("CompactionStatus", view->id_ns),
+         {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
+                     .padding = {8, 8, 12, 6}, .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        CLAY_TEXT(saving ? CLAY_STRING("Saving compacted context…") : CLAY_STRING("Compacting context…"),
+                  CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC, .fontSize = PICO_FONT_UI,
+                                    .textColor = COLOR_MUTED}));
+        if (!saving && activity && activity[0] && strcmp(activity, "Compacting context…"))
+        {
+            CLAY_TEXT(ViewCStr(activity), CLAY_TEXT_CONFIG({.fontId = FONT_ITALIC,
+                      .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED}));
+        }
+    }
+}
+
 static const char *SubagentActivity(PicoHost *app, const PicoTraceLine *line)
 {
     PicoAgent *child = line->child_id ? PicoHost_FindAgent(app, line->child_id) : NULL;
@@ -3253,7 +3275,7 @@ void PicoChat_Render(PicoHost *app, void *state)
                          .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_GROW(0)}},
               .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
         {
-            bool empty = !active || active->message_count == 0;
+            bool empty = !active || (active->message_count == 0 && active->state != PICO_AGENT_COMPACT_WAIT);
             Clay_ChildAlignment align = empty ? (Clay_ChildAlignment){.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}
                                               : (Clay_ChildAlignment){0};
             Clay_Sizing content_size = {.width = ChatColumnWidth(app)};
@@ -3290,6 +3312,7 @@ void PicoChat_Render(PicoHost *app, void *state)
                     };
                     view.virtual_identity = TranscriptIdentity(&view);
                     RenderTranscript(&view, available_width);
+                    RenderCompactionStatus(&view);
                     RenderPendingSteering(active, available_width);
                 }
                 if (!empty)
@@ -3783,7 +3806,7 @@ static void InspectRender(PicoHost *app, void *state)
                                .horizontal = true,
                                .childOffset = Clay_GetScrollOffset()}})
                 {
-                    if (found && inspect.message_count > 0)
+                    if (found && (inspect.message_count > 0 || inspect.state == PICO_AGENT_COMPACT_WAIT))
                     {
                         PicoAgent *owner =
                             inspect.live_id ? PicoHost_FindAgent(app, inspect.live_id) : NULL;
@@ -3804,6 +3827,7 @@ static void InspectRender(PicoHost *app, void *state)
                                                              inspect.session_id);
                         g_inspect_virtual_ns = view.id_ns;
                         RenderTranscript(&view, transcript_w);
+                        RenderCompactionStatus(&view);
                     }
                     else if (loading)
                     {

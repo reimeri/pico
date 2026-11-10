@@ -134,6 +134,45 @@ transmitting native state. Custom gateways cannot receive an official-route
 checkpoint. Restore the original backend/account/key or start a new conversation.
 The transcript remains viewable even when continuation is unavailable.
 
+### Compaction status and measurements (ABI 31)
+
+Main and subagent transcripts show compaction progress, then a transcript-only
+outcome. A success marker appears only after the checkpoint commits and is
+reconstructed from that checkpoint on resume or saved-transcript inspection,
+including older checkpoints without measurements. Failed/cancelled operations
+before commit leave an outcome notice and retain the previous history. A cancel
+racing with a successful checkpoint still reports successful compaction.
+These markers never enter provider history. Cancellation (including force-cancel)
+from an outcome message hook settles after its notifications; a committed
+compaction still dispatches `AFTER_COMPACT` before stopping continuation.
+
+`PicoLlmResult.compaction_usage` is an optional value-owned `PicoCompactionUsage`
+for a successful native **or text** compaction. Leave it zero-initialized unless
+the provider can supply reliable measurements of the complete old and replacement
+history using the same tokenization and scope. Set `available = true`,
+`before_tokens > 0`, and `after_tokens >= 0`. Include all retained user items and
+any clarification seed in the replacement measurement. Exclude the compaction
+prompt and request-only context; instruction/tool overhead must not be counted
+on just one side. The field is copied across the worker/main-thread boundary,
+requires no allocation/free, is ignored on ordinary responses, and is persisted
+with the accepted checkpoint. Invalid/missing metadata omits the amount without
+failing compaction. Growth is displayed as an increase, never tokens saved.
+
+```c
+/* Only if these are comparable provider measurements of the full histories. */
+out->compaction_usage = (PicoCompactionUsage){
+    .available = true, .before_tokens = 120000, .after_tokens = 30000,
+};
+```
+
+Do not derive this pair from request input/output usage, character lengths,
+encrypted artifact sizes, the host's reset-to-zero token counter, or a later
+ordinary response. Current builtins leave it unavailable: they cannot measure
+the complete replacement history reliably. Unknown sizes show **Context
+compacted** without a number; no additional model request is made to measure it.
+The amount is presentation metadata, not billable usage or a replacement for
+ordinary context-window accounting.
+
 ### Provider contract
 
 An optional `PicoProvider.native_compaction(host, model, state)` callback selects

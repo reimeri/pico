@@ -61,7 +61,7 @@ Registered during `workspace_init`. Valid for agent lifecycle hooks:
 - `PICO_HOOK_ON_MESSAGE` — a message was added to the target transcript.
 - `PICO_HOOK_ON_LLM_RESPONSE` — the target agent received an accepted successful provider response. The response details and lifecycle are documented in [LLM response notification](hooks.md#llm-response-notification).
 - `PICO_HOOK_ON_COMPACT` — target compaction is starting.
-- `PICO_HOOK_AFTER_COMPACT` — target history was replaced with a briefing.
+- `PICO_HOOK_AFTER_COMPACT` — target replacement history (briefing or native state) was committed and installed.
 - `PICO_HOOK_ON_TURN_END` — target became idle after a completed turn, not cancel/error.
 - `PICO_HOOK_ON_CANCEL` — target turn was cancelled.
 - `PICO_HOOK_ON_ERROR` — target entered `PICO_AGENT_ERROR`.
@@ -139,8 +139,13 @@ source text. If preparation/persistence fails, old context remains intact; there
 is no automatic conversion or text fallback when the hook supplies nothing.
 
 `AFTER_COMPACT` fires only after the replacement checkpoint has been written and
-installed (immediately in memory for ephemeral agents). During an accepted
-checkpoint write, cancellation settles against its write outcome rather than
+installed (immediately in memory for ephemeral agents). The transcript receives
+an informational completion notice derived from that checkpoint first. A cancel
+or force-cancel requested by its `ON_MESSAGE` hook is deferred through
+`AFTER_COMPACT`, so the successful lifecycle notification is not lost. Hook
+summaries have no provider-measured reduction amount. See
+[compaction status and measurements](providers.md#compaction-status-and-measurements-abi-31).
+During an accepted checkpoint write, cancellation settles against its write outcome rather than
 claiming to roll back a record that may already be committed. Successful-response
 hooks still report the completed provider call and its usage, even if later local
 checkpoint persistence fails. Native compaction skips request-context hooks and

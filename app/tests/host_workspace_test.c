@@ -3053,8 +3053,105 @@ static int TestColdTranscriptRefinement(bool with_sidebar);
 static int RunStashedPickerShellCase(bool with_sidebar);
 #endif
 
+static int RunCompactionStatusCase(bool with_sidebar)
+{
+    const Clay_Dimensions viewport = {1100, 800};
+    char dir[] = "/tmp/pico-compact-layout-XXXXXX", cfg[] = "/tmp/pico-compact-config-XXXXXX";
+    uint32_t arena_size = Clay_MinMemorySize();
+    void *memory = malloc(arena_size);
+    Clay_Context *previous = Clay_GetCurrentContext();
+    PicoHost *host = NULL;
+    PicoAgent *agent = NULL, *child = NULL;
+    int rc = 1;
+    if (!memory || !mkdtemp(dir) || !mkdtemp(cfg)) { free(memory); return 1; }
+    setenv("XDG_CONFIG_HOME", cfg, 1);
+    if (pico_host_init(&host, NULL, true) != PICO_OK) goto done;
+    WaitPluginLoad(host);
+    host->preferences.chat_width = 0;
+    host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    if (with_sidebar) ShellTestAddView(host, PICO_SLOT_SIDEBAR, ShellTestSidebar, NULL);
+    PicoWorkspaceId workspace_id = 0;
+    PicoAgentId agent_id = 0, child_id = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .select = true, .session_start = PICO_SESSION_NONE};
+    if (pico_workspace_open(host, dir, &workspace_id) != PICO_OK ||
+        pico_main_agent_create(host, workspace_id, &options, &agent_id) != PICO_OK) goto done;
+    agent = PicoHost_FindAgent(host, agent_id);
+    PicoWorkspace *workspace = PicoHost_FindWorkspace(host, workspace_id);
+    options = (PicoAgentCreateOptions){.kind = PICO_AGENT_SUBAGENT, .parent_id = agent_id, .session_start = PICO_SESSION_NONE};
+    if (PicoWorkspace_CreateAgent(workspace, &options, &child_id) != PICO_OK) goto done;
+    child = PicoHost_FindAgent(host, child_id);
+    if (!Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(arena_size, memory), viewport,
+                         (Clay_ErrorHandler){0})) goto done;
+    Clay_SetMeasureTextFunction(ShellMeasureText, NULL);
+    RichText_SetMeasureFunction(ShellMeasureText, NULL);
+    host->chat_follow_bottom = true;
+    for (int stage = 0; stage < 8; ++stage)
+    {
+        bool inspecting = stage >= 4;
+        PicoAgent *owner = inspecting ? child : agent;
+        bool complete = stage == 3 || stage == 7;
+        bool saving = stage == 2 || stage == 6;
+        if (stage == 1 || stage == 5)
+            for (int i = 0; i < 40; ++i)
+                PicoAgent_AddMessage(host, owner, PICO_ROLE_ASSISTANT, "complete assistant response before compaction");
+        owner->state = complete ? PICO_AGENT_IDLE : PICO_AGENT_COMPACT_WAIT;
+        snprintf(owner->activity, sizeof(owner->activity), "%s", saving ? "Saving compacted context…" : "Compacting context…");
+        if (complete) PicoAgent_AddNotice(host, owner, PICO_NOTICE_INFO, "Context compacted", NULL);
+        if (stage == 4) {
+            PicoToolRowEvent inspect = {.name = "subagent", .agent_id = agent_id, .child_id = child_id};
+            PicoChat_SubagentToolRow(workspace, &inspect, NULL);
+        }
+        PicoChat_ResetBottomSpace(host);
+        ChatStabilitySnapshot expected = {0};
+        Clay_BoundingBox expected_status = {0};
+        for (int frame = 0; frame < 70; ++frame)
+        {
+            Clay_SetLayoutDimensions(viewport);
+            Clay_UpdateScrollContainers(false, (Clay_Vector2){0}, 0.0f);
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
+            Clay_ElementId scroll_id = inspecting ? CLAY_ID("SubagentChatScroll") : CLAY_ID("ChatScroll");
+            Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(scroll_id);
+            if (!scroll.found || !scroll.scrollPosition) goto done;
+            PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
+                                       scroll.contentDimensions.height, &scroll.scrollPosition->y);
+            commands = PicoHost_LayoutShell(host, viewport.height, 0.0f);
+            PicoChat_HarvestVirtualHeights(host);
+            Clay_ElementData status = Clay_GetElementData(CLAY_IDI("CompactionStatus", inspecting ? 1 : 0));
+            Clay_ElementData clip = Clay_GetElementData(scroll_id);
+            ChatStabilitySnapshot current;
+            if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
+            if (frame == 30) { expected = current; expected_status = status.boundingBox; }
+            if (frame > 30 && (!ChatStabilitySnapshotStable(&expected, &current, with_sidebar) ||
+                (!complete && !ShellBoxStable(expected_status, status.boundingBox)))) {
+                Fail("compaction status changed repeated bottom-follow geometry"); goto done;
+            }
+            if (frame == 69) {
+                const char *label = saving ? "Saving compacted context…" : "Compacting context…";
+                if (complete ? (status.found || !FindCardText(&commands, "Context compacted")) :
+                    (!status.found || !clip.found || !FindCardText(&commands, label) ||
+                     !ShellVerticallyContains(clip.boundingBox, status.boundingBox))) {
+                    Fail("compaction progress must be visible at the tail, including empty and inspected transcripts"); goto done;
+                }
+            }
+        }
+    }
+    rc = 0;
+done:
+    if (agent) agent->state = PICO_AGENT_IDLE;
+    if (child) child->state = PICO_AGENT_IDLE;
+    PicoChat_InspectClose();
+    Clay_SetCurrentContext(previous);
+    if (host) pico_host_free(host);
+    free(memory);
+    unsetenv("XDG_CONFIG_HOME");
+    rmdir(cfg); rmdir(dir);
+    if (rc && !g_failed) Fail("compaction status layout setup");
+    return rc;
+}
+
 static int TestBottomFollowShellGeometryStable(void)
 {
+    if (RunCompactionStatusCase(false) || RunCompactionStatusCase(true)) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (RunStashedPickerShellCase(false) || RunStashedPickerShellCase(true)) return 1;
     if (TestColdTranscriptRefinement(false) || TestColdTranscriptRefinement(true)) return 1;

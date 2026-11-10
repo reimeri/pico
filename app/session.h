@@ -268,7 +268,7 @@ typedef struct PicoSessionCheckpoint {
     atomic_int references;
 } PicoSessionCheckpoint;
 PicoSessionCheckpoint *PicoSession_QueueCompaction(PicoHost *app, PicoAgent *agent,
-    const char *history_json, const char *summary, int tokens_before);
+    const char *history_json, const char *summary, int tokens_before, const PicoCompactionUsage *usage);
 void PicoSession_CheckpointRelease(PicoSessionCheckpoint *checkpoint);
 
 /* Main-thread user preference. Only mutate the live mode after the append is accepted. */

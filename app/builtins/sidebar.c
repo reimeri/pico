@@ -1799,6 +1799,12 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                                               width - age_width - badge_width - SIDEBAR_ROW_GAP);
     float subtitle_height = fmaxf(Pico_FontPx(PICO_FONT_CAPTION), badge_width);
     float height = Pico_FontPx(PICO_FONT_UI) + subtitle_height + 14;
+    SidebarWave *wave_state = row->section == INBOX_COMPLETED ? NULL :
+        SidebarSessionWave(s, row, id, kind);
+    Clay_Color fill = RowFill(selected, Clay_PointerOver(id));
+    /* Keep selection visible without washing out the low-contrast wave.
+     * Completed rows and ordinary hover styling retain their usual fill. */
+    if (selected && wave_state) fill = (Clay_Color){44, 44, 52, 255};
     CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_FIXED(height)}},
               .transition = {.handler = Clay_EaseOut, .duration = 0.18f,
                              .properties = CLAY_TRANSITION_PROPERTY_Y}})
@@ -1808,7 +1814,7 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                              .padding = {SIDEBAR_ROW_PAD_X, SIDEBAR_ROW_PAD_X, 5, 5},
                              .childGap = SIDEBAR_ROW_GAP,
                              .sizing = {.width = CLAY_SIZING_PERCENT(1), .height = CLAY_SIZING_FIXED(height)}},
-                  .backgroundColor = RowFill(selected, Clay_PointerOver(id)),
+                  .backgroundColor = fill,
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
             static CustomLayoutElement wave = {
@@ -1816,8 +1822,6 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                 .customData.draw = DrawInboxWorkingWave,
             };
             bool working = kind == SIDEBAR_DOT_RUNNING;
-            SidebarWave *wave_state = row->section == INBOX_COMPLETED ? NULL :
-                SidebarSessionWave(s, row, id, kind);
             Clay_ElementId content_id = CLAY_IDI("SidebarInboxContent", id.id);
             if (working && wave_state) SidebarAnimateElement(s, content_id);
             CLAY(content_id, {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,

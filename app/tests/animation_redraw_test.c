@@ -41,6 +41,46 @@ static bool WaveTintIs(WaveImage image, Clay_Color expected)
     return image.tint.r == expected.r && image.tint.g == expected.g && image.tint.b == expected.b;
 }
 
+static bool CaptureInboxFill(Clay_Color *color)
+{
+    uint32_t id = CLAY_IDI("SidebarInbox", 0).id;
+    for (int i = 0; i < g_last_presented_commands.length; i++)
+    {
+        Clay_RenderCommand *command = &g_last_presented_commands.internalArray[i];
+        if (command->id == id && command->commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE)
+        {
+            *color = command->renderData.rectangle.backgroundColor;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int TestSelectedWaveUsesQuieterFill(void)
+{
+    InteractionFixture f = {0};
+    PicoAgent *agent = NULL;
+    bool good = false;
+    Clay_Color ordinary = {0}, working = {0};
+    if (!InteractionFixtureInit(&f)) goto done;
+    agent = PicoHost_FindAgent(f.host, f.agent);
+    agent->inbox_pending = true;
+    pico_host_request_redraw(f.host); PicoHost_Frame(f.host);
+    if (!CaptureInboxFill(&ordinary)) goto done;
+    agent->state = PICO_AGENT_COMPACT_WAIT;
+    pico_host_request_redraw(f.host); PicoHost_Frame(f.host);
+    if (!CaptureInboxFill(&working)) goto done;
+    /* Preserve the selection backdrop, but give the wave a darker canvas.
+     * Assert the visual relationship rather than a configurable RGB value. */
+    good = working.a == ordinary.a &&
+        working.r + working.g + working.b < ordinary.r + ordinary.g + ordinary.b;
+done:
+    if (agent) agent->state = PICO_AGENT_IDLE;
+    InteractionFixtureFree(&f);
+    if (!good) Fail("selected wave rows must use a darker backdrop than ordinary selected rows");
+    return !good;
+}
+
 static int TestWorkingWavePausesForError(void)
 {
     InteractionFixture f = {0};

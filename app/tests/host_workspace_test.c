@@ -22199,6 +22199,7 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestRefinementAfterLayoutMutation());
     if (argc == 2 && strcmp(argv[1], "--animation-redraw") == 0)
         return PICO_TEST_RUN(TestBusyFramesFollowVisibleAnimationDemand()) ||
+               PICO_TEST_RUN(TestSelectedWaveUsesQuieterFill()) ||
                PICO_TEST_RUN(TestWorkingWavePausesForError()) ||
                PICO_TEST_RUN(TestWaitingQuestionDoesNotAnimate()) ||
                PICO_TEST_RUN(TestUnmountedThinkingDoesNotAnimate());
@@ -22337,6 +22338,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_PARTIAL_FAILURE)) != 0 ||
         PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_NEWER_EVENT)) != 0) return 1;
     if (PICO_TEST_RUN(TestBusyFramesFollowVisibleAnimationDemand()) ||
+        PICO_TEST_RUN(TestSelectedWaveUsesQuieterFill()) ||
         PICO_TEST_RUN(TestWorkingWavePausesForError()) ||
         PICO_TEST_RUN(TestWaitingQuestionDoesNotAnimate()) ||
         PICO_TEST_RUN(TestUnmountedThinkingDoesNotAnimate())) return 1;

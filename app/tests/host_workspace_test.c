@@ -16435,7 +16435,7 @@ static int TestSidebarInbox(void)
     other->inbox_pending = true;
     other->unseen_complete = true;
     commands = PicoHost_LayoutShell(host, viewport.height, 0);
-    if (!SidebarCommandsContain(&commands, "Inbox") || pico_agent_active(host) != selected_id)
+    if (!Clay_GetElementData(CLAY_ID("SidebarShortcuts")).found || pico_agent_active(host) != selected_id)
     {
         Fail("Inbox must be the sidebar view without changing selection");
         goto done;
@@ -18716,7 +18716,7 @@ static int TestProjectPickerControls(bool with_sidebar)
         Clay_BoundingBox first = Clay_GetElementData(CLAY_IDI("InboxProject", 0)).boundingBox;
         Clay_BoundingBox last = Clay_GetElementData(CLAY_IDI("InboxProject", 1)).boundingBox;
         g_find_button = MOUSE_BUTTON_LEFT;
-        g_find_pointer = (Vector2){first.x + first.width - 12, first.y + first.height / 2};
+        g_find_pointer = (Vector2){first.x + first.width / 2, first.y + first.height / 2};
         Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
         g_find_down = g_find_press = true;
         pico_run_hooks(f.host, PICO_HOOK_AFTER_LAYOUT, 0);
@@ -18826,6 +18826,98 @@ done:
     return !good;
 }
 
+static int TestSidebarShortcutStrip(void)
+{
+    InteractionFixture f = {0};
+    char root[] = "/tmp/pico-shortcuts-XXXXXX", path[4096], hidden[4096], moved[4096];
+    char target[4096];
+    PicoCatalogWorkspace *catalog = NULL;
+    int n = 0;
+    bool good = false, directory_moved = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f) || !mkdtemp(root)) goto done;
+    for (int i = 0; i < 24; i++)
+    {
+        if (!PicoPath_Format(path, sizeof(path), "%s/project-%02d", root, i) ||
+            mkdir(path, 0700) || PicoCatalog_Ensure(path) || PicoCatalog_SetProjectStarred(path, true)) goto done;
+    }
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    n = PicoCatalog_ReadGrouped(&catalog, NULL);
+    if (n != 25) goto done;
+    phase = "shortcut order follows project order";
+    float previous_x = -1;
+    int last = -1, first = -1;
+    for (int i = 0; i < n; i++)
+    {
+        Clay_ElementData badge = Clay_GetElementData(CLAY_IDI("SidebarShortcut", i));
+        if (badge.found != catalog[i].starred) goto done;
+        if (!badge.found) continue;
+        if (badge.boundingBox.x <= previous_x) goto done;
+        if (first < 0) first = i;
+        previous_x = badge.boundingBox.x;
+        last = i;
+    }
+    if (first < 0 || last < 0) goto done;
+    snprintf(target, sizeof(target), "%s", catalog[last].path);
+    snprintf(hidden, sizeof(hidden), "%s", catalog[first].path);
+    if (!PicoPath_Format(moved, sizeof(moved), "%s/moved-project", root)) goto done;
+    PicoCatalog_Free(catalog, n); catalog = NULL; n = 0;
+    Clay_ElementData strip = Clay_GetElementData(CLAY_ID("SidebarShortcuts"));
+    Clay_BoundingBox add = Clay_GetElementData(CLAY_ID("SidebarAddWs")).boundingBox;
+    Clay_ScrollContainerData inbox = Clay_GetScrollContainerData(CLAY_ID("SidebarScroll"));
+    float inbox_y = inbox.scrollPosition->y;
+    phase = "mouse wheel reveals overflow without moving Inbox or plus";
+    g_find_pointer = (Vector2){strip.boundingBox.x + strip.boundingBox.width / 2,
+                              strip.boundingBox.y + strip.boundingBox.height / 2};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    g_find_wheel.y = -100;
+    PicoHost_Frame(f.host);
+    g_find_wheel = (Vector2){0};
+    Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SidebarShortcuts"));
+    Clay_ElementData badge = Clay_GetElementData(CLAY_IDI("SidebarShortcut", last));
+    inbox = Clay_GetScrollContainerData(CLAY_ID("SidebarScroll"));
+    if (!scroll.found || !scroll.scrollPosition || scroll.scrollPosition->x >= 0 || !badge.found ||
+        badge.boundingBox.x < strip.boundingBox.x ||
+        badge.boundingBox.x + badge.boundingBox.width > strip.boundingBox.x + strip.boundingBox.width + 0.1f ||
+        inbox.scrollPosition->y != inbox_y ||
+        !ShellBoxStable(add, Clay_GetElementData(CLAY_ID("SidebarAddWs")).boundingBox)) goto done;
+    phase = "scrolled shortcut opens its own workspace";
+    if (!ClickSidebarId(f.host, CLAY_IDI("SidebarShortcut", last)) ||
+        !PicoHost_SelectedAgent(f.host) || strcmp(PicoAgent_WorkspacePath(PicoHost_SelectedAgent(f.host)), target)) goto done;
+    phase = "missing directory hides but does not unstar a project";
+    if (rename(hidden, moved)) goto done;
+    directory_moved = true;
+    if (PicoCatalog_SetProjectName(hidden, "Missing favorite")) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    n = PicoCatalog_ReadGrouped(&catalog, NULL);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(catalog[i].path, hidden) && Clay_GetElementData(CLAY_IDI("SidebarShortcut", i)).found) goto done;
+    PicoCatalog_Free(catalog, n); catalog = NULL; n = 0;
+    if (rename(moved, hidden)) goto done;
+    directory_moved = false;
+    if (PicoCatalog_SetProjectName(hidden, "Returned favorite")) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    n = PicoCatalog_ReadGrouped(&catalog, NULL);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(catalog[i].path, hidden))
+            good = catalog[i].starred && Clay_GetElementData(CLAY_IDI("SidebarShortcut", i)).found;
+done:
+    if (directory_moved) (void)rename(moved, hidden);
+    g_find_wheel = (Vector2){0};
+    PicoCatalog_Free(catalog, n);
+    InteractionFixtureFree(&f);
+    RmRf(root);
+    if (!good) fprintf(stderr, "shortcut strip phase: %s\n", phase);
+    if (!good) Fail("shortcut overflow must remain ordered, scrollable and route to the visible workspace while remembering missing projects");
+    return !good;
+}
+
 static int TestSidebarProjectPicker(void)
 {
     InteractionFixture f = {0};
@@ -18834,16 +18926,17 @@ static int TestSidebarProjectPicker(void)
     const char *phase = "fixture";
     if (!InteractionFixtureInit(&f) || !mkdtemp(stashed)) goto done;
     Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
-    if (!SidebarCommandsContain(&commands, "Inbox")) goto done;
-    if (PicoCatalog_Ensure(stashed) || PicoCatalog_SetProjectStashed(stashed, true) ||
+    if (SidebarCommandsContain(&commands, "Inbox") ||
+        !Clay_GetElementData(CLAY_ID("SidebarShortcuts")).found) goto done;
+    if (PicoCatalog_Ensure(stashed) || PicoCatalog_SetProjectStashed(stashed, true) || PicoCatalog_SetProjectStarred(stashed, true) ||
         PicoCatalog_SetProjectName(stashed, "Hidden project")) goto done;
     g_sidebar_poll_due = true;
     if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
     PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
     PicoAgent_AddMessage(f.host, agent, PICO_ROLE_USER, "Keep this conversation open");
     agent->state = PICO_AGENT_LLM_WAIT;
-    phase = "static title leaves work and selection alone";
-    if (!ClickSidebarId(f.host, CLAY_ID("SidebarTitle")) || pico_agent_active(f.host) != f.agent) goto done;
+    phase = "stashed favorites are hidden";
+    if (Clay_GetElementData(CLAY_IDI("SidebarShortcut", 1)).found || pico_agent_active(f.host) != f.agent) goto done;
     commands = PicoHost_LayoutShell(f.host, 800, 0);
     if (!SidebarCommandsContain(&commands, "Working · 1")) goto done;
     Clay_RenderCommand *badge = FindCardText(&commands, "OL");
@@ -18875,20 +18968,25 @@ static int TestSidebarProjectPicker(void)
         add.boundingBox.y < project.boundingBox.y + project.boundingBox.height ||
         add.boundingBox.y - (project.boundingBox.y + project.boundingBox.height) >=
             project.boundingBox.y - (hint->boundingBox.y + hint->boundingBox.height)) goto done;
+    phase = "star toggles without creating or selecting a session";
+    if (!ClickSidebarId(f.host, CLAY_IDI("InboxStarProject", 0)) || pico_agent_active(f.host) ||
+        pico_agent_count(f.host) != agent_count || agent->state != PICO_AGENT_LLM_WAIT ||
+        !Clay_GetElementData(CLAY_IDI("SidebarShortcut", 0)).found ||
+        Clay_GetElementData(CLAY_ID("SidebarDragPreview")).found) goto done;
     phase = "restore leaves background work and workspace loading alone";
     int workspace_count = pico_workspace_count(f.host);
     if (!ClickSidebarId(f.host, CLAY_ID("InboxStashedToggle")) ||
         !ClickSidebarId(f.host, CLAY_IDI("InboxRestoreProject", 1)) ||
         pico_agent_active(f.host) || pico_agent_count(f.host) != agent_count ||
         pico_workspace_count(f.host) != workspace_count || agent->state != PICO_AGENT_LLM_WAIT) goto done;
-    phase = "create in chosen project";
-    if (!SidebarFrameClickWorkspace(f.host, Clay_GetElementData(CLAY_IDI("InboxProject", 0)))) goto done;
+    phase = "shortcut creates in chosen project";
+    if (!ClickSidebarId(f.host, CLAY_IDI("SidebarShortcut", 0))) goto done;
     PicoAgentId draft = pico_agent_active(f.host);
     if (!draft || draft == f.agent || pico_agent_count(f.host) != agent_count + 1 ||
         strcmp(PicoAgent_WorkspacePath(PicoHost_FindAgent(f.host, draft)), f.dir)) goto done;
     phase = "reuse empty draft";
     if (!ClickSidebarId(f.host, CLAY_ID("SidebarAddWs")) ||
-        !SidebarFrameClickWorkspace(f.host, Clay_GetElementData(CLAY_IDI("InboxProject", 0))) || pico_agent_active(f.host) != draft ||
+        !ClickSidebarId(f.host, CLAY_IDI("SidebarShortcut", 0)) || pico_agent_active(f.host) != draft ||
         pico_agent_count(f.host) != agent_count + 1) goto done;
     agent->state = PICO_AGENT_IDLE;
     phase = "Inbox after restart";
@@ -18905,13 +19003,23 @@ static int TestSidebarProjectPicker(void)
     if (!WaitCatalogScanDone(f.host, g_catalog_scan_done_calls + 1)) goto done;
     InteractionOmitDrawHooks(f.host);
     commands = PicoHost_LayoutShell(f.host, 800, 0);
-    if (!SidebarCommandsContain(&commands, "Inbox") || !Clay_GetElementData(CLAY_ID("InboxProjectPicker")).found) goto done;
+    if (SidebarCommandsContain(&commands, "Inbox") || !Clay_GetElementData(CLAY_ID("InboxProjectPicker")).found ||
+        !Clay_GetElementData(CLAY_IDI("SidebarShortcut", 0)).found) goto done;
     char *saved_settings = Pico_ReadFile(settings_path, NULL);
     bool settings_unchanged = saved_settings && !strcmp(saved_settings, settings);
     free(saved_settings);
     if (!settings_unchanged || f.host->preferences.chat_width != 80) goto done;
     badge = FindCardText(&commands, "OL");
     if (!badge || !BadgeColorEqual(badge_color, badge->renderData.text.textColor)) goto done;
+    phase = "unstar removes the durable shortcut";
+    if (!ClickSidebarId(f.host, CLAY_IDI("InboxStarProject", 0)) ||
+        Clay_GetElementData(CLAY_IDI("SidebarShortcut", 0)).found ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
+    PicoCatalogWorkspace *catalog = NULL;
+    int n = PicoCatalog_ReadGrouped(&catalog, NULL);
+    bool unstarred = n > 0 && !catalog[0].starred;
+    PicoCatalog_Free(catalog, n);
+    if (!unstarred) goto done;
     good = true;
 done:
     if (!good) fprintf(stderr, "Inbox picker phase: %s\n", phase);
@@ -18923,7 +19031,7 @@ done:
         }
     InteractionFixtureFree(&f);
     RmRf(stashed);
-    if (!good) Fail("Inbox title, project picker, background work and restart must agree");
+    if (!good) Fail("project shortcuts, picker, background work and restart must agree");
     return !good;
 }
 
@@ -19002,7 +19110,18 @@ static int RunInboxShellCase(bool with_sidebar)
     ChatStabilitySnapshot expected, current;
     Clay_BoundingBox sidebar_root = {0};
     Clay_Color project_color = {0};
+    Clay_BoundingBox shortcut_header = {0}, shortcut_strip = {0};
+    char favorites[] = "/tmp/pico-shortcuts-shell-XXXXXX";
     if (!InteractionFixtureInit(&f)) goto done;
+    if (!mkdtemp(favorites)) goto done;
+    for (int i = 0; i < 20; i++)
+    {
+        char path[4096];
+        if (!PicoPath_Format(path, sizeof(path), "%s/project-%02d", favorites, i) ||
+            mkdir(path, 0700) || PicoCatalog_Ensure(path) || PicoCatalog_SetProjectStarred(path, true)) goto done;
+    }
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
     if (!with_sidebar) f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
     PicoAgent *selected = PicoHost_FindAgent(f.host, f.agent);
     for (int i = 0; i < 60; i++)
@@ -19062,9 +19181,18 @@ static int RunInboxShellCase(bool with_sidebar)
         {
             expected = current;
             sidebar_root = Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox;
+            shortcut_header = Clay_GetElementData(CLAY_ID("SidebarInboxHeader")).boundingBox;
+            shortcut_strip = Clay_GetElementData(CLAY_ID("SidebarShortcuts")).boundingBox;
+            if (with_sidebar)
+            {
+                Clay_ScrollContainerData shortcuts = Clay_GetScrollContainerData(CLAY_ID("SidebarShortcuts"));
+                if (!shortcuts.found || shortcuts.contentDimensions.width <= shortcuts.scrollContainerDimensions.width) goto done;
+            }
         }
         else if (frame > 20 && (!ChatBottomFollowGeometryStable(&expected, &current, with_sidebar) ||
-            (with_sidebar && !ShellBoxStable(sidebar_root, Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox))))
+            (with_sidebar && (!ShellBoxStable(sidebar_root, Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox) ||
+             !ShellBoxStable(shortcut_header, Clay_GetElementData(CLAY_ID("SidebarInboxHeader")).boundingBox) ||
+             !ShellBoxStable(shortcut_strip, Clay_GetElementData(CLAY_ID("SidebarShortcuts")).boundingBox)))))
         {
             goto done;
         }
@@ -19078,6 +19206,7 @@ done:
             if (pico_agent_info(f.host, i, &info)) PicoHost_FindAgent(f.host, info.id)->state = PICO_AGENT_IDLE;
         }
     InteractionFixtureFree(&f);
+    RmRf(favorites);
     if (!good) Fail("real sidebar and moving Inbox rows must not perturb bottom-follow shell geometry");
     return !good;
 }
@@ -19553,6 +19682,7 @@ typedef enum PreferenceAction
     PREF_RENAME,
     PREF_STASH,
     PREF_RESTORE,
+    PREF_STAR,
     PREF_HOST_EXTENSION,
     PREF_WORKSPACE_EXTENSION,
 } PreferenceAction;
@@ -19581,7 +19711,7 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
             !SubagentSettingsText(host, 0, 0, "shared-save") || !SubagentSettingsText(host, 0, 2, "Shared save draft") ||
             !SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsGeneralTab")))) goto done;
     }
-    else if (action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE)
+    else if (action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE || action == PREF_STAR)
     {
         if (action == PREF_RESTORE)
         {
@@ -19597,7 +19727,7 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
         {
             if (!ClickSidebarId(host, CLAY_ID("InboxStashedToggle"))) goto done;
         }
-        else if (!SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("InboxProject", 0)), MOUSE_BUTTON_RIGHT)) goto done;
+        else if (action != PREF_STAR && !SidebarFrameClickButton(host, Clay_GetElementData(CLAY_IDI("InboxProject", 0)), MOUSE_BUTTON_RIGHT)) goto done;
         if (action == PREF_RENAME && !InteractionReplaceText(host, CLAY_ID("SidebarEditName"), "Renamed")) goto done;
     }
     else
@@ -19616,16 +19746,17 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
     g_preference_continue_fd = proceed[0];
     g_preference_fail = fail;
     g_preference_stage = action == PREF_SETTINGS ? "settings_before_save"
-                         : action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE ? "project_before_save"
+                         : action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE || action == PREF_STAR ? "project_before_save"
                          : "extension_before_save";
     phase = "input returns while save is blocked";
     if (action == PREF_SETTINGS)
     {
         if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsApply")))) goto done;
     }
-    else if (action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE)
+    else if (action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE || action == PREF_STAR)
     {
-        if (!SidebarFrameClick(host, Clay_GetElementData(action == PREF_RENAME ? CLAY_ID("SidebarEditSave") :
+        if (!SidebarFrameClick(host, Clay_GetElementData(action == PREF_STAR ? CLAY_IDI("InboxStarProject", 0) :
+                             action == PREF_RENAME ? CLAY_ID("SidebarEditSave") :
                              action == PREF_RESTORE ? CLAY_IDI("InboxRestoreProject", 0) : CLAY_ID("SidebarEditStash")))) goto done;
     }
     else if (!PicoPlugins_SetEnabled(host, extension_index, want_enabled)) goto done;
@@ -19646,6 +19777,14 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
         PicoHost_RequestHostReload(host);
         pico_host_pump(host);
         if (!PicoSettingsUi_IsOpen(host)) goto done;
+    }
+    else if (action == PREF_STAR)
+    {
+        if (!Clay_GetElementData(CLAY_IDI("SidebarShortcut", 0)).found || pico_agent_active(host)) goto done;
+        if (!WaitHostReload(host) || !WaitHostTasks(host)) goto done;
+        InteractionOmitDrawHooks(host);
+        (void)PicoHost_LayoutShell(host, 800, 0);
+        if (!Clay_GetElementData(CLAY_IDI("SidebarShortcut", 0)).found) goto done;
     }
     else if (action == PREF_RENAME)
     {
@@ -19705,10 +19844,11 @@ static int TestPreferenceSaveResponsive(PreferenceAction action, bool fail)
             if (SidebarCommandsContain(&commands, "Saving…") || !SidebarCommandsContain(&commands, "Could not save settings.")) goto done;
         }
     }
-    else if (action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE)
+    else if (action == PREF_RENAME || action == PREF_STASH || action == PREF_RESTORE || action == PREF_STAR)
     {
         PicoHost_Frame(host);
         Clay_RenderCommandArray commands = PicoHost_LayoutShell(host, 800, 0);
+        if (action == PREF_STAR && Clay_GetElementData(CLAY_IDI("SidebarShortcut", 0)).found == fail) goto done;
         if (action == PREF_RENAME && !SidebarCommandsContain(&commands, fail ? "Original" : "Renamed")) goto done;
         if (action == PREF_STASH && Clay_GetElementData(CLAY_IDI("InboxProject", 0)).found != fail) goto done;
         if (action == PREF_RESTORE)
@@ -22039,15 +22179,17 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--sidebar-headings") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime());
     if (argc == 2 && strcmp(argv[1], "--project-preferences") == 0)
-        return PICO_TEST_RUN(TestPreferenceSaveResponsive(PREF_RESTORE, false)) ||
+        return PICO_TEST_RUN(TestPreferenceSaveResponsive(PREF_STAR, false)) ||
+               PICO_TEST_RUN(TestPreferenceSaveResponsive(PREF_STAR, true)) ||
+               PICO_TEST_RUN(TestPreferenceSaveResponsive(PREF_RESTORE, false)) ||
                PICO_TEST_RUN(TestPreferenceSaveResponsive(PREF_RESTORE, true));
     if (argc == 2 && strcmp(argv[1], "--project-picker") == 0)
-        return PICO_TEST_RUN(TestRestoreOrderQueue()) || PICO_TEST_RUN(TestProjectRestoreSnapshot()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) ||
+        return PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestRestoreOrderQueue()) || PICO_TEST_RUN(TestProjectRestoreSnapshot()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) ||
                PICO_TEST_RUN(RunStashedPickerShellCase(false)) || PICO_TEST_RUN(RunStashedPickerShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--sidebar-working") == 0)
         return PICO_TEST_RUN(RunWorkingBorderShellCase(false)) || PICO_TEST_RUN(RunWorkingBorderShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--sidebar-inbox") == 0)
-        return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarProjectPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
+        return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestSidebarProjectPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
                PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) ||
                PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) || PICO_TEST_RUN(RunInboxShellCase(false)) ||
                PICO_TEST_RUN(RunInboxShellCase(true)) ||
@@ -22122,7 +22264,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestRefinementAfterLayoutMutation())) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
-        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarProjectPicker()) ||
+        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestSidebarProjectPicker()) ||
         PICO_TEST_RUN(TestSidebarInboxPins()) || PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||

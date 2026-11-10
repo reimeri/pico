@@ -4458,6 +4458,7 @@ Clay_RenderCommandArray PicoHost_LayoutShell(PicoHost *app, float viewport_heigh
 }
 
 static const Clay_String scroll_ids[] = {
+    CLAY_STRING("SidebarShortcuts"),
     CLAY_STRING("ChatScroll"), CLAY_STRING("SidebarScroll"),
     CLAY_STRING("SubagentChatScroll"),
     CLAY_STRING("SettingsPanelScroll"), CLAY_STRING("SettingsDefaultMenuScroll"),
@@ -4875,6 +4876,14 @@ void PicoHost_Frame(PicoHost *app)
     bool over_inspect = PicoChat_InspectIsOpen() &&
                         Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SubagentChatScroll")));
     Clay_Vector2 wheel = {.x = mouse_delta.x, .y = mouse_delta.y};
+    /* The shortcut strip accepts both trackpad horizontal scrolling and an
+     * ordinary mouse wheel, without scrolling the Inbox beneath it. */
+    if (!modal_open && !PicoHost_SidebarResizeBlocksInput(app) &&
+        Clay_PointerOver(CLAY_ID("SidebarShortcuts")))
+    {
+        wheel.x += wheel.y;
+        wheel.y = 0;
+    }
     bool empty_card_wheel = !modal_open && !over_inspect &&
                             PicoChat_ScrollHoveredEmptyCard(app, wheel.x, wheel.y);
     bool pane_wheel = over_inspect || (over_chat && !modal_open && !empty_card_wheel);

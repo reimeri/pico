@@ -2090,13 +2090,14 @@ static int TestCatalog(void)
     PicoCatalog_Free(list, n);
 
     /* Group presentation must survive a rescan without changing checkout identity. */
-    if (PicoCatalog_SetProjectName(ws, "My project") != 0 ||
+    if (PicoCatalog_SetProjectStarred(ws, true) != 0 ||
+        PicoCatalog_SetProjectName(ws, "My project") != 0 ||
         PicoCatalog_SetProjectStashed(ws, true) != 0)
         return Fail("project rename and stash");
     if (PicoCatalog_Ensure(ws) != 0) return Fail("reopen stashed workspace");
     n = PicoCatalog_ScanGrouped(&list);
     found = FindCatalogPath(list, n, ws);
-    if (!found || strcmp(found->name, "My project") || !found->stashed ||
+    if (!found || !found->starred || strcmp(found->name, "My project") || !found->stashed ||
         strcmp(found->path, ws))
     {
         PicoCatalog_Free(list, n);
@@ -2117,7 +2118,7 @@ static int TestCatalog(void)
         return Fail("restore project");
     n = PicoCatalog_ScanGrouped(&list);
     found = FindCatalogPath(list, n, ws);
-    if (!found || found->stashed || strcmp(found->name, "My project"))
+    if (!found || !found->starred || found->stashed || strcmp(found->name, "My project"))
     {
         PicoCatalog_Free(list, n);
         return Fail("restored project keeps its display name");
@@ -3046,7 +3047,7 @@ static int TestCatalogDeleteRejectsSwappedCheckout(void)
     return 0;
 }
 
-static int TestCatalogPinMigration(int old_version)
+static int TestCatalogPresentationMigration(int old_version)
 {
     char config[] = "/tmp/pico-catalog-pin-cfg-XXXXXX";
     char ws[] = "/tmp/pico-catalog-pin-ws-XXXXXX";
@@ -3067,7 +3068,8 @@ static int TestCatalogPinMigration(int old_version)
         !PicoPath_Format(path, sizeof(path), "%s/sessions/.catalog.sqlite3", config) ||
         sqlite3_open(path, &db) != SQLITE_OK) goto done;
     /* Reconstruct the historical column sets, not merely their version tag. */
-    if (sqlite3_exec(db, "ALTER TABLE sessions DROP COLUMN pinned", NULL, NULL, NULL) != SQLITE_OK) goto done;
+    if (sqlite3_exec(db, "ALTER TABLE projects DROP COLUMN starred", NULL, NULL, NULL) != SQLITE_OK) goto done;
+    if (old_version < 4 && sqlite3_exec(db, "ALTER TABLE sessions DROP COLUMN pinned", NULL, NULL, NULL) != SQLITE_OK) goto done;
     if (old_version <= 2 && sqlite3_exec(db,
         "ALTER TABLE sessions DROP COLUMN inbox; ALTER TABLE sessions DROP COLUMN last_user_action",
         NULL, NULL, NULL) != SQLITE_OK) goto done;
@@ -3079,7 +3081,7 @@ static int TestCatalogPinMigration(int old_version)
     sqlite3_close(db); db = NULL;
     n = PicoCatalog_ScanGrouped(&list);
     const PicoCatalogWorkspace *group = FindCatalogPath(list, n, ws);
-    if (!group || strcmp(group->name, "Preserved preference") || group->inbox_count ||
+    if (!group || group->starred || strcmp(group->name, "Preserved preference") || group->inbox_count ||
         group->session_count) goto done;
     PicoCatalog_Free(list, n); list = NULL; n = 0;
     n = PicoCatalog_Scan(&list);
@@ -3087,10 +3089,11 @@ static int TestCatalogPinMigration(int old_version)
     if (!group || group->session_count != 1 || group->sessions[0].pinned) goto done;
     time_t recency = group->sessions[0].mtime;
     PicoCatalog_Free(list, n); list = NULL; n = 0;
-    if (PicoCatalog_SetPinned(ws, agent.session_id, true) != 0) goto done;
+    if (PicoCatalog_SetPinned(ws, agent.session_id, true) != 0 ||
+        PicoCatalog_SetProjectStarred(ws, true) != 0) goto done;
     n = PicoCatalog_ScanGrouped(&list);
     group = FindCatalogPath(list, n, ws);
-    if (!group || group->inbox_count != 1 || !group->inbox_sessions[0].pinned ||
+    if (!group || !group->starred || group->inbox_count != 1 || !group->inbox_sessions[0].pinned ||
         group->inbox_sessions[0].mtime != recency) goto done;
     PicoCatalog_Free(list, n); list = NULL; n = 0;
     /* Transcript updates/reconciliation must not overwrite presentation metadata. */
@@ -3109,7 +3112,7 @@ done:
     if (db) sqlite3_close(db);
     PicoCatalog_Free(list, n);
     snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
-    return result ? Fail("catalog migrations and transcript updates must preserve inbox pin preferences") : 0;
+    return result ? Fail("catalog migrations and transcript updates must preserve presentation preferences") : 0;
 }
 
 static int TestCatalogRejectsIncompatibleSchema(void)
@@ -4844,9 +4847,10 @@ int main(void)
         PICO_TEST_RUN(TestCatalogDeleteRejectsSwappedCheckout()) != 0 ||
         PICO_TEST_RUN(TestCatalogRejectsCollidingPaths()) != 0 ||
         PICO_TEST_RUN(TestCatalogSQLiteImport()) != 0 ||
-        PICO_TEST_RUN(TestCatalogPinMigration(1)) != 0 ||
-        PICO_TEST_RUN(TestCatalogPinMigration(2)) != 0 ||
-        PICO_TEST_RUN(TestCatalogPinMigration(3)) != 0 ||
+        PICO_TEST_RUN(TestCatalogPresentationMigration(1)) != 0 ||
+        PICO_TEST_RUN(TestCatalogPresentationMigration(2)) != 0 ||
+        PICO_TEST_RUN(TestCatalogPresentationMigration(3)) != 0 ||
+        PICO_TEST_RUN(TestCatalogPresentationMigration(4)) != 0 ||
         PICO_TEST_RUN(TestCatalogRejectsIncompatibleSchema()) != 0)
     {
         return 1;

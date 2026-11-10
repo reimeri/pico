@@ -68,6 +68,7 @@ typedef struct PicoCatalogWorkspace {
     char name[PICO_CATALOG_NAME_MAX];
     int order;
     bool stashed; /* logical project group presentation state */
+    bool starred; /* Durable new-session shortcut for the logical project. */
     PicoCatalogSession *sessions;
     int session_count;
     int session_capacity;
@@ -82,6 +83,7 @@ typedef struct PicoProjectPreference {
     char path[4096];
     char confirmed_name[PICO_CATALOG_NAME_MAX], name[PICO_CATALOG_NAME_MAX];
     bool confirmed_stashed, stashed;
+    bool confirmed_starred, starred;
     int pending;
     uint64_t completed_epoch;
 } PicoProjectPreference;
@@ -131,6 +133,7 @@ int PicoCatalog_Ensure(const char *workspace_path);
 /* Project identity is the canonical main checkout path, not a session checkout. */
 int PicoCatalog_SetProjectName(const char *project_path, const char *name);
 int PicoCatalog_SetProjectStashed(const char *project_path, bool stashed);
+int PicoCatalog_SetProjectStarred(const char *project_path, bool starred);
 /* Worker-side restoration and complete project ordering commit together. */
 int PicoCatalog_RestoreProject(const char *project_path, const char *const *order, int count);
 /* Removes Pico session data for the group, never checkout directories.

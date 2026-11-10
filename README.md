@@ -80,9 +80,9 @@ Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO
 
 ## Inbox
 
-The sidebar shows **Inbox**, grouping active and undismissed sessions under
-**Needs input** (questions, approvals, and errors), **Working**, and **Completed**
-(finished or stopped turns). Its title is a label, not a mode switch.
+The sidebar groups active and undismissed sessions under **Needs input**
+(questions, approvals, and errors), **Working**, and **Completed** (finished or
+stopped turns).
 
 - Rows include their project name and move between sections as work progresses.
   A muted age beside the name (`12s`, `5m`, `2h`, `3d`) shows time since the last
@@ -96,6 +96,12 @@ The sidebar shows **Inbox**, grouping active and undismissed sessions under
   Choose a non-stashed project to create a session, or return to its empty draft.
   The picker also offers **Add project**, project reordering by dragging, and
   project settings by right-clicking a project.
+- Click the star beside a project in the picker to toggle its shortcut badge at
+  the top of the sidebar. Click a badge to start a session in that project’s main
+  workspace (or reuse its empty draft). Favorites survive restarts and follow
+  project-list order; scroll horizontally or use the mouse wheel over the badges
+  if they overflow. Stashed or missing projects hide their shortcuts without
+  losing their stars.
 
 When you switch sessions (including between projects), Pico remembers your reading
 position for five minutes after you leave. Returning sooner restores that position,

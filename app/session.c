@@ -4127,7 +4127,7 @@ static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/.project-%s.json", root, key);
 }
 
-static int CatalogProjectUpdate(const char *project, const char *name, int stash,
+static int CatalogProjectUpdate(const char *project, const char *name, int stash, int star,
                                 const char *const *order, int count)
 {
 #ifdef PICO_SESSION_TEST_HOOKS
@@ -4142,16 +4142,19 @@ static int CatalogProjectUpdate(const char *project, const char *name, int stash
         !(db = CatalogDbOpen())) return -1;
     sqlite3_busy_timeout(db, 30);
     ok = (!order || CatalogDbExec(db, "BEGIN IMMEDIATE")) && CatalogDbPrepare(db, &stmt,
-        "INSERT INTO projects(path,name,stashed) VALUES(?,?,?)"
+        "INSERT INTO projects(path,name,stashed,starred) VALUES(?,?,?,?)"
         " ON CONFLICT(path) DO UPDATE SET name=CASE WHEN ? THEN excluded.name ELSE projects.name END,"
-        "stashed=CASE WHEN ? THEN excluded.stashed ELSE projects.stashed END");
+        "stashed=CASE WHEN ? THEN excluded.stashed ELSE projects.stashed END,"
+        "starred=CASE WHEN ? THEN excluded.starred ELSE projects.starred END");
     if (ok)
     {
         sqlite3_bind_text(stmt, 1, project, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, name ? name : "", -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 3, stash > 0);
-        sqlite3_bind_int(stmt, 4, name != NULL);
-        sqlite3_bind_int(stmt, 5, stash >= 0);
+        sqlite3_bind_int(stmt, 4, star > 0);
+        sqlite3_bind_int(stmt, 5, name != NULL);
+        sqlite3_bind_int(stmt, 6, stash >= 0);
+        sqlite3_bind_int(stmt, 7, star >= 0);
         ok = sqlite3_step(stmt) == SQLITE_DONE;
     }
     sqlite3_finalize(stmt);
@@ -4185,12 +4188,17 @@ int PicoCatalog_SetProjectName(const char *project, const char *name)
     size_t n = name ? strlen(name) : 0;
     if (!n || n >= PICO_CATALOG_NAME_MAX) return -1;
     for (size_t i = 0; i < n; i++) if ((unsigned char)name[i] < 32) return -1;
-    return CatalogProjectUpdate(project, name, -1, NULL, 0);
+    return CatalogProjectUpdate(project, name, -1, -1, NULL, 0);
 }
 
 int PicoCatalog_SetProjectStashed(const char *project, bool stashed)
 {
-    return CatalogProjectUpdate(project, NULL, stashed ? 1 : 0, NULL, 0);
+    return CatalogProjectUpdate(project, NULL, stashed ? 1 : 0, -1, NULL, 0);
+}
+
+int PicoCatalog_SetProjectStarred(const char *project, bool starred)
+{
+    return CatalogProjectUpdate(project, NULL, -1, starred ? 1 : 0, NULL, 0);
 }
 
 int PicoCatalog_RestoreProject(const char *project, const char *const *order, int count)
@@ -4198,7 +4206,7 @@ int PicoCatalog_RestoreProject(const char *project, const char *const *order, in
     if (!order || count <= 0 || count > PICO_MAX_CATALOG_WORKSPACES) return -1;
     for (int i = 0; i < count; i++)
         if (!order[i] || order[i][0] != '/') return -1;
-    return CatalogProjectUpdate(project, NULL, 0, order, count);
+    return CatalogProjectUpdate(project, NULL, 0, -1, order, count);
 }
 
 static char *CatalogOrderSerialize(const PicoCatalogWorkspace *workspaces, int count)
@@ -4558,7 +4566,7 @@ static bool CatalogDbHasColumn(sqlite3 *db, const char *column)
     return found;
 }
 
-enum { CATALOG_DB_VERSION = 4 };
+enum { CATALOG_DB_VERSION = 5 };
 
 static sqlite3 *CatalogDbOpenUnlocked(void)
 {
@@ -4615,6 +4623,12 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
                                    "PRAGMA user_version=4")) goto fail;
             version = 4;
         }
+        if (version == 4)
+        {
+            if (!CatalogDbExec(db, "ALTER TABLE projects ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;"
+                                   "PRAGMA user_version=5")) goto fail;
+            version = 5;
+        }
         if (!CatalogDbExec(db, "COMMIT")) goto fail;
     }
     if (version == CATALOG_DB_VERSION)
@@ -4653,7 +4667,7 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
         "collapsed INTEGER NOT NULL,ord INTEGER NOT NULL,"
         "last_reconcile INTEGER NOT NULL DEFAULT 0);"
         "CREATE UNIQUE INDEX workspaces_key ON workspaces(key);"
-        "CREATE TABLE projects(path TEXT PRIMARY KEY,name TEXT NOT NULL,stashed INTEGER NOT NULL);"
+        "CREATE TABLE projects(path TEXT PRIMARY KEY,name TEXT NOT NULL,stashed INTEGER NOT NULL,starred INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE workspace_order(path TEXT PRIMARY KEY,position INTEGER NOT NULL);"
         "CREATE TABLE sessions("
         "workspace_path TEXT NOT NULL,project_path TEXT NOT NULL,id TEXT NOT NULL,file_path TEXT NOT NULL,"
@@ -5197,7 +5211,7 @@ static bool CatalogDbSeed(sqlite3 *db, const char *path)
 static bool CatalogDbReadProject(sqlite3 *db, const char *path, PicoCatalogWorkspace *ws)
 {
     sqlite3_stmt *stmt = NULL;
-    if (!CatalogDbPrepare(db, &stmt, "SELECT name,stashed FROM projects WHERE path=?")) return false;
+    if (!CatalogDbPrepare(db, &stmt, "SELECT name,stashed,starred FROM projects WHERE path=?")) return false;
     sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW)
@@ -5205,6 +5219,7 @@ static bool CatalogDbReadProject(sqlite3 *db, const char *path, PicoCatalogWorks
         if (CatalogDbText(stmt, 0)[0])
             snprintf(ws->name, sizeof(ws->name), "%s", CatalogDbText(stmt, 0));
         ws->stashed = sqlite3_column_int(stmt, 1) != 0;
+        ws->starred = sqlite3_column_int(stmt, 2) != 0;
     }
     sqlite3_finalize(stmt);
     return rc == SQLITE_ROW || rc == SQLITE_DONE;

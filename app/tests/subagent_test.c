@@ -111,6 +111,75 @@ static int TestSubagentParentGuidance(void)
     return ok ? 0 : Fail(name, "parent prompt omitted isolation or session resume guidance");
 }
 
+static int TestSubagentReadOnlyGuidance(void)
+{
+    const char *name = "subagent read-only guidance";
+    const char *annotation = "Read-only subagent: must not modify files or other state";
+    const struct {
+        const char *name;
+        const char *json;
+        bool read_only;
+    } cases[] = {
+        {"safe_description", "{\"purpose\":\"Inspect\",\"description\":\"Repository lookup\",\"parallel_safe\":true}", true},
+        {"safe_empty", "{\"purpose\":\"Inspect\",\"description\":\"\",\"parallel_safe\":true}", true},
+        {"sequential", "{\"purpose\":\"Implement\",\"description\":\"Worker\",\"parallel_safe\":false}", false},
+        {"default", "{\"purpose\":\"Implement\"}", false},
+    };
+    char temp[] = "/tmp/pico-subagent-guidance-XXXXXX";
+    if (!mkdtemp(temp))
+    {
+        return Fail(name, "could not create config directory");
+    }
+    char dir[4096];
+    char path[4096];
+    snprintf(dir, sizeof(dir), "%s/subagents", temp);
+    Pico_MkdirP(dir);
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        snprintf(path, sizeof(path), "%s/subagents/%s.json", temp, cases[i].name);
+        FILE *file = fopen(path, "wb");
+        if (!file)
+        {
+            ok = false;
+            break;
+        }
+        bool written = fputs(cases[i].json, file) >= 0;
+        ok &= fclose(file) == 0 && written;
+    }
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", temp);
+    ResetTest(TEST_SINGLE, 0);
+    PicoHost app;
+    InitApp(&app);
+    PicoExt extension = pico_ext_subagent();
+    InitExt(&app, PicoHost_PrimaryWorkspace(&app), extension, NULL, NULL);
+    PicoWorkspace_LoadProfiles(PicoHost_PrimaryWorkspace(&app));
+    PicoAgent_StartTurn(&app, TestAgent(&app), "list delegation options");
+    ok &= WaitForIdle(&app);
+    pthread_mutex_lock(&g_test.mu);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        char prefix[128];
+        snprintf(prefix, sizeof(prefix), "\n- %s [", cases[i].name);
+        const char *line = g_test.last_instructions ? strstr(g_test.last_instructions, prefix) : NULL;
+        const char *marker = line ? strstr(line, annotation) : NULL;
+        bool annotated = marker && (size_t)(marker - line) < strcspn(line + 1, "\n") + 1;
+        ok &= line && annotated == cases[i].read_only;
+    }
+    ok &= g_test.last_instructions && strstr(g_test.last_instructions, "Repository lookup");
+    pthread_mutex_unlock(&g_test.mu);
+    PicoHost_Shutdown(&app);
+    snprintf(g_config_dir, sizeof(g_config_dir), "/tmp/pico-agent-behavior");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        snprintf(path, sizeof(path), "%s/subagents/%s.json", temp, cases[i].name);
+        unlink(path);
+    }
+    rmdir(dir);
+    rmdir(temp);
+    return ok ? 0 : Fail(name, "parent listing lost descriptions or did not annotate only parallel-safe profiles");
+}
+
 static int TestSubagentParentCancellation(void)
 {
     const char *name = "subagent parent cancellation";

@@ -101,6 +101,11 @@ static void SubagentGuidance(PicoWorkspace *workspace, PicoAgentId agent_id, Pic
             JsonBuf_Puts(&b, ": ");
             JsonBuf_Puts(&b, profile.description);
         }
+        if (profile.parallel_safe)
+        {
+            JsonBuf_Puts(&b, profile.description[0] ? " — " : ": ");
+            JsonBuf_Puts(&b, "Read-only subagent: must not modify files or other state");
+        }
     }
     if (count == 0)
     {

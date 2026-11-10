@@ -60,7 +60,7 @@ Profiles are parsed as JSONC, so line and block comments are allowed.
   // Optional exact-name tool allowlist.
   "tools": ["sh"],
 
-  // Explicit opt-in to overlap other calls in the parent's batch. Default false.
+  // Read-only delegation; opt in to overlap calls in the parent's batch. Default false.
   "parallel_safe": true,
 
   // Optional concurrency limit for this child's parallel-eligible tools (1–16).
@@ -108,6 +108,8 @@ Ask the model to issue independent `subagent` calls whose profiles declare `para
 
 `parallel_safe` is a strict boolean, **default false**. A missing or false value makes that profile's delegation a sequential barrier: earlier calls must finish before it starts, and later calls wait until it finishes. For example, `explore → worker → review` executes in that order if worker has not opted in, even if explore/review are parallel-safe. Invalid or unknown profiles are conservatively scheduled as barriers and return normal tool errors.
 
+Enabling `parallel_safe` also tells the delegating agent to use that profile only for read-only tasks. In the main-agent-facing profile listing, Pico appends **“Read-only subagent: must not modify files or other state”** after the profile's description, including when the description is empty. Sequential profiles receive no such annotation. This is a delegation instruction, not enforcement: it does not change the saved description, the profile snapshot returned by the API, or the child's purpose/instructions. Keep the child's read-only requirements in its `purpose` as well. Profiles intended to modify files or other state should leave `parallel_safe` false or omitted.
+
 This is **parent-batch ordering, not workspace-wide exclusivity**. Another parent or independently running agent may still operate concurrently. Use it for a worker profile that must not overlap siblings; do not mistake it for filesystem locking or a sandbox. The setting is never inferred from the purpose text or tool allowlist.
 
 A worker definition can omit the field or be explicit:
@@ -124,7 +126,7 @@ Pico snapshots eligibility before any calls in a response start. Before-tool hoo
 
 Set `max_parallel_tools` in user-global or workspace `settings.json` (integer 1–16). `parallel_safe` controls whether this delegation may overlap calls in the parent; `max_parallel_tools` controls **that child's** tool concurrency. A profile limit override controls that child only; omission uses the workspace setting, not the parent's profile override. The limit is copied for each accepted turn. A limit of 1 serializes eligible calls. Other builtins, including `sh`, remain sequential within one agent initially; separate child agents can still execute their own `sh` calls concurrently. Existing workspace/host agent caps remain enforced and return tool errors when exhausted.
 
-The bundled exploration and review profiles explicitly set `parallel_safe: true` and request read-only work through their purpose instructions. They do not enforce filesystem restrictions. Parallel-safe registration is a reentrancy contract, not a sandbox or proof of independence. See [extension tool contracts](extend/tools.md#execution-policy-and-parallel-calls).
+The bundled exploration and review profiles explicitly set `parallel_safe: true`, so their parent-facing descriptions receive the read-only annotation; they also request read-only work through their purpose instructions. They do not enforce filesystem restrictions. Parallel-safe registration is a reentrancy contract, not a sandbox or proof of independence. See [extension tool contracts](extend/tools.md#execution-policy-and-parallel-calls).
 
 ## Continuing a child session
 

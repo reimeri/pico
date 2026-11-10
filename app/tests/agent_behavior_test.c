@@ -6792,6 +6792,7 @@ int main(void)
     failed |= PICO_TEST_RUN(TestSubagentGlobalProfileValidation());
     failed |= PICO_TEST_RUN(TestNamedSubagentDelegation());
     failed |= PICO_TEST_RUN(TestSubagentParentGuidance());
+    failed |= PICO_TEST_RUN(TestSubagentReadOnlyGuidance());
     failed |= PICO_TEST_RUN(TestSubagentParentCancellation());
     failed |= PICO_TEST_RUN(TestSubagentCancellationBeforeEnqueue());
     failed |= PICO_TEST_RUN(TestSubagentDirectChildCancellation());

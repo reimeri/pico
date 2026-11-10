@@ -24,7 +24,8 @@ typedef struct
     CustomLayoutElementType type;
     union {
         CustomLayoutElement_3DModel model;
-        void (*draw)(Clay_BoundingBox bounds);
+        /* Element userData is borrowed for the duration of rendering. */
+        void (*draw)(Clay_BoundingBox bounds, void *userData);
     } customData;
 } CustomLayoutElement;
 

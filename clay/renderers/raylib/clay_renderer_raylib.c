@@ -356,7 +356,7 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
                 switch (customElement->type) {
                     case CUSTOM_LAYOUT_ELEMENT_TYPE_CALLBACK:
                         if (customElement->customData.draw)
-                            customElement->customData.draw(boundingBox);
+                            customElement->customData.draw(boundingBox, renderCommand->userData);
                         break;
                     case CUSTOM_LAYOUT_ELEMENT_TYPE_3D_MODEL: {
                         Clay_BoundingBox rootBox = renderCommands.internalArray[0].boundingBox;

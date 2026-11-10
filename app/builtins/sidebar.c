@@ -74,6 +74,18 @@ typedef struct SidebarLiveAgent
     char path[4096], session_id[40];
 } SidebarLiveAgent;
 
+/* Host-local live-agent identity survives inbox reordering and catalog
+ * refresh. Fixed storage also keeps borrowed render payloads stable. */
+typedef struct SidebarWave
+{
+    PicoAgentId agent;
+    char session_id[40];
+    double elapsed, displayed_elapsed, sampled_elapsed, sampled_at;
+    bool running, hold_for_presentation;
+    float phase, slow;
+    Clay_Color color;
+} SidebarWave;
+
 typedef enum InboxSection { INBOX_NEEDS_INPUT, INBOX_WORKING, INBOX_COMPLETED, INBOX_SECTION_COUNT } InboxSection;
 
 typedef struct InboxVisit
@@ -99,6 +111,7 @@ typedef struct SidebarState
     uint64_t inbox_layout_signature;
     double inbox_transition_until;
     int64_t inbox_age_now, inbox_age_redraw_at;
+    SidebarWave waves[PICO_MAX_TOTAL_AGENTS];
     SidebarLiveAgent live[PICO_MAX_TOTAL_AGENTS];
     int live_count;
     bool live_snapshot_valid;
@@ -1215,6 +1228,51 @@ static SidebarDotKind SessionDotKind(PicoHost *host, const char *ws_path, const 
     }
 }
 
+static void SidebarUpdateWave(SidebarWave *wave, SidebarDotKind kind, double now)
+{
+    bool running = kind == SIDEBAR_DOT_RUNNING;
+    /* On either attention transition, retain the last sampled image: don't
+     * advance into the pause or charge the paused interval on resumption. */
+    if (running && wave->running && !wave->hold_for_presentation)
+        wave->elapsed = fmod(wave->elapsed + fmax(0, now - wave->sampled_at), 120.0);
+    else if (!running && wave->running)
+        wave->elapsed = wave->displayed_elapsed;
+    if (running && !wave->running) wave->hold_for_presentation = true;
+    if (!running) wave->hold_for_presentation = false;
+    if (kind != SIDEBAR_DOT_WAITING_USER && kind != SIDEBAR_DOT_ERROR && !running)
+        wave->elapsed = 0;
+    wave->running = running;
+    wave->sampled_at = now;
+    wave->color = kind == SIDEBAR_DOT_ERROR ? COLOR_STATUS_ERR :
+                  kind == SIDEBAR_DOT_WAITING_USER ? COLOR_STATUS_RUN : COLOR_LINK;
+}
+
+static SidebarWave *SidebarSessionWave(SidebarState *s, const InboxVisit *row,
+                                       Clay_ElementId id, SidebarDotKind kind)
+{
+    PicoAgentId agent = row->live_id ? row->live_id : LiveMainAgent(s->host, row->path, row->session_id);
+    if (!agent) return NULL; /* Attention/working status currently requires a live agent. */
+    SidebarWave *wave = NULL, *available = NULL;
+    for (int i = 0; i < PICO_MAX_TOTAL_AGENTS; i++)
+    {
+        if (s->waves[i].agent == agent) { wave = &s->waves[i]; break; }
+        if (!available && (!s->waves[i].agent || !PicoHost_FindAgent(s->host, s->waves[i].agent)))
+            available = &s->waves[i];
+    }
+    if (!wave) wave = available;
+    if (!wave) return NULL;
+    /* Sessionless agents acquire their durable ID during the first turn; that
+     * must not reset motion. Reusing an agent for a different session must. */
+    if (wave->agent != agent || (wave->session_id[0] && strcmp(wave->session_id, row->session_id)))
+        *wave = (SidebarWave){.agent = agent,
+            .phase = (float)(id.id % 65521) / 65521.0f * 6.2831853f};
+    snprintf(wave->session_id, sizeof(wave->session_id), "%s", row->session_id);
+    SidebarUpdateWave(wave, kind, GetTime());
+    wave->sampled_elapsed = wave->elapsed;
+    wave->slow = (float)wave->elapsed * (6.2831853f / 12.0f);
+    return wave;
+}
+
 /* Collect only emitted decorations, then test their completed bounds in
  * AFTER_LAYOUT. Old-layout visibility would miss a newly mounted animation. */
 static void SidebarAnimateElement(SidebarState *s, Clay_ElementId id)
@@ -1644,86 +1702,79 @@ static Clay_String InboxAgeLabel(SidebarState *s, int64_t at)
     return CStr(label);
 }
 
-/* Distance along the inset rounded perimeter, clockwise from the top edge.
- * Keeping the decoration floating means it never participates in row sizing. */
-static Vector2 InboxBorderPoint(float distance, float width, float height)
+/* Paint from the existing content pane, after the row fill and before its
+ * text. Expanding its padding reaches the full row without a floating overlay
+ * or another layout wrapper. Low-frequency color, not glyphs or text masks,
+ * makes the movement visible behind both stationary text lines. */
+static void DrawInboxWorkingWave(Clay_BoundingBox content, void *userData)
 {
-    const float radius = 5.0f, quarter = 1.57079632679f;
-    const float lengths[] = {width - 12, radius * quarter, height - 12, radius * quarter,
-                             width - 12, radius * quarter, height - 12, radius * quarter};
-    const Vector2 centers[] = {{width - 6, 6}, {width - 6, height - 6},
-                               {6, height - 6}, {6, 6}};
-    for (int side = 0; side < 8; side++)
-    {
-        if (distance <= lengths[side] || side == 7)
-        {
-            if (side & 1)
-            {
-                float angle = (side / 2 - 1) * quarter + distance / radius;
-                Vector2 c = centers[side / 2];
-                return (Vector2){c.x + radius * cosf(angle), c.y + radius * sinf(angle)};
-            }
-            switch (side)
-            {
-            case 0: return (Vector2){6 + distance, 1};
-            case 2: return (Vector2){width - 1, 6 + distance};
-            case 4: return (Vector2){width - 6 - distance, height - 1};
-            default: return (Vector2){1, height - 6 - distance};
-            }
-        }
-        distance -= lengths[side];
-    }
-    return (Vector2){6, 1};
-}
+    SidebarWave *wave = userData;
+    if (!wave) return;
+    const float width = content.width + 2 * SIDEBAR_ROW_PAD_X;
+    const float height = content.height + 10;
+    if (width <= 0 || height <= 0) return;
+    const float origin_x = content.x - SIDEBAR_ROW_PAD_X;
+    const float origin_y = content.y - 5;
+    const float radius = fminf(6, fminf(width, height) * 0.5f);
+    const float phase = wave->phase, slow = wave->slow;
+    const Clay_Color accent = wave->color;
+    enum { columns = 24, rows = 16 };
+    Vector2 points[2][columns + 1];
+    unsigned char alpha[2][columns + 1];
 
-static void DrawInboxWorkingBorder(Clay_BoundingBox bounds)
-{
-    const float width = bounds.width, height = bounds.height;
-    if (width < 12 || height < 12) return;
-    const float perimeter = 2 * (width + height - 24) + 10 * 3.14159265359f;
-    const float tail = perimeter / 3;
-    const float head = (float)fmod(GetTime() / 2.0, 1.0) * perimeter;
-    const Clay_Color color = COLOR_LINK;
-    int steps = (int)ceilf(tail);
-    /* A single strip with interpolated alpha, rather than overlapping dots:
-     * no bright seams, and only one floating Clay root per working row. */
+    /* A small untextured mesh interpolates the color field. No font work,
+     * offscreen texture, blur pass, shader, or per-frame allocation is needed.
+     * Each horizontal slice follows the row's rounded outline. */
     rlSetTexture(rlGetTextureIdDefault());
     rlBegin(RL_QUADS);
-    for (int i = 0; i < steps; i++)
+    for (int row = 0; row <= rows; row++)
     {
-        for (int vertex = 0; vertex < 4; vertex++)
+        int current = row & 1, previous = current ^ 1;
+        float y = height * row / rows;
+        float corner_y = fmaxf(0, fabsf(y - height * 0.5f) - (height * 0.5f - radius));
+        float inset = radius - sqrtf(fmaxf(0, radius * radius - corner_y * corner_y));
+        for (int col = 0; col <= columns; col++)
         {
-            int sample = i + (vertex == 1 || vertex == 2);
-            float distance = fmodf(head - tail * sample / steps + perimeter, perimeter);
-            Vector2 point = InboxBorderPoint(distance, width, height);
-            Vector2 before = InboxBorderPoint(fmodf(distance + perimeter - 0.05f, perimeter), width, height);
-            Vector2 after = InboxBorderPoint(fmodf(distance + 0.05f, perimeter), width, height);
-            float dx = after.x - before.x, dy = after.y - before.y;
-            float length = sqrtf(dx * dx + dy * dy);
-            float sign = vertex < 2 ? -1 : 1;
-            rlColor4ub((unsigned char)color.r, (unsigned char)color.g, (unsigned char)color.b,
-                       (unsigned char)(color.a * (1.0f - (float)sample / steps)));
-            rlVertex2f(bounds.x + point.x - sign * dy / length,
-                       bounds.y + point.y + sign * dx / length);
+            float x = inset + (width - 2 * inset) * col / columns;
+            float u = x / width, v = y / height;
+            /* Two broad, curved crests drift in different directions. Their
+             * soft falloff carries color vertically through the entire row,
+             * while the horizontal envelope keeps this from reading as a
+             * uniform pulse or a straight loading-bar sweep. */
+            float crest_a = 0.45f + 0.38f * sinf(u * 5.2f - slow + phase);
+            float crest_b = 0.55f + 0.42f * sinf(u * 4.0f + slow * 2 + phase * 1.7f);
+            float distance_a = (v - crest_a) / 0.38f;
+            float distance_b = (v - crest_b) / 0.45f;
+            float envelope = 0.65f + 0.35f * sinf(u * 4.5f - slow * 2 + phase);
+            float intensity = 0.02f + 0.11f * expf(-distance_a * distance_a) * envelope +
+                                      0.055f * expf(-distance_b * distance_b);
+            points[current][col] = (Vector2){origin_x + x, origin_y + y};
+            alpha[current][col] = (unsigned char)(accent.a * intensity);
+        }
+        if (!row) continue;
+        for (int col = 0; col < columns; col++)
+        {
+            const int strips[] = {previous, current, current, previous};
+            const int samples[] = {col, col, col + 1, col + 1};
+            for (int vertex = 0; vertex < 4; vertex++)
+            {
+                int strip = strips[vertex], sample = samples[vertex];
+                rlColor4ub((unsigned char)accent.r, (unsigned char)accent.g, (unsigned char)accent.b,
+                           alpha[strip][sample]);
+                rlVertex2f(points[strip][sample].x, points[strip][sample].y);
+            }
         }
     }
     rlEnd();
-}
-
-static void RenderInboxWorkingBorder(SidebarState *s, int index)
-{
-    static CustomLayoutElement decoration = {
-        .type = CUSTOM_LAYOUT_ELEMENT_TYPE_CALLBACK,
-        .customData.draw = DrawInboxWorkingBorder,
-    };
-    Clay_ElementId id = CLAY_IDI("SidebarInboxWorkingBorder", index);
-    CLAY(id, {.floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
-                           .clipTo = CLAY_CLIP_TO_ATTACHED_PARENT,
-                           .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
-               .layout = {.sizing = {.width = CLAY_SIZING_PERCENT(1),
-                                     .height = CLAY_SIZING_PERCENT(1)}},
-               .custom = {.customData = &decoration}}) {}
-    SidebarAnimateElement(s, id);
+    /* Layout may be repeated or abandoned without presenting. Only a drawn
+     * sample becomes the freeze point; the first resumed draw must still use
+     * that sample even if frame preparation spans several layout passes. */
+    wave->displayed_elapsed = wave->sampled_elapsed;
+    if (wave->hold_for_presentation)
+    {
+        wave->hold_for_presentation = false;
+        wave->sampled_at = GetTime();
+    }
 }
 
 static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
@@ -1760,11 +1811,20 @@ static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row
                   .backgroundColor = RowFill(selected, Clay_PointerOver(id)),
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
         {
-            if (row->section == INBOX_WORKING)
-                RenderInboxWorkingBorder(s, index);
-            CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
+            static CustomLayoutElement wave = {
+                .type = CUSTOM_LAYOUT_ELEMENT_TYPE_CALLBACK,
+                .customData.draw = DrawInboxWorkingWave,
+            };
+            bool working = kind == SIDEBAR_DOT_RUNNING;
+            SidebarWave *wave_state = row->section == INBOX_COMPLETED ? NULL :
+                SidebarSessionWave(s, row, id, kind);
+            Clay_ElementId content_id = CLAY_IDI("SidebarInboxContent", id.id);
+            if (working && wave_state) SidebarAnimateElement(s, content_id);
+            CLAY(content_id, {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
                                      .sizing = {.width = CLAY_SIZING_GROW(0),
-                                                .height = CLAY_SIZING_FIXED(height - 10)}}})
+                                                .height = CLAY_SIZING_FIXED(height - 10)}},
+                              .custom = {.customData = wave_state ? &wave : NULL},
+                              .userData = wave_state})
             {
                 CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
                     .childGap = SIDEBAR_ROW_GAP,
@@ -3105,6 +3165,15 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
     if (!s)
     {
         return;
+    }
+    double wave_now = GetTime();
+    for (int i = 0; i < PICO_MAX_TOTAL_AGENTS; i++)
+    {
+        SidebarWave *wave = &s->waves[i];
+        PicoAgent *agent = wave->agent ? PicoHost_FindAgent(host, wave->agent) : NULL;
+        if (!agent) continue;
+        SidebarUpdateWave(wave, SessionDotKind(host, PicoAgent_WorkspacePath(agent),
+                          agent->session_id, agent->id, agent->unseen_complete), wave_now);
     }
     /* A hidden sidebar emits no candidates in this frame. */
     s->animation_count = 0;

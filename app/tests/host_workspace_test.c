@@ -43,6 +43,7 @@
 #include "worktree.h"
 #include "docs_path.h"
 #include "clay/clay.h"
+#include "clay_custom.h"
 #include <utf8proc.h>
 
 #include <dirent.h>
@@ -64,6 +65,34 @@
 int pico_files_complete(PicoWorkspace *workspace, const char *prefix, PicoCompleteItem *out, int max, void *state);
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+/* Capture emitted wave opacity and tint without requiring a graphics context.
+ * Comparisons are between rendered states, not specific mesh sizes or phases. */
+static bool g_wave_probe;
+static uint64_t g_wave_opacity;
+static Color g_wave_tint;
+static int g_wave_vertices;
+void __real_rlSetTexture(unsigned int id);
+void __wrap_rlSetTexture(unsigned int id) { if (!g_wave_probe) __real_rlSetTexture(id); }
+unsigned int __real_rlGetTextureIdDefault(void);
+unsigned int __wrap_rlGetTextureIdDefault(void) { return g_wave_probe ? 0 : __real_rlGetTextureIdDefault(); }
+void __real_rlBegin(int mode);
+void __wrap_rlBegin(int mode) { if (!g_wave_probe) __real_rlBegin(mode); }
+void __real_rlEnd(void);
+void __wrap_rlEnd(void) { if (!g_wave_probe) __real_rlEnd(); }
+void __real_rlColor4ub(unsigned char r, unsigned char g, unsigned char b, unsigned char a);
+void __wrap_rlColor4ub(unsigned char r, unsigned char g, unsigned char b, unsigned char a)
+{
+    if (!g_wave_probe) { __real_rlColor4ub(r, g, b, a); return; }
+    g_wave_tint = (Color){r, g, b, 255};
+    g_wave_opacity = (g_wave_opacity ^ a) * UINT64_C(1099511628211);
+}
+void __real_rlVertex2f(float x, float y);
+void __wrap_rlVertex2f(float x, float y)
+{
+    if (!g_wave_probe) __real_rlVertex2f(x, y);
+    else g_wave_vertices++;
+}
+
 static const char *g_browser_application_directory;
 static bool g_browser_fake_window;
 #include "browser/gpu.h"
@@ -2731,7 +2760,7 @@ static int RunBrowserViewportCase(bool with_sidebar);
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
 static int RunInboxShellCase(bool with_sidebar);
-static int RunWorkingBorderShellCase(bool with_sidebar);
+static int RunWorkingIndicatorShellCase(bool with_sidebar);
 #endif
 
 static int RunOverlayShellCase(bool with_sidebar)
@@ -3076,7 +3105,7 @@ static int TestBottomFollowShellGeometryStable(void)
     if (RunOverlayShellCase(false) || RunOverlayShellCase(true)) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     if (RunInboxShellCase(false) || RunInboxShellCase(true) ||
-        RunWorkingBorderShellCase(false) || RunWorkingBorderShellCase(true)) return 1;
+        RunWorkingIndicatorShellCase(false) || RunWorkingIndicatorShellCase(true)) return 1;
 #endif
     return RunWorkspaceLessShellCase();
 }
@@ -19035,10 +19064,12 @@ done:
     return !good;
 }
 
-static int RunWorkingBorderShellCase(bool with_sidebar)
+static int RunWorkingIndicatorShellCase(bool with_sidebar)
 {
     InteractionFixture f = {0};
     bool good = false;
+    int checked_frame = -1;
+    const char *checkpoint = "fixture";
     double saved_time = g_frame_time;
     ChatStabilitySnapshot expected, current;
     Clay_BoundingBox expected_row = {0}, expected_scroll = {0}, expected_status = {0};
@@ -19047,12 +19078,14 @@ static int RunWorkingBorderShellCase(bool with_sidebar)
     PicoAgent *agent = PicoHost_FindAgent(f.host, f.agent);
     agent->inbox_pending = true;
     for (int i = 0; i < 60; i++)
-        PicoAgent_AddMessage(f.host, agent, PICO_ROLE_ASSISTANT, "Working border must not resize the shell.");
+        PicoAgent_AddMessage(f.host, agent, PICO_ROLE_ASSISTANT, "Working wave must not resize the shell.");
     for (int frame = 0; frame < 120; frame++)
     {
+        checked_frame = frame;
         g_frame_time = 100 + frame * 0.05;
-        /* Exercise animation phases, then needs-input and completion. */
-        agent->state = frame < 80 ? PICO_AGENT_LLM_WAIT :
+        /* Exercise working, frozen attention, resumed work and completion. */
+        bool working = frame < 80 || (frame >= 100 && frame < 110);
+        agent->state = working ? PICO_AGENT_LLM_WAIT :
                        frame < 100 ? PICO_AGENT_ERROR : PICO_AGENT_IDLE;
         LayoutChatStabilityFrame(f.host, (Clay_Dimensions){1100, 600});
         Clay_ScrollContainerData chat = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
@@ -19062,20 +19095,42 @@ static int RunWorkingBorderShellCase(bool with_sidebar)
         Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0));
         Clay_ElementData status = Clay_GetElementData(CLAY_ID("FooterStatus"));
         if (!status.found) goto done;
+        checkpoint = "decoration bounds";
         int decorations = 0, footer_decorations = 0;
+        int fill_index = -1, wave_index = -1, text_index = -1;
         for (int i = 0; i < commands.length; i++)
         {
             Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+            Clay_BoundingBox box = command->boundingBox;
+            bool in_row = row.found && ShellVerticallyContains(row.boundingBox, box) &&
+                          box.x >= row.boundingBox.x &&
+                          box.x + box.width <= row.boundingBox.x + row.boundingBox.width + 0.01f;
+            if (command->commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE &&
+                row.found && ShellBoxStable(row.boundingBox, box)) fill_index = i;
+            /* Moving rows can overlap an earlier section heading. Only text
+             * emitted after this row's fill belongs to its content here. */
+            if (command->commandType == CLAY_RENDER_COMMAND_TYPE_TEXT && in_row &&
+                fill_index >= 0 && text_index < 0) text_index = i;
             if (command->commandType != CLAY_RENDER_COMMAND_TYPE_CUSTOM) continue;
-            if (ShellBoxStable(status.boundingBox, command->boundingBox)) footer_decorations++;
+            if (ShellBoxStable(status.boundingBox, box)) footer_decorations++;
             else
             {
                 decorations++;
-                if (!row.found || !ShellBoxStable(row.boundingBox, command->boundingBox)) goto done;
+                wave_index = i;
+                if (!in_row) goto done;
             }
         }
-        if (decorations != (with_sidebar && frame < 80 ? 1 : 0) ||
-            footer_decorations != (frame < 80 ? 1 : 0)) goto done;
+        checkpoint = "decoration count";
+        if (decorations != (with_sidebar && frame < 110 ? 1 : 0) ||
+            footer_decorations != (working ? 1 : 0)) goto done;
+        /* The wave must remain visible over selection/hover fill, but below
+         * session text, rather than becoming a foreground text overlay. */
+        checkpoint = "decoration layering";
+        if (decorations && !(fill_index >= 0 && fill_index < wave_index && wave_index < text_index)) {
+            fprintf(stderr, "wave layering: fill=%d wave=%d text=%d row={%g,%g,%g,%g}\n", fill_index, wave_index, text_index, row.boundingBox.x, row.boundingBox.y, row.boundingBox.width, row.boundingBox.height);
+            goto done;
+        }
+        checkpoint = "chat snapshot";
         if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
         if (frame == 20)
         {
@@ -19086,8 +19141,10 @@ static int RunWorkingBorderShellCase(bool with_sidebar)
         }
         if (frame > 20)
         {
+            checkpoint = "chat and footer geometry";
             if (!ChatBottomFollowGeometryStable(&expected, &current, with_sidebar) ||
                 !ShellBoxStable(expected_status, status.boundingBox)) goto done;
+            checkpoint = "row and scroll geometry";
             if (with_sidebar && (!row.found ||
                 fabsf(row.boundingBox.width - expected_row.width) > 0.1f ||
                 fabsf(row.boundingBox.height - expected_row.height) > 0.1f ||
@@ -19099,6 +19156,7 @@ done:
     g_frame_time = saved_time;
     if (f.host) PicoHost_FindAgent(f.host, f.agent)->state = PICO_AGENT_IDLE;
     InteractionFixtureFree(&f);
+    if (!good) fprintf(stderr, "working shell: sidebar=%d frame=%d phase=%s\n", with_sidebar, checked_frame, checkpoint);
     if (!good) Fail("Working inbox and footer indicators must follow their bounds without resizing the bottom-follow shell");
     return !good;
 }
@@ -22141,6 +22199,7 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestRefinementAfterLayoutMutation());
     if (argc == 2 && strcmp(argv[1], "--animation-redraw") == 0)
         return PICO_TEST_RUN(TestBusyFramesFollowVisibleAnimationDemand()) ||
+               PICO_TEST_RUN(TestWorkingWavePausesForError()) ||
                PICO_TEST_RUN(TestWaitingQuestionDoesNotAnimate()) ||
                PICO_TEST_RUN(TestUnmountedThinkingDoesNotAnimate());
     if (argc == 2 && strcmp(argv[1], "--layout-invalidation") == 0)
@@ -22187,13 +22246,13 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestRestoreOrderQueue()) || PICO_TEST_RUN(TestProjectRestoreSnapshot()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) ||
                PICO_TEST_RUN(RunStashedPickerShellCase(false)) || PICO_TEST_RUN(RunStashedPickerShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--sidebar-working") == 0)
-        return PICO_TEST_RUN(RunWorkingBorderShellCase(false)) || PICO_TEST_RUN(RunWorkingBorderShellCase(true));
+        return PICO_TEST_RUN(RunWorkingIndicatorShellCase(false)) || PICO_TEST_RUN(RunWorkingIndicatorShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--sidebar-inbox") == 0)
         return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestSidebarProjectPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
                PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) ||
                PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) || PICO_TEST_RUN(RunInboxShellCase(false)) ||
                PICO_TEST_RUN(RunInboxShellCase(true)) ||
-               PICO_TEST_RUN(RunWorkingBorderShellCase(false)) || PICO_TEST_RUN(RunWorkingBorderShellCase(true)) ||
+               PICO_TEST_RUN(RunWorkingIndicatorShellCase(false)) || PICO_TEST_RUN(RunWorkingIndicatorShellCase(true)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_SUCCESS)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_PARTIAL_FAILURE)) ||
                PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_NEWER_EVENT));
@@ -22278,6 +22337,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_PARTIAL_FAILURE)) != 0 ||
         PICO_TEST_RUN(TestSidebarOfflineInboxAcknowledgements(INBOX_ACK_NEWER_EVENT)) != 0) return 1;
     if (PICO_TEST_RUN(TestBusyFramesFollowVisibleAnimationDemand()) ||
+        PICO_TEST_RUN(TestWorkingWavePausesForError()) ||
         PICO_TEST_RUN(TestWaitingQuestionDoesNotAnimate()) ||
         PICO_TEST_RUN(TestUnmountedThinkingDoesNotAnimate())) return 1;
     if (PICO_TEST_RUN(TestIdleFrameOnlyPresentsOnInvalidation()) != 0) return 1;

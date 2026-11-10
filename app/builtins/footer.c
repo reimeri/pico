@@ -842,15 +842,16 @@ static void RenderCacheChip(void)
     }
 }
 
-static void DrawWorkingStatus(Clay_BoundingBox bounds)
+static void DrawWorkingStatus(Clay_BoundingBox bounds, void *userData)
 {
+    (void)userData;
     const float two_pi = 6.28318530718f;
     const float head = (float)fmod(GetTime() / 2.0, 1.0) * two_pi;
     const Clay_Color color = COLOR_LINK;
     const int segments = 32;
     float cx = bounds.x + bounds.width * 0.5f;
     float cy = bounds.y + bounds.height * 0.5f;
-    /* Match the inbox's two-pixel stroke, with a two-thirds-circle fading tail.
+    /* A two-pixel stroke with a two-thirds-circle fading tail.
      * The outer radius preserves the old orbiting dots' visual footprint. */
     rlSetTexture(rlGetTextureIdDefault());
     rlBegin(RL_QUADS);

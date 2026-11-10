@@ -55,6 +55,7 @@ typedef struct SidebarScanWorker
     uint64_t serial;
     uint64_t inbox_epoch;
     uint64_t project_epoch;
+    uint64_t order_epoch;
     char token_before[PICO_CATALOG_CHANGE_TOKEN_MAX];
     char token_after[PICO_CATALOG_CHANGE_TOKEN_MAX];
     bool token_before_valid;
@@ -108,6 +109,7 @@ typedef struct SidebarState
     bool inbox_valid;
     PicoCatalogWorkspace *workspaces;
     int workspace_count;
+    bool stash_expanded;
     bool want_folder;
     bool folder_painted;
     bool dirty;
@@ -120,6 +122,7 @@ typedef struct SidebarState
     uint64_t scan_serial;
     uint64_t inbox_epoch;
     uint64_t project_epoch;
+    uint64_t order_epoch;
     SidebarScanWorker *scan_worker;
     Texture2D archive_closed;
     Texture2D pen_icon;
@@ -184,6 +187,7 @@ void PicoSidebar_BeginLayout(PicoHost *host)
 {
     SidebarState *s = PicoPlugins_HostState(host, "sidebar");
     if (!s) return;
+    if (PicoHost_SelectedAgent(host)) s->stash_expanded = false;
     s->label_chunk = NULL;
     s->label_used = 0;
 }
@@ -467,6 +471,8 @@ static bool SidebarCatalogEqual(const SidebarState *s, const SidebarScanWorker *
     return true;
 }
 
+static void SidebarRestorePickerOrder(PicoHost *host, PicoCatalogWorkspace *next, int count);
+
 static void SidebarFinishRefresh(SidebarState *s, SidebarScanWorker *worker)
 {
     if (s->pin_saving) { s->dirty = true; return; }
@@ -503,8 +509,16 @@ static void SidebarFinishRefresh(SidebarState *s, SidebarScanWorker *worker)
         if (covered) { *pref_link = pref->next; free(pref); }
         else pref_link = &pref->next;
     }
-    bool refresh_again = s->dirty;
-    if (s->order_unsaved)
+    /* A replacement sidebar has no local ordering yet. Recover the previous
+     * instance's presentation, including drags after a pending Restore. */
+    if (!s->catalog_scanned)
+        SidebarRestorePickerOrder(s->host, worker->workspaces, worker->workspace_count);
+    bool order_changed = worker->order_epoch != s->order_epoch;
+    bool refresh_again = s->dirty || order_changed;
+    bool preference_pending = false;
+    for (PicoProjectPreference *pref = s->host->project_preferences; pref; pref = pref->next)
+        if (pref->pending) preference_pending = true;
+    if (s->order_unsaved || s->order_persist_generation || preference_pending || order_changed)
         SidebarPreserveWorkspaceOrder(worker->workspaces, worker->workspace_count,
                                       s->workspaces, s->workspace_count);
     if (!SidebarCatalogEqual(s, worker))
@@ -548,7 +562,8 @@ static void SidebarRefreshSync(SidebarState *s, bool reconcile)
 {
     SidebarScanWorker worker = {.reconcile = reconcile,
                                 .inbox_epoch = PicoCatalog_InboxEpoch(s->host),
-                                .project_epoch = s->host->project_preference_epoch};
+                                .project_epoch = s->host->project_preference_epoch,
+                                .order_epoch = s->order_epoch};
     if (!SidebarCopyLiveTitleTargets(s, &worker)) worker.failed = true;
     else SidebarScanRun(&worker);
     SidebarFinishRefresh(s, &worker);
@@ -594,6 +609,7 @@ static void SidebarStartRefresh(SidebarState *s, bool reconcile)
     worker->serial = s->scan_serial;
     worker->inbox_epoch = PicoCatalog_InboxEpoch(s->host);
     worker->project_epoch = s->host->project_preference_epoch;
+    worker->order_epoch = s->order_epoch;
     worker->reconcile = reconcile;
     if (!SidebarCopyLiveTitleTargets(s, worker))
     {
@@ -1347,6 +1363,7 @@ static void SidebarReorderWorkspaces(SidebarState *s, int from, int to)
     {
         s->workspaces[k].order = k;
     }
+    s->order_epoch++;
     s->order_persist_generation = PicoCatalog_EnqueueOrder(s->host, s->workspaces,
                                                            s->workspace_count);
     if (s->order_persist_generation == 0)
@@ -2004,6 +2021,65 @@ bool PicoSidebar_RenderProjectPicker(PicoHost *host)
                 RenderGlyph("+ Add project", COLOR_MUTED);
             }
         }
+        int stashed_count = 0;
+        for (int i = 0; i < s->workspace_count; i++)
+            if (s->workspaces[i].stashed) stashed_count++;
+        char *stash_label = SidebarNextLabel(s);
+        if (stash_label)
+            snprintf(stash_label, SIDEBAR_LABEL_CAPACITY, "Stashed projects (%d)", stashed_count);
+        CLAY(CLAY_ID("InboxStashedToggle"),
+             {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 8,
+                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}, .padding = {12, 12, 6, 6},
+                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+              .backgroundColor = RowFill(false, Clay_PointerOver(CLAY_ID("InboxStashedToggle"))),
+              .cornerRadius = CLAY_CORNER_RADIUS(8)})
+        {
+            RenderGlyph(s->stash_expanded ? "▾" : "▸", COLOR_MUTED);
+            RenderGlyph(stash_label ? stash_label : "Stashed projects", COLOR_MUTED);
+        }
+        if (s->stash_expanded)
+        {
+            CLAY(CLAY_ID("InboxStashedRows"),
+                 {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4,
+                             .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+            {
+                if (!stashed_count)
+                    CLAY_TEXT(CLAY_STRING("No stashed projects"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                              .fontSize = PICO_FONT_UI, .textColor = COLOR_MUTED}));
+                for (int i = 0; i < s->workspace_count; i++)
+                {
+                    const PicoCatalogWorkspace *ws = &s->workspaces[i];
+                    if (!ws->stashed) continue;
+                    Clay_ElementId id = CLAY_IDI("InboxStashedProject", i);
+                    CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 12,
+                                         .childAlignment = {.y = CLAY_ALIGN_Y_CENTER}, .padding = {12, 12, 6, 6},
+                                         .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                              .backgroundColor = RowFill(false, Clay_PointerOver(id)),
+                              .cornerRadius = CLAY_CORNER_RADIUS(8)})
+                    {
+                        RenderProjectBadge(s, ws);
+                        CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 2,
+                                                .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                                      .clip = {.horizontal = true}})
+                        {
+                            CLAY_TEXT(CStr(ws->name), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                      .fontSize = PICO_FONT_UI, .textColor = COLOR_TEXT,
+                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                            CLAY_TEXT(CStr(ws->path), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                      .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED,
+                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                        }
+                        Clay_ElementId restore = CLAY_IDI("InboxRestoreProject", i);
+                        CLAY(restore, {.layout = {.padding = {8, 8, 5, 5}},
+                                       .backgroundColor = RowFill(false, Clay_PointerOver(restore)),
+                                       .cornerRadius = CLAY_CORNER_RADIUS(4)})
+                        {
+                            RenderGlyph("Restore", COLOR_TEXT);
+                        }
+                    }
+                }
+            }
+        }
     }
     RenderWorkspaceDragPreview(s);
     return true;
@@ -2157,7 +2233,8 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
     bool short_view;
     if (i < 0 || !pico_ui_modal_is_top(host, "sidebar-workspace-edit"))
         return;
-    row = Clay_GetElementData(CLAY_IDI("InboxProject", i));
+    row = Clay_GetElementData(s->workspaces[i].stashed
+                                 ? CLAY_IDI("InboxStashedProject", i) : CLAY_IDI("InboxProject", i));
     if (!row.found)
         return;
     x = row.boundingBox.x;
@@ -2202,7 +2279,8 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
                       CLAY_TEXT_CONFIG(field_config));
         }
         RenderEditAction(CLAY_ID("SidebarEditSave"), "Save name", false, &s->pen_icon);
-        RenderEditAction(CLAY_ID("SidebarEditStash"), "Stash project", false,
+        RenderEditAction(CLAY_ID("SidebarEditStash"),
+                         s->workspaces[i].stashed ? "Restore project" : "Stash project", false,
                              &s->archive_closed);
         if (!s->delete_confirm)
             RenderEditAction(CLAY_ID("SidebarEditDelete"), "Delete workspace...", true, &s->trash_icon);
@@ -2219,13 +2297,42 @@ static void RenderWorkspaceEdit(PicoHost *host, void *state)
 typedef struct SidebarProjectSave {
     char path[4096], name[PICO_CATALOG_NAME_MAX];
     bool rename, stashed, saved;
+    char **restore_order;
+    int order_count;
 } SidebarProjectSave;
+
+static void SidebarProjectSaveFree(void *arg)
+{
+    SidebarProjectSave *save = arg;
+    for (int i = 0; i < save->order_count; i++) free(save->restore_order[i]);
+    free(save->restore_order);
+    free(save);
+}
 
 static void SidebarProjectSaveRun(void *arg)
 {
     SidebarProjectSave *save = arg;
     save->saved = (save->rename ? PicoCatalog_SetProjectName(save->path, save->name)
-                               : PicoCatalog_SetProjectStashed(save->path, save->stashed)) == 0;
+                  : save->restore_order ? PicoCatalog_RestoreProject(save->path,
+                        (const char *const *)save->restore_order, save->order_count)
+                  : PicoCatalog_SetProjectStashed(save->path, save->stashed)) == 0;
+}
+
+static void SidebarRestorePickerOrder(PicoHost *host, PicoCatalogWorkspace *next, int count)
+{
+    for (int i = 0; i < count; i++)
+    {
+        next[i].order = host->project_picker_order_count + i;
+        for (int j = 0; j < host->project_picker_order_count; j++)
+            if (!strcmp(next[i].path, host->project_picker_order[j]))
+            { next[i].order = j; break; }
+    }
+    if (host->project_picker_order_count && count > 1)
+        qsort(next, (size_t)count, sizeof(*next), SidebarWorkspaceOrderCmp);
+    for (int i = 0; i < host->project_picker_order_count; i++) free(host->project_picker_order[i]);
+    free(host->project_picker_order);
+    host->project_picker_order = NULL;
+    host->project_picker_order_count = 0;
 }
 
 static void SidebarProjectSaveCompleted(PicoHost *host, void *arg)
@@ -2249,6 +2356,9 @@ static void SidebarProjectSaveCompleted(PicoHost *host, void *arg)
     SidebarState *s = PicoPlugins_HostState(host, "sidebar");
     if (s)
     {
+        /* Reject order from snapshots begun before this outcome, including a
+         * failed restore whose optimistic move must return to durable order. */
+        if (save->restore_order) s->order_epoch++;
         for (int i = 0; i < s->workspace_count; i++)
             if (!strcmp(s->workspaces[i].path, pref->path))
             {
@@ -2288,13 +2398,37 @@ static bool SidebarSaveProject(SidebarState *s, int index, bool rename)
     snprintf(save->name, sizeof(save->name), "%s", s->edit_name);
     save->rename = rename;
     save->stashed = !ws->stashed;
-    if (!PicoHost_EnqueueUiPersist(s->host, save, SidebarProjectSaveRun, SidebarProjectSaveCompleted, free))
-    { free(save); return false; }
+    if (!rename && !save->stashed)
+    {
+        save->restore_order = calloc((size_t)s->workspace_count, sizeof(*save->restore_order));
+        if (!save->restore_order) { free(save); return false; }
+        for (int i = 0; i < s->workspace_count; i++)
+        {
+            int source = i < index ? i : i + 1;
+            if (i == s->workspace_count - 1) source = index;
+            char *path = strdup(s->workspaces[source].path);
+            if (!path) { SidebarProjectSaveFree(save); return false; }
+            save->restore_order[save->order_count++] = path;
+        }
+    }
+    if (!PicoHost_EnqueueUiPersist(s->host, save, SidebarProjectSaveRun, SidebarProjectSaveCompleted,
+                                  SidebarProjectSaveFree))
+    { SidebarProjectSaveFree(save); return false; }
     pref->pending++;
     if (rename) snprintf(pref->name, sizeof(pref->name), "%s", save->name);
     else pref->stashed = save->stashed;
     snprintf(ws->name, sizeof(ws->name), "%s", pref->name);
     ws->stashed = pref->stashed;
+    if (!rename && !save->stashed)
+    {
+        /* Restoring is list management only: append after the other visible
+         * projects without opening a workspace or creating/selecting a session. */
+        PicoCatalogWorkspace restored = *ws;
+        memmove(ws, ws + 1, (size_t)(s->workspace_count - index - 1) * sizeof(*ws));
+        s->workspaces[s->workspace_count - 1] = restored;
+        for (int i = 0; i < s->workspace_count; i++) s->workspaces[i].order = i;
+        s->order_epoch++;
+    }
     s->host->ui_relayout_requested = true;
     return true;
 }
@@ -2458,9 +2592,12 @@ static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
     if (Clay_PointerOver(CLAY_ID("SidebarAddWs")) || PointerOverInbox(host, s)) return true;
     if (!PicoHost_SelectedAgent(host))
     {
-        if (Clay_PointerOver(CLAY_ID("InboxAddProject"))) return true;
+        if (Clay_PointerOver(CLAY_ID("InboxAddProject")) ||
+            Clay_PointerOver(CLAY_ID("InboxStashedToggle"))) return true;
         for (int i = 0; i < s->workspace_count; i++)
-            if (!s->workspaces[i].stashed && Clay_PointerOver(CLAY_IDI("InboxProject", i))) return true;
+            if ((!s->workspaces[i].stashed && Clay_PointerOver(CLAY_IDI("InboxProject", i))) ||
+                (s->stash_expanded && s->workspaces[i].stashed &&
+                 Clay_PointerOver(CLAY_IDI("InboxRestoreProject", i)))) return true;
     }
     return false;
 }
@@ -2513,7 +2650,9 @@ static int WorkspaceUnderPointer(const SidebarState *s)
 {
     if (!s || PicoHost_SelectedAgent(s->host)) return -1;
     for (int i = 0; i < s->workspace_count; i++)
-        if (!s->workspaces[i].stashed && Clay_PointerOver(CLAY_IDI("InboxProject", i))) return i;
+        if ((!s->workspaces[i].stashed && Clay_PointerOver(CLAY_IDI("InboxProject", i))) ||
+            (s->stash_expanded && s->workspaces[i].stashed &&
+             Clay_PointerOver(CLAY_IDI("InboxStashedProject", i)))) return i;
     return -1;
 }
 
@@ -2847,6 +2986,19 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     }
     if (!PicoHost_SelectedAgent(host))
     {
+        if (Clay_PointerOver(CLAY_ID("InboxStashedToggle")))
+        {
+            s->stash_expanded = !s->stash_expanded;
+            host->ui_relayout_requested = true;
+            return;
+        }
+        for (int i = 0; s->stash_expanded && i < s->workspace_count; i++)
+            if (s->workspaces[i].stashed && Clay_PointerOver(CLAY_IDI("InboxRestoreProject", i)))
+            {
+                if (SidebarSaveProject(s, i, false)) s->dirty = true;
+                else PicoOverlay_Notify(host, "Could not restore the project.");
+                return;
+            }
         if (Clay_PointerOver(CLAY_ID("InboxAddProject")))
         {
             RequestAddWorkspace(host, s);
@@ -2878,6 +3030,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
     if (Clay_PointerOver(CLAY_ID("SidebarAddWs")))
     {
         PicoChat_InspectClose();
+        s->stash_expanded = false;
         PicoHost_ClearAgentSelection(host);
     }
 }
@@ -3035,6 +3188,26 @@ static void SidebarShutdown(PicoHost *host, void *state)
         return;
     }
     s->scan_serial++;
+    if (s->catalog_scanned)
+    {
+        char **order = calloc((size_t)s->workspace_count, sizeof(*order));
+        int copied = 0;
+        if (order)
+            for (; copied < s->workspace_count; copied++)
+                if (!(order[copied] = strdup(s->workspaces[copied].path))) break;
+        if (copied == s->workspace_count)
+        {
+            for (int i = 0; i < host->project_picker_order_count; i++) free(host->project_picker_order[i]);
+            free(host->project_picker_order);
+            host->project_picker_order = order;
+            host->project_picker_order_count = copied;
+        }
+        else
+        {
+            for (int i = 0; i < copied; i++) free(order[i]);
+            free(order);
+        }
+    }
     PicoCatalog_Free(s->workspaces, s->workspace_count);
     free(s->inbox_rows);
     free(s->live_titles);

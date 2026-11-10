@@ -4127,7 +4127,8 @@ static bool CatalogProjectMetaPath(const char *project, char *out, size_t cap)
            PicoPath_Format(out, cap, "%s/.project-%s.json", root, key);
 }
 
-static int CatalogProjectUpdate(const char *project, const char *name, int stash)
+static int CatalogProjectUpdate(const char *project, const char *name, int stash,
+                                const char *const *order, int count)
 {
 #ifdef PICO_SESSION_TEST_HOOKS
     if (PicoSession_TestHook("project_before_save")) return -1;
@@ -4140,7 +4141,7 @@ static int CatalogProjectUpdate(const char *project, const char *name, int stash
         (CanonicalWorkspacePath(project, canonical, sizeof(canonical)) && strcmp(project, canonical) != 0) ||
         !(db = CatalogDbOpen())) return -1;
     sqlite3_busy_timeout(db, 30);
-    ok = CatalogDbPrepare(db, &stmt,
+    ok = (!order || CatalogDbExec(db, "BEGIN IMMEDIATE")) && CatalogDbPrepare(db, &stmt,
         "INSERT INTO projects(path,name,stashed) VALUES(?,?,?)"
         " ON CONFLICT(path) DO UPDATE SET name=CASE WHEN ? THEN excluded.name ELSE projects.name END,"
         "stashed=CASE WHEN ? THEN excluded.stashed ELSE projects.stashed END");
@@ -4154,6 +4155,26 @@ static int CatalogProjectUpdate(const char *project, const char *name, int stash
         ok = sqlite3_step(stmt) == SQLITE_DONE;
     }
     sqlite3_finalize(stmt);
+    stmt = NULL;
+    if (ok && order)
+    {
+        ok = CatalogDbExec(db, "DELETE FROM workspace_order") &&
+             CatalogDbPrepare(db, &stmt, "INSERT INTO workspace_order(path,position) VALUES(?,?)");
+        for (int i = 0; ok && i < count; i++)
+        {
+            sqlite3_bind_text(stmt, 1, order[i], -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 2, i);
+            ok = sqlite3_step(stmt) == SQLITE_DONE;
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
+        sqlite3_finalize(stmt);
+    }
+    if (order)
+    {
+        if (ok) ok = CatalogDbExec(db, "COMMIT");
+        if (!ok) CatalogDbExec(db, "ROLLBACK");
+    }
     sqlite3_close(db);
     if (ok) CatalogMarkChanged();
     return ok ? 0 : -1;
@@ -4164,12 +4185,20 @@ int PicoCatalog_SetProjectName(const char *project, const char *name)
     size_t n = name ? strlen(name) : 0;
     if (!n || n >= PICO_CATALOG_NAME_MAX) return -1;
     for (size_t i = 0; i < n; i++) if ((unsigned char)name[i] < 32) return -1;
-    return CatalogProjectUpdate(project, name, -1);
+    return CatalogProjectUpdate(project, name, -1, NULL, 0);
 }
 
 int PicoCatalog_SetProjectStashed(const char *project, bool stashed)
 {
-    return CatalogProjectUpdate(project, NULL, stashed ? 1 : 0);
+    return CatalogProjectUpdate(project, NULL, stashed ? 1 : 0, NULL, 0);
+}
+
+int PicoCatalog_RestoreProject(const char *project, const char *const *order, int count)
+{
+    if (!order || count <= 0 || count > PICO_MAX_CATALOG_WORKSPACES) return -1;
+    for (int i = 0; i < count; i++)
+        if (!order[i] || order[i][0] != '/') return -1;
+    return CatalogProjectUpdate(project, NULL, 0, order, count);
 }
 
 static char *CatalogOrderSerialize(const PicoCatalogWorkspace *workspaces, int count)
@@ -6471,8 +6500,11 @@ static PicoSessionPersistJob *PersistPendingCatalogOrderLocked(PicoHost *host)
     {
         return NULL;
     }
-    for (i = 0; i < host->persist_pending_count; i++)
+    /* UI saves may also write project ordering (Restore). Do not coalesce a
+     * later drag into an earlier slot across such a FIFO operation. */
+    for (i = host->persist_pending_count - 1; i >= 0; i--)
     {
+        if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_UI) return NULL;
         if (host->persist_pending[i].job_kind == PICO_PERSIST_JOB_CATALOG_ORDER)
         {
             return &host->persist_pending[i];
@@ -6826,6 +6858,10 @@ void PicoSessionPersist_Shutdown(PicoHost *host)
             free(work);
         }
         host->ui_persist_tail = NULL;
+        for (i = 0; i < host->project_picker_order_count; i++) free(host->project_picker_order[i]);
+        free(host->project_picker_order);
+        host->project_picker_order = NULL;
+        host->project_picker_order_count = 0;
         while (host->project_preferences)
         {
             PicoProjectPreference *pref = host->project_preferences;

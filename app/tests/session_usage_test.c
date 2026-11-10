@@ -2103,7 +2103,17 @@ static int TestCatalog(void)
         return Fail("renamed stashed project keeps exact session routing");
     }
     PicoCatalog_Free(list, n);
-    if (PicoCatalog_SetProjectStashed(ws, false) != 0)
+    /* A failure while writing the order must not commit half a restoration. */
+    const char *bad_order[] = {ws, ws};
+    if (PicoCatalog_RestoreProject(ws, bad_order, 2) == 0)
+        return Fail("restore rejects an order that cannot be stored");
+    n = PicoCatalog_ScanGrouped(&list);
+    found = FindCatalogPath(list, n, ws);
+    bool still_stashed = found && found->stashed;
+    PicoCatalog_Free(list, n);
+    if (!still_stashed) return Fail("failed restore must preserve stash state");
+    const char *order[] = {ws};
+    if (PicoCatalog_RestoreProject(ws, order, 1) != 0)
         return Fail("restore project");
     n = PicoCatalog_ScanGrouped(&list);
     found = FindCatalogPath(list, n, ws);

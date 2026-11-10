@@ -131,6 +131,8 @@ int PicoCatalog_Ensure(const char *workspace_path);
 /* Project identity is the canonical main checkout path, not a session checkout. */
 int PicoCatalog_SetProjectName(const char *project_path, const char *name);
 int PicoCatalog_SetProjectStashed(const char *project_path, bool stashed);
+/* Worker-side restoration and complete project ordering commit together. */
+int PicoCatalog_RestoreProject(const char *project_path, const char *const *order, int count);
 /* Removes Pico session data for the group, never checkout directories.
  * Refuses while any agent in the project is live. */
 int PicoCatalog_DeleteProject(PicoHost *host, const char *project_path);

@@ -178,6 +178,8 @@ struct PicoHost {
     struct PicoExtensionPreference *extension_preferences;
     struct PicoProjectPreference *project_preferences;
     uint64_t project_preference_epoch;
+    char **project_picker_order; /* main-thread handoff across sidebar replacement */
+    int project_picker_order_count;
     Font *fonts;
     PicoSlotView views[PICO_SLOT_COUNT][PICO_MAX_SLOT_VIEWS];
     int view_count[PICO_SLOT_COUNT];

@@ -41,8 +41,11 @@ PicoExt pico_ext_files(void);
 PicoExt pico_ext_composer(void);
 
 #ifdef PICO_TEST_FILE_KEYS
-static bool g_file_tab, g_file_down;
-bool __wrap_IsKeyPressed(int key) { return (g_file_tab && key == KEY_TAB) || (g_file_down && key == KEY_DOWN); }
+static bool g_file_tab, g_file_down, g_file_enter;
+static int g_file_submits;
+void __wrap_PicoHost_Submit(PicoHost *host) { (void)host; g_file_submits++; }
+bool __wrap_IsKeyPressed(int key) { return (g_file_tab && key == KEY_TAB) || (g_file_down && key == KEY_DOWN) ||
+    (g_file_enter && key == KEY_ENTER); }
 #endif
 
 static void *g_files_state = NULL;
@@ -139,6 +142,7 @@ static void SetComposer(PicoHost *app, char *buf, size_t cap, const char *text)
     app->composer.length = (int)strlen(buf);
     app->composer.capacity = (int)cap;
     app->composer.cursor = app->composer.length;
+    app->composer.revision++;
 }
 
 static void TestMentionImagePart(void)
@@ -636,6 +640,87 @@ static int UpdatingFileQuery(PicoHost *host, const char *prefix, PicoCompleteIte
     return count;
 }
 
+static void TestExactFileClosesPopup(void)
+{
+    PicoHost host = {0}; char composer[256]; FilePopupFixture fixture = {0};
+    host.completers[0] = (PicoCompleter){.trigger='@',.host_query=UpdatingFileQuery,.state=&fixture};
+    host.completer_count = 1;
+    const char *mentions[] = {"@notes-b.md", "@\"design notes.md\""};
+    for (int n = 0; n < 2; n++)
+    {
+        PicoComplete_BeforeEdit(0, sizeof(composer));
+        SetComposer(&host, composer, sizeof(composer), "read @notes");
+        PicoComplete_Refresh(&host);
+        Check(PicoComplete_IsOpen(), "partial file paths offer suggestions");
+        char text[256]; snprintf(text, sizeof(text), "read %s after", mentions[n]);
+        SetComposer(&host, composer, sizeof(composer), text);
+        host.composer.cursor = (int)strlen(text) - (int)strlen(" after");
+        PicoComplete_Refresh(&host);
+        PicoComplete_Refresh(&host);
+        Check(!PicoComplete_IsOpen() && !strcmp(host.composer.text, text),
+              "an exact bare or quoted file closes suggestions without changing the draft, even when not the first result");
+        Check(!PicoComplete_HandleKeys(&host), "a completed file no longer intercepts composer input");
+    }
+    SetComposer(&host, composer, sizeof(composer), "@notes-b.md-longer");
+    host.composer.cursor = (int)strlen("@notes-b.md");
+    PicoComplete_Refresh(&host);
+    Check(PicoComplete_IsOpen(), "an exact prefix inside a longer file token is not a completed mention");
+    SetComposer(&host, composer, sizeof(composer), "@\"design notes.md");
+    PicoComplete_Refresh(&host);
+    Check(PicoComplete_IsOpen(), "a quoted file needs its closing quote before autocomplete closes");
+    PicoComplete_Close();
+}
+
+static void TestEnterAcceptsFileWithoutSubmitting(void)
+{
+    PicoHost host = {0}; char composer[256]; FilePopupFixture fixture = {0};
+    host.completers[0] = (PicoCompleter){.trigger='@',.host_query=UpdatingFileQuery,.state=&fixture};
+    host.completer_count = 1;
+    PicoComplete_BeforeEdit(0, sizeof(composer));
+    SetComposer(&host, composer, sizeof(composer), "read @old after");
+    host.composer.cursor = (int)strlen("read @old"); PicoComplete_Refresh(&host);
+    fixture.pending = true;
+    g_file_submits = 0; g_file_enter = true;
+    bool handled = PicoComplete_HandleKeys(&host); g_file_enter = false;
+    PicoComplete_Refresh(&host);
+    Check(handled && !strcmp(host.composer.text, "read @\"design notes.md\" after") &&
+          !PicoComplete_IsOpen() && g_file_submits == 0,
+          "Enter accepts a retained file and durably dismisses the pending popup without sending");
+    g_file_enter = true; handled = PicoComplete_HandleKeys(&host); g_file_enter = false;
+    Check(!handled, "a later Enter falls through to ordinary composer submission");
+    fixture.pending = false;
+    PicoComplete_Refresh(&host);
+    Check(!PicoComplete_IsOpen(), "a finished background query cannot reopen accepted file suggestions");
+    /* Editing an accepted mention must re-enable completion even at the same length. */
+    PicoComposer_ReplaceRange(&host, host.composer.cursor - 4, host.composer.cursor - 3, "x");
+    PicoComplete_Refresh(&host);
+    Check(PicoComplete_IsOpen(), "same-length edits to an accepted file re-enable suggestions");
+    PicoComplete_Close();
+}
+
+static void TestEnterDismissesUnchangedAndLoadingFileResults(void)
+{
+    PicoHost host = {0}; char composer[256]; FilePopupFixture fixture = {0};
+    host.completers[0] = (PicoCompleter){.trigger='@',.host_query=UpdatingFileQuery,.state=&fixture};
+    host.completer_count = 1;
+    PicoComplete_BeforeEdit(0, sizeof(composer));
+    SetComposer(&host, composer, sizeof(composer), "@notes"); PicoComplete_Refresh(&host);
+    g_file_down = true; PicoComplete_HandleKeys(&host); g_file_down = false;
+    fixture.pending = true;
+    SetComposer(&host, composer, sizeof(composer), "@notes-b.md");
+    g_file_submits = 0; g_file_enter = true;
+    PicoComplete_HandleKeys(&host); g_file_enter = false;
+    Check(!PicoComplete_IsOpen() && g_file_submits == 0 && !strcmp(host.composer.text, "@notes-b.md"),
+          "Enter on a retained exact file dismisses without submitting an unchanged draft");
+    PicoComplete_BeforeEdit(0, sizeof(composer));
+    SetComposer(&host, composer, sizeof(composer), "@loading"); PicoComplete_Refresh(&host);
+    g_file_enter = true; PicoComplete_HandleKeys(&host); g_file_enter = false;
+    PicoComplete_Refresh(&host);
+    Check(!PicoComplete_IsOpen() && g_file_submits == 0 && !strcmp(host.composer.text, "@loading"),
+          "Enter dismisses a loading-only file popup without sending or inserting status text");
+    PicoComplete_Close();
+}
+
 static Clay_RenderCommandArray RenderFilePopup(PicoHost *host)
 {
     Clay_BeginLayout();
@@ -776,6 +861,9 @@ int main(void)
     TestCompleteDetailDoesNotCoverLabel();
     TestCompleteLongPathKeepsFilename();
 #ifdef PICO_TEST_FILE_KEYS
+    TestExactFileClosesPopup();
+    TestEnterAcceptsFileWithoutSubmitting();
+    TestEnterDismissesUnchangedAndLoadingFileResults();
     TestPendingCompletionIsNotAnAttachment();
     TestPendingFilePopupKeepsRowsAndGeometry();
     TestPendingFileRowsCanBeAccepted();

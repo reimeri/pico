@@ -18,6 +18,7 @@ typedef struct CompleteState {
     bool dismissed;
     int dismissed_start;
     int dismissed_len;
+    uint64_t dismissed_revision;
     int selected;
     int token_start;
     int token_end;
@@ -114,6 +115,7 @@ static void Dismiss(PicoHost *app)
     g_complete.dismissed = true;
     g_complete.dismissed_start = g_complete.token_start;
     g_complete.dismissed_len = app->composer.length;
+    g_complete.dismissed_revision = app->composer.revision;
     PicoComplete_Close();
 }
 
@@ -331,6 +333,29 @@ static void SortItems(PicoCompleteItem *items, int n, const char *prefix)
     }
 }
 
+static bool IsCompleteFile(const PicoHost *app, int start, int end,
+                           const PicoCompleteItem *items, int count)
+{
+    char path[512];
+    int mention_end;
+    /* Only a complete token at the cursor qualifies. A prefix that happens to
+     * name a file must not close suggestions while editing a longer mention. */
+    if (!PicoFileMention_Parse(app->composer.text, app->composer.length, start,
+                               &mention_end, path, sizeof(path)) || mention_end != end)
+        return false;
+    for (int i = 0; i < count; i++)
+    {
+        const char *insert = items[i].insert[0] ? items[i].insert : items[i].label;
+        char candidate[512];
+        int candidate_end;
+        int len = (int)strlen(insert);
+        if (PicoFileMention_Parse(insert, len, 0, &candidate_end, candidate, sizeof(candidate)) &&
+            candidate_end == len && !strcmp(path, candidate))
+            return true;
+    }
+    return false;
+}
+
 void PicoComplete_Refresh(PicoHost *app)
 {
     const PicoCompleter *comp = NULL;
@@ -345,7 +370,8 @@ void PicoComplete_Refresh(PicoHost *app)
     }
     TrackToken(app, start, app->composer.text[start]);
     if (g_complete.dismissed && start == g_complete.dismissed_start &&
-        app->composer.length == g_complete.dismissed_len)
+        app->composer.length == g_complete.dismissed_len &&
+        app->composer.revision == g_complete.dismissed_revision)
     {
         PicoComplete_Close();
         return;
@@ -400,6 +426,11 @@ void PicoComplete_Refresh(PicoHost *app)
     {
         n = PICO_MAX_COMPLETE_ITEMS;
     }
+    if (comp->trigger == '@' && IsCompleteFile(app, start, end, raw, n))
+    {
+        PicoComplete_Close();
+        return;
+    }
     if (n > 0 && comp->trigger != '@')
     {
         SortItems(raw, n, prefix);
@@ -424,6 +455,27 @@ void PicoComplete_Refresh(PicoHost *app)
     }
 }
 
+static void FinishAccept(PicoHost *app, const PicoCompleter *comp)
+{
+    /* File insertion completes the interaction, even if the next search would
+     * still be pending. Other completers may intentionally continue a scope. */
+    if (comp && comp->trigger == '@')
+    {
+        const PicoCompleter *current = NULL;
+        int start, end;
+        /* Replacing the mention invalidates its old token identity. Track the
+         * inserted token before dismissal so refresh cannot clear it as new. */
+        if (ScanToken(app, &start, &end, &current))
+        {
+            TrackToken(app, start, app->composer.text[start]);
+            g_complete.token_start = start;
+            g_complete.token_end = end;
+        }
+        Dismiss(app);
+    }
+    else PicoComplete_Refresh(app);
+}
+
 static void Accept(PicoHost *app)
 {
     if (!g_complete.open || g_complete.count <= 0)
@@ -444,7 +496,7 @@ static void Accept(PicoHost *app)
     const PicoCompleteItem *item = &g_complete.items[sel];
     if (comp && comp->host_accept && comp->host_accept(app, item, comp->state))
     {
-        PicoComplete_Refresh(app);
+        FinishAccept(app, comp);
         return;
     }
     if (comp && comp->workspace_accept && comp->workspace)
@@ -454,7 +506,7 @@ static void Accept(PicoHost *app)
         PicoHost_EvictHoldPop(app, hold);
         if (accepted)
         {
-            PicoComplete_Refresh(app);
+            FinishAccept(app, comp);
             return;
         }
     }
@@ -466,7 +518,7 @@ static void Accept(PicoHost *app)
         end = PicoFileMention_QuotedEnd(app->composer.text, app->composer.length, start, &closed);
     }
     PicoComposer_ReplaceRange(app, start, end, ins);
-    PicoComplete_Refresh(app);
+    FinishAccept(app, comp);
 }
 
 bool PicoComplete_HandleKeys(PicoHost *app)
@@ -505,6 +557,14 @@ bool PicoComplete_HandleKeys(PicoHost *app)
     if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) &&
         !(IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)))
     {
+        if (g_complete.active_trigger == '@')
+        {
+            Accept(app);
+            /* A loading-only popup has no selectable file, but Enter still
+             * dismisses it rather than sending an unfinished draft. */
+            Dismiss(app);
+            return true;
+        }
         char before[4096];
         snprintf(before, sizeof(before), "%s", app->composer.text ? app->composer.text : "");
         Accept(app);

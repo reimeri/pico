@@ -40,6 +40,13 @@ not run composer preprocessing. Details: [completers](completers.md).
 
 Builtin file completion/submission share `@bare/path` and `@"escaped path"` representations. Simple bare paths contain ASCII letters/digits and `_`, `-`, `.`, `/`; names with spaces, other punctuation, or Unicode are quoted with JSON-style string escapes. Tokens start at whitespace/start-of-text and end at whitespace/end-of-text; quoted completion queries can span spaces, and accepting from inside an existing quote replaces its whole span. Invalid/incomplete/NUL-containing/oversized tokens never resolve a shortened prefix or rescan their interiors as attachments. Unrepresentable completion labels/insertions are omitted rather than truncated. Paths resolve against the explicit target workspace, not process CWD or later UI selection; existing bounded text/media attachment rules still apply. These are ordinary editable text mentions, not session-reference chips. See [completers](completers.md#builtin-file-mentions).
 
+A complete file mention at the cursor closes the popup when its exact decoded
+path matches a ready suggestion (case-sensitive, with a closing quote required
+for quoted paths). Accepting a file dismisses suggestions until the text changes
+or another token is entered, including while a search is pending. Enter with a
+visible file popup accepts/dismisses only, never submits; a later Enter follows
+normal composer submission. Loading-only popup text is never inserted.
+
 Builtin `@` discovery and matching use core-owned workers with bounded UI-thread
 mailboxes; extension query/accept remain synchronous. Pending same-token file
 queries retain the displayed rows and selection without adding a loading row;

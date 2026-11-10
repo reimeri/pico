@@ -113,6 +113,17 @@ core service without joining workers on the UI thread. Workers own their remaini
 state, reap subprocesses, and release it asynchronously; they invoke no extension
 callbacks. The extension registration and synchronous callback ABI are unchanged.
 
+When the cursor reaches the end of a complete file mention whose exact decoded
+path matches a ready suggestion, the popup closes automatically without changing
+the draft. This includes quoted paths only after their closing quote; a matching
+prefix inside a longer token is not complete. Matching is case-sensitive here,
+unlike search ranking. Accepting a file with Enter, Tab, or a click closes and
+dismisses suggestions until the text changes or another token is entered, even
+while a query is pending. Enter never sends while the file popup is visible: it
+accepts the selected file, or just dismisses a loading-only popup. A later Enter
+uses normal composer submission. Command and session completion behavior is
+unchanged.
+
 File completion inserts `@src/file.c` for simple ASCII paths and a quoted mention
 such as `@"design notes.md"` for spaces, punctuation, or Unicode. Quotes and
 backslashes are escaped as `\"` and `\\`; control characters use JSON-style

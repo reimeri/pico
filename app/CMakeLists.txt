@@ -854,7 +854,7 @@ if(BUILD_TESTING)
     target_link_libraries(pico_files_tests PRIVATE pico_image pico_chat_search raylib Threads::Threads md4c OpenSSL::Crypto SQLite::SQLite3 pico_browser_gpu)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(pico_files_tests PRIVATE PICO_TEST_FILE_KEYS=1)
-        target_link_options(pico_files_tests PRIVATE -Wl,--wrap=IsKeyPressed)
+        target_link_options(pico_files_tests PRIVATE -Wl,--wrap=IsKeyPressed -Wl,--wrap=PicoHost_Submit)
     endif()
     add_test(NAME pico_files_tests COMMAND pico_files_tests)
 

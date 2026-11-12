@@ -88,37 +88,6 @@ On Linux, these actions use `xdg-open`, `xdg-terminal-exec --dir=…` (falling b
 `xdg-terminal-exec` is unavailable), and `code` from `PATH`. Missing or failed
 launchers produce a notice; Pico does not install these applications.
 
-## Inbox
-
-The sidebar groups active and undismissed sessions under **Needs input**
-(questions, approvals, and errors), **Working**, and **Completed** (finished or
-stopped turns).
-
-- Rows include their project name and move between sections as work progresses.
-  A muted age beside the name (`12s`, `5m`, `2h`, `3d`) shows time since the last
-  message, steering input, or question/approval answer—not selection or assistant
-  activity. It updates automatically and survives restarts; sessions without a
-  recorded user action show no age.
-- The checkmark beside **Completed** dismisses those sessions from Inbox, including
-  unread completions, without deleting their saved history. Use `/resume` to
-  reopen saved sessions.
-- **+** opens a centered project picker without stopping ongoing work.
-  Choose a non-stashed project to create a session, or return to its empty draft.
-  The picker also offers **Add project**, project reordering by dragging, and
-  project settings by right-clicking a project.
-- Click the star beside a project in the picker to toggle its shortcut badge at
-  the top of the sidebar. Click a badge to start a session in that project’s main
-  workspace (or reuse its empty draft). Favorites survive restarts and follow
-  project-list order; scroll horizontally or use the mouse wheel over the badges
-  if they overflow. Stashed or missing projects hide their shortcuts without
-  losing their stars.
-
-When you switch sessions (including between projects), Pico remembers your reading
-position for five minutes after you leave. Returning sooner restores that position,
-even if new output arrived; returning later opens at the bottom. If you left at the
-bottom, you always return to the latest output. These bookmarks are kept only in
-memory and do not survive restarting Pico.
-
 ## Build from source
 
 Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, libwebp, libjpeg, and Raylib's native deps (OpenGL/EGL, X11/Wayland, audio). Ubuntu 26.04:

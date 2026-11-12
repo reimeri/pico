@@ -76,18 +76,6 @@ Supports `x86_64-linux` and `aarch64-linux`; the package puts GCC on `PATH` so e
 
 Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`. Use `/apikey <openai|hyper|xai>` to save an api key for a provider.
 
-## Workspace actions
-
-The **Actions** button at the right end of the footer opens the selected session’s
-workspace directory in your file manager, terminal, or VS Code. For sessions in a
-Git worktree, actions use that worktree, not the main project directory. The popup
-supports arrow keys and Enter; Escape or clicking outside dismisses it.
-
-On Linux, these actions use `xdg-open`, `xdg-terminal-exec --dir=…` (falling back to
-`x-terminal-emulator` with the workspace as its working directory when
-`xdg-terminal-exec` is unavailable), and `code` from `PATH`. Missing or failed
-launchers produce a notice; Pico does not install these applications.
-
 ## Build from source
 
 Needs a C99 compiler, CMake 3.27+, Ninja, pkg-config, Git, libcurl, OpenSSL Crypto, SQLite3, utf8proc, libwebp, libjpeg, and Raylib's native deps (OpenGL/EGL, X11/Wayland, audio). Ubuntu 26.04:

@@ -121,9 +121,17 @@ void pico_host_add_view(PicoHost *app, PicoUiSlot slot, int z, PicoHostViewFn fn
 { (void)app; (void)slot; (void)z; (void)fn; }
 void pico_host_add_hook(PicoHost *app, PicoHook kind, PicoHostHookFn fn)
 { (void)app; (void)kind; (void)fn; }
-void Pico_Scissor(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+static Rectangle drawn_rectangle, scissor_rectangle;
+static bool drew_rectangle;
+void Pico_Scissor(int x, int y, int w, int h)
+{ scissor_rectangle = (Rectangle){x, y, w, h}; }
 void Pico_ScissorEnd(void) {}
-void DrawRectangle(int x, int y, int w, int h, Color c) { (void)x; (void)y; (void)w; (void)h; (void)c; }
+void DrawRectangle(int x, int y, int w, int h, Color c)
+{
+    (void)c;
+    drawn_rectangle = (Rectangle){x, y, w, h};
+    drew_rectangle = true;
+}
 
 bool PicoChatFind_BlocksInput(const PicoHost *app) { (void)app; return find_focused; }
 bool PicoChatSel_HasSelection(const PicoHost *app) { (void)app; return false; }
@@ -439,6 +447,173 @@ static int TestQuestionPanel(void)
     return failed;
 }
 
+/* Edit is distinct from selecting/submitting; replacement must be explicit. */
+static int TestEditableOptions(void)
+{
+    const char *request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"target\",\"question\":\"Choose target\",\"kind\":\"select\",\"options\":[\"CLI\",\"GUI\"]}]}";
+    void *memory = malloc(Clay_MinMemorySize());
+    PicoHost *app = calloc(1, sizeof(*app));
+    AskHostState *ui = calloc(1, sizeof(*ui));
+    PicoWorkspace *ws = calloc(1, sizeof(*ws));
+    if (!memory || !app || !ui || !ws) abort();
+    app->workspaces[0] = ws;
+    app->workspace_count = ws->count = 1;
+    ws->agents[0] = (PicoAgent *)&pending_asks[0];
+    Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                    (Clay_Dimensions){800, 800}, (Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(ClayMeasureStub, NULL);
+    pending_asks[0] = (PicoToolAsk){.id = 1, .request_json = request};
+    visible_ask = 0;
+    AskUserOnFrame(app, ui, 0);
+    PanelLayout(app, ui);
+    PanelClick(app, ui, CLAY_IDI("AskUserOptionEdit", 0));
+    Clay_RenderCommandArray commands = PanelLayout(app, ui);
+    int failed = !Clay_GetElementData(CLAY_ID("AskUserTextBox")).found ||
+                 !PanelHasText(commands, "CLI") || !PanelHasText(commands, "GUI") || submitted_id != 0;
+    /* The caret starts at the end and E types normally inside the editor. */
+    pressed_key = KEY_E;
+    typed_character = 'E';
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "CLIE");
+    PanelClick(app, ui, CLAY_IDI("AskUserOptionEdit", 1));
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "Replace your custom answer with this option?") ||
+              !PanelHasText(commands, "GUI") || submitted_id != 0;
+    /* Ordinary typing cannot change a draft while confirmation owns input. */
+    typed_character = 'X';
+    AskUserOnFrame(app, ui, 0);
+    PanelClick(app, ui, CLAY_ID("AskUserKeepDraft"));
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "CLIE");
+    /* Choosing the original option still works and preserves the custom draft. */
+    PanelClick(app, ui, CLAY_IDI("AskUserOption", 1));
+    PanelLayout(app, ui);
+    pressed_key = KEY_E;
+    typed_character = 'e';
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "Keep draft") || !PanelHasText(commands, "Replace");
+    /* Keyboard confirmation selects Replace, without advancing the question. */
+    pressed_key = KEY_TAB;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    PanelLayout(app, ui);
+    failed |= !Clay_GetElementData(CLAY_ID("AskUserTextBox")).found || submitted_id != 0;
+    typed_character = '!';
+    AskUserOnFrame(app, ui, 0);
+    commands = PanelLayout(app, ui);
+    failed |= !PanelHasText(commands, "GUI!");
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    failed |= submitted_id != 1 || !submitted_answer || strcmp(submitted_answer,
+        "{\"answers\":[{\"id\":\"target\",\"answer\":\"GUI!\"}]}");
+    memset(pending_asks, 0, sizeof(pending_asks));
+    AskUserHostShutdown(app, ui);
+    free(submitted_answer);
+    submitted_answer = NULL;
+    submitted_id = 0;
+    free(ws);
+    free(app);
+    Clay_SetCurrentContext(NULL);
+    free(memory);
+    if (failed) fprintf(stderr, "editable options: seed, focus, draft protection, keyboard editing, or custom submission failed\n");
+    return failed;
+}
+
+/* A seeded multiline answer must reveal the caret, not just open an offscreen
+ * editor. Selecting the original afterward must still return its unchanged text. */
+static int TestLongEditableOption(void)
+{
+    char option[2048] = "";
+    for (int i = 0; i < 30; i++) strcat(option, "A longer deployment plan with multiple steps. ");
+    JsonBuf request;
+    JsonBuf_Init(&request);
+    JsonBuf_Puts(&request, "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"target\",\"question\":\"Choose target\",\"kind\":\"select\",\"options\":[");
+    JsonBuf_String(&request, option);
+    JsonBuf_Puts(&request, "]}]}");
+    void *memory = malloc(Clay_MinMemorySize());
+    PicoHost *app = calloc(1, sizeof(*app));
+    PicoWorkspace *ws = calloc(1, sizeof(*ws));
+    AskHostState *ui = calloc(1, sizeof(*ui));
+    if (!memory || !app || !ws || !ui) abort();
+    app->workspaces[0] = ws;
+    app->workspace_count = ws->count = 1;
+    ws->agents[0] = (PicoAgent *)&pending_asks[0];
+    Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(Clay_MinMemorySize(), memory),
+                    (Clay_Dimensions){500, 500}, (Clay_ErrorHandler){0});
+    Clay_SetMeasureTextFunction(ClayMeasureStub, NULL);
+    test_glyph_width = 7;
+    char *json = JsonBuf_Steal(&request);
+    pending_asks[0] = (PicoToolAsk){.id = 1, .request_json = json};
+    visible_ask = 0;
+    AskUserOnFrame(app, ui, 0);
+    PanelLayout(app, ui);
+    pressed_key = KEY_ONE;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = KEY_E;
+    typed_character = 'e';
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    for (int frame = 0; frame < 4; frame++)
+    {
+        PanelLayout(app, ui);
+        AskUserAfterLayout(app, NULL, ui);
+    }
+    PanelLayout(app, ui);
+    drew_rectangle = false;
+    AskUserDrawOverlay(app, NULL, ui);
+    int failed = !drew_rectangle || drawn_rectangle.y < scissor_rectangle.y ||
+                 drawn_rectangle.y + drawn_rectangle.height > scissor_rectangle.y + scissor_rectangle.height;
+    if (failed) fprintf(stderr, "long edit: caret must be visible inside both editor and question body\n");
+    typed_character = '!';
+    AskUserOnFrame(app, ui, 0);
+    /* Select the original through its visible row rather than discarding the
+     * custom buffer directly. */
+    Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+    body.scrollPosition->y = 0;
+    PanelLayout(app, ui);
+    Clay_BoundingBox row = Clay_GetElementData(CLAY_IDI("AskUserOption", 0)).boundingBox;
+    Clay_BoundingBox view = Clay_GetElementData(CLAY_ID("AskUserBody")).boundingBox;
+    mouse_position = (Vector2){row.x + 20, view.y + view.height / 2};
+    mouse_pressed = true;
+    Clay_SetPointerState((Clay_Vector2){mouse_position.x, mouse_position.y}, true);
+    AskUserAfterLayout(app, NULL, ui);
+    mouse_pressed = false;
+    pressed_key = KEY_ENTER;
+    AskUserOnFrame(app, ui, 0);
+    pressed_key = 0;
+    JsonDoc answer;
+    bool parsed = submitted_answer && JsonParse(&answer, submitted_answer, strlen(submitted_answer)) == 0;
+    if (parsed)
+    {
+        int answers = JsonObjGet(&answer, 0, "answers");
+        int value = JsonObjGet(&answer, JsonArrayAt(&answer, answers, 0), "answer");
+        failed |= !JsonEq(&answer, value, option);
+        JsonFree(&answer);
+    }
+    else failed = 1;
+    memset(pending_asks, 0, sizeof(pending_asks));
+    AskUserHostShutdown(app, ui);
+    free(json);
+    free(submitted_answer);
+    submitted_answer = NULL;
+    submitted_id = 0;
+    test_glyph_width = 1;
+    free(ws);
+    free(app);
+    Clay_SetCurrentContext(NULL);
+    free(memory);
+    return failed;
+}
+
 static char *BuildQuestionList(int count);
 
 /* The handle stays at the container's center, even when unequal labels fit
@@ -598,6 +773,7 @@ static int TestWrappedQuestionPanel(void)
     Clay_BoundingBox body = Clay_GetElementData(CLAY_ID("AskUserBody")).boundingBox;
     Clay_BoundingBox first = Clay_GetElementData(CLAY_IDI("AskUserOption", 0)).boundingBox;
     Clay_BoundingBox second = Clay_GetElementData(CLAY_IDI("AskUserOption", 1)).boundingBox;
+    Clay_BoundingBox edit = Clay_GetElementData(CLAY_IDI("AskUserOptionEdit", 0)).boundingBox;
     int prompt_lines = 0, option_lines = 0;
     for (int i = 0; i < commands.length; i++)
     {
@@ -611,7 +787,11 @@ static int TestWrappedQuestionPanel(void)
         bool is_choice = (uintptr_t)label.chars >= (uintptr_t)choice &&
                          (uintptr_t)label.chars < (uintptr_t)(choice + strlen(choice));
         if (is_prompt) prompt_lines++;
-        if (is_choice) option_lines++;
+        if (is_choice)
+        {
+            option_lines++;
+            if (cmd->boundingBox.x + cmd->boundingBox.width > edit.x) failed = 1;
+        }
         if ((is_prompt || is_choice) &&
             cmd->boundingBox.x + cmd->boundingBox.width > body.x + body.width + .01f) failed = 1;
     }
@@ -682,6 +862,8 @@ int main(void)
     int failed = TestTextInput();
     failed |= TestHoverCursor();
     failed |= TestQuestionPanel();
+    failed |= TestEditableOptions();
+    failed |= TestLongEditableOption();
     failed |= TestQuestionPanelHandle();
     failed |= TestLongQuestionScroll();
     failed |= TestWrappedQuestionPanel();

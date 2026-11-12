@@ -437,6 +437,12 @@ session/workspace selection, and discarded after the ask ends, its owner closes,
 or host extensions are replaced. Borrowed `request_json` is never retained across
 pumps. Collapsing does not answer or cancel; only the focused expanded panel
 consumes question keyboard input, and named modals/chat search take precedence.
+Predefined options can seed the host-owned custom draft through Edit (or E in
+option-selection mode), without mutating the request/options or answering the ask.
+Replacing a different non-empty custom draft requires explicit confirmation;
+Keep draft is the default. That confirmation is local questionnaire state, not a
+modal claim or a separate ask, and remains subject to the same focus and lifetime
+rules. The final answer carries the custom text through the existing answer JSON.
 Questionnaire submission creates no extra transcript message beyond the tool result.
 
 Clarification runtime ownership is core/workspace-owned, keyed by the ask owner,

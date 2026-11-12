@@ -12699,7 +12699,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
         "ComposerAlign", "Composer", "Footer", "ClarificationControls", "ClarificationFocus", "ClarificationBack", "Sidebar"};
     Clay_BoundingBox expected[12];
     float expanded_height = 0;
-    for (int phase = 0; phase < 5; phase++)
+    for (int phase = 0; phase < 7; phase++)
     {
         for (int frame = 0; frame < 100; frame++)
         {
@@ -12777,7 +12777,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
                 fabsf(expected[9].x + expected[9].width / 2 - panel.boundingBox.x - panel.boundingBox.width / 2) > .01f)
             { Fail("question handle must stay centered inside the bounded header"); goto done; }
             Clay_ElementData body = Clay_GetElementData(CLAY_ID("AskUserBody"));
-            Clay_ElementData next = Clay_GetElementData(CLAY_ID("AskUserNext"));
+            Clay_ElementData next = Clay_GetElementData(phase == 5 ? CLAY_ID("AskUserReplaceDraft") : CLAY_ID("AskUserNext"));
             if (Clay_GetElementData(CLAY_ID("ComposerScroll")).found ||
                 !ShellVerticallyContains(expected[3], panel.boundingBox) ||
                 expected[4].y + expected[4].height > panel.boundingBox.y) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
@@ -12795,13 +12795,15 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
         }
         if (phase == 2)
         {
-            /* An Other answer must survive the real clarification/back actions. */
+            /* Seed an edited option, then preserve it through clarification/back. */
             Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+            Clay_BoundingBox first = Clay_GetElementData(CLAY_IDI("AskUserOption", 0)).boundingBox;
+            Clay_BoundingBox view = Clay_GetElementData(CLAY_ID("AskUserBody")).boundingBox;
             if (body.found && body.scrollPosition)
-                body.scrollPosition->y = -(body.contentDimensions.height - body.scrollContainerDimensions.height);
+                body.scrollPosition->y -= first.y - view.y;
             PicoHost_LayoutShell(host, viewport.height, 0);
-            Clay_BoundingBox other = Clay_GetElementData(CLAY_IDI("AskUserOption", 8)).boundingBox;
-            g_find_pointer = (Vector2){other.x + other.width / 2, other.y + other.height / 2};
+            Clay_BoundingBox edit = Clay_GetElementData(CLAY_IDI("AskUserOptionEdit", 0)).boundingBox;
+            g_find_pointer = (Vector2){edit.x + edit.width / 2, edit.y + edit.height / 2};
             g_find_press = true;
             Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
             pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
@@ -12870,6 +12872,33 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
             Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
             if (PicoClarification_View(host) || strcmp(host->composer.text, "unsent draft"))
             { Fail("Back action must restore questionnaire and parent composer draft"); goto done; }
+        }
+        if (phase == 4)
+        {
+            /* Replacement confirmation is another bounded composer state. */
+            Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+            Clay_BoundingBox second = Clay_GetElementData(CLAY_IDI("AskUserOption", 1)).boundingBox;
+            Clay_BoundingBox view = Clay_GetElementData(CLAY_ID("AskUserBody")).boundingBox;
+            if (body.found && body.scrollPosition)
+                body.scrollPosition->y -= second.y - view.y;
+            PicoHost_LayoutShell(host, viewport.height, 0);
+            Clay_BoundingBox edit = Clay_GetElementData(CLAY_IDI("AskUserOptionEdit", 1)).boundingBox;
+            g_find_pointer = (Vector2){edit.x + edit.width / 2, edit.y + edit.height / 2};
+            g_find_press = true;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+            g_find_press = false;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+        }
+        else if (phase == 5)
+        {
+            Clay_BoundingBox keep = Clay_GetElementData(CLAY_ID("AskUserKeepDraft")).boundingBox;
+            g_find_pointer = (Vector2){keep.x + keep.width / 2, keep.y + keep.height / 2};
+            g_find_press = true;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, true);
+            pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, agent_id);
+            g_find_press = false;
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
         }
         if (phase < 2)
         {
@@ -12962,7 +12991,7 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
         { Fail("preview dismissal must preserve the pending questionnaire and composer draft"); goto done; }
     }
     PicoHost_LayoutShell(host, viewport.height, 0);
-    /* Expand again, then Submit the preserved Other answer explicitly. */
+    /* Expand again, then submit the preserved edited answer explicitly. */
     toggle = Clay_GetElementData(CLAY_ID("AskUserToggle")).boundingBox;
     g_find_pointer = (Vector2){toggle.x + toggle.width / 2, toggle.y + toggle.height / 2};
     g_find_press = true;
@@ -12980,9 +13009,9 @@ static int RunQuestionPanelShellCase(bool with_sidebar)
     Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
     if (!PumpUntilIdle(host, agent)) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }
     pthread_mutex_lock(&state.mu);
-    bool preserved_answer = state.answer && strstr(state.answer, "Z");
+    bool preserved_answer = state.answer && strstr(state.answer, "oneZ");
     pthread_mutex_unlock(&state.mu);
-    if (!preserved_answer) { Fail("Other answer draft must survive clarification and submit unchanged"); goto done; }
+    if (!preserved_answer) { Fail("Edited answer draft must survive clarification and rejected replacement unchanged"); goto done; }
     PicoHost_LayoutShell(host, viewport.height, 0);
     if (!Clay_GetElementData(CLAY_ID("ComposerScroll")).found ||
         Clay_GetElementData(CLAY_ID("AskUserHeader")).found || strcmp(host->composer.text, "unsent draft")) { fprintf(stderr, "question shell failed at %d\n", __LINE__); goto done; }

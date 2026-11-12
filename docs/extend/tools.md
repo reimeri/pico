@@ -149,7 +149,7 @@ The `ask-user` builtin registers the model-facing `ask_user` tool and a non-moda
 }
 ```
 
-Every question is required. A call contains 1–24 questions with unique, non-empty IDs of at most 128 UTF-8 bytes. `kind` is `select` or `text`. Select questions contain 1–20 non-empty options and always include **Other…**, which offers free-form input. Text questions accept up to 16 KiB and ignore `options`. The complete request and answer remain subject to the 64 KiB ask limits.
+Every question is required. A call contains 1–24 questions with unique, non-empty IDs of at most 128 UTF-8 bytes. `kind` is `select` or `text`. Select questions contain 1–20 non-empty options and always include **Custom answer…**, which offers free-form input. Text questions accept up to 16 KiB and ignore `options`. The complete request and answer remain subject to the 64 KiB ask limits.
 
 The panel preserves answers while moving Next/Back and returns them in question order:
 
@@ -162,7 +162,9 @@ The panel preserves answers while moving Next/Back and returns them in question 
 }
 ```
 
-Controls (while the expanded panel is focused): Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button or Shift+Tab goes back; Shift+Enter inserts a newline. While **Other…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option. Arrow keys never change questions. Text fields support the same editing shortcuts as the composer: Ctrl+Left/Right word moves, Home/End line start/end, Shift+arrows/Home/End selection, Ctrl+A select all, Ctrl+C/X copy/cut, Ctrl+V paste, Ctrl+W or Ctrl+Backspace delete word, plus drag, double-click word, and triple-click paragraph selection. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
+Each predefined option has an **Edit** action. Clicking it, or pressing **E** while that option is selected, opens **Custom answer…** prefilled with the option text, with the caret at the end. Editing never advances or submits the questionnaire, and the predefined options remain unchanged. If this would replace a different non-empty custom draft, the panel asks **Keep draft** (the default) or **Replace** first. In that confirmation, Tab or Left/Right switches actions and Enter activates the chosen action; ordinary typing does not modify the draft. Options longer than the free-form answer limit cannot be seeded into the editor; the user can still select them unchanged or write a shorter custom answer.
+
+Controls (while the expanded panel is focused): Up/Down, number keys 1–9 (0 for 10), or click selects an option; Enter or Tab advances; the Back button or Shift+Tab goes back; Shift+Enter inserts a newline. While **Custom answer…** or a text question is focused, number and arrow keys edit the answer instead of changing the selected option, and E types normally. Arrow keys never change questions. Text fields support the same editing shortcuts as the composer: Ctrl+Left/Right word moves, Home/End line start/end, Shift+arrows/Home/End selection, Ctrl+A select all, Ctrl+C/X copy/cut, Ctrl+V paste, Ctrl+W or Ctrl+Backspace delete word, plus drag, double-click word, and triple-click paragraph selection. Esc cancels the questionnaire and current turn. The builtin appends usage guidance under `## Additional instructions` on non-compaction requests only when `ask_user` is in that agent's final effective tool catalog.
 
 ### Clarifying a pending questionnaire
 

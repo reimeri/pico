@@ -62,6 +62,8 @@ typedef struct AskQuestion
     int option_count;
     int selected;
     int focus;
+    int pending_edit; /* Option index + 1; zero means no replacement confirmation. */
+    bool replace_focused;
     char *text;
     int text_len;
     int text_cap;
@@ -751,7 +753,7 @@ static void MarkTextViewDirty(void)
 
 static bool TextFieldOpen(const AskQuestion *q)
 {
-    return q && (q->kind == ASK_QUESTION_TEXT || q->selected == q->option_count);
+    return q && !q->pending_edit && (q->kind == ASK_QUESTION_TEXT || q->selected == q->option_count);
 }
 
 static float MeasureSlice(Font font, const char *s, int start, int length, float font_size)
@@ -1145,6 +1147,65 @@ static bool EnsureTextCapacity(AskQuestion *q, int needed)
     return true;
 }
 
+/* Seed only the custom draft: predefined options and the ask payload stay intact. */
+static void EditOption(AskQuestion *q, int option)
+{
+    const char *label = q->options[option];
+    size_t length = strlen(label);
+    if (length > ASK_USER_MAX_TEXT)
+    {
+        SetValidation("This option is too long to edit. Choose Custom answer to write a shorter answer.");
+        return;
+    }
+    if (!EnsureTextCapacity(q, (int)length))
+    {
+        SetValidation("Could not prepare the answer for editing. Please try again.");
+        return;
+    }
+    memcpy(q->text, label, length + 1);
+    q->text_len = (int)length;
+    q->cursor = q->sel_anchor = q->text_len;
+    q->selected = q->focus = q->option_count;
+    q->pending_edit = 0;
+    q->mouse_selecting = false;
+    PicoClickSeq_Reset(&q->click_seq);
+    ResetQuestionScroll();
+    g_ui.reveal_input = true;
+    g_ui.focused = true;
+    g_ui.suppress_chars = false;
+    g_ui.validation[0] = '\0';
+    MarkTextViewDirty();
+}
+
+static void RequestOptionEdit(AskQuestion *q, int option)
+{
+    if (strlen(q->options[option]) > ASK_USER_MAX_TEXT)
+    {
+        EditOption(q, option); /* Report the limit without disturbing the draft. */
+        return;
+    }
+    if (q->text_len > 0 && strcmp(q->text, q->options[option]))
+    {
+        q->pending_edit = option + 1;
+        q->replace_focused = false;
+        q->mouse_selecting = false;
+        g_ui.validation[0] = '\0';
+        ResetQuestionScroll();
+    }
+    else
+    {
+        EditOption(q, option);
+    }
+}
+
+static void KeepCustomDraft(AskQuestion *q)
+{
+    q->pending_edit = 0;
+    ResetQuestionScroll();
+    g_ui.reveal_input = true;
+    MarkTextViewDirty();
+}
+
 static void AskTextDeleteRange(AskQuestion *q, int from, int to);
 
 static void AskTextInsert(AskQuestion *q, const char *s, int n)
@@ -1319,6 +1380,13 @@ static void HandleSelectKeys(PicoHost *app, AskQuestion *q)
     if (q->selected == q->option_count)
     {
         HandleTextKeys(app, q);
+        return;
+    }
+
+    if (!CtrlDown() && IsKeyPressed(KEY_E))
+    {
+        while (GetCharPressed() != 0) {}
+        RequestOptionEdit(q, q->selected >= 0 ? q->selected : q->focus);
         return;
     }
 
@@ -1579,6 +1647,22 @@ static void AskUserOnFrame(PicoHost *app, void *state, float dt)
         return;
     }
 
+    AskQuestion *q = &g_ui.questions[g_ui.current];
+    if (q->pending_edit)
+    {
+        if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT))
+            q->replace_focused = !q->replace_focused;
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))
+        {
+            if (q->replace_focused)
+                EditOption(q, q->pending_edit - 1);
+            else
+                KeepCustomDraft(q);
+        }
+        while (GetCharPressed() != 0) {}
+        return;
+    }
+
     bool tab = IsKeyPressed(KEY_TAB);
     if (tab)
     {
@@ -1593,7 +1677,6 @@ static void AskUserOnFrame(PicoHost *app, void *state, float dt)
         return;
     }
 
-    AskQuestion *q = &g_ui.questions[g_ui.current];
     int question = g_ui.current;
     int cursor = q->cursor;
     int length = q->text_len;
@@ -1631,10 +1714,24 @@ static void RenderButton(Clay_String id, const char *label, bool enabled, bool p
 
 static void RenderTextQuestion(const AskQuestion *q);
 
+static const char *kSelectHint = "Up/Down or 1-N select  •  E edit selected  •  Enter next";
+static const char *kReplacePrompt = "Replace your custom answer with this option?";
+static const char *kReplaceHint = "Tab or Left/Right choose  •  Enter confirm";
+
+static float OptionEditWidth(void)
+{
+    return MeasureTextEx(Pico_FontAt(FONT_REGULAR, PICO_FONT_UI), "Edit", Pico_FontPx(PICO_FONT_UI), 0).x + 16;
+}
+
+static float OptionLabelWidth(float body_width, bool editable)
+{
+    float width = body_width - 54 - (editable ? OptionEditWidth() + 10 : 0);
+    return width > 1 ? width : 1;
+}
+
 static void RenderSelectQuestion(const AskQuestion *q, float body_width)
 {
     int choice_count = q->option_count + 1;
-    float label_width = body_width > 55 ? body_width - 54 : 1;
     CLAY(CLAY_ID("AskUserOptions"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 8,
@@ -1646,7 +1743,10 @@ static void RenderSelectQuestion(const AskQuestion *q, float body_width)
             bool hover = Clay_PointerOver(eid);
             bool selected = q->selected == i;
             bool focused = g_ui.focused && q->focus == i;
-            const char *label = i < q->option_count ? q->options[i] : "Other…";
+            bool editable = i < q->option_count;
+            const char *label = editable ? q->options[i] : "Custom answer…";
+            float label_width = OptionLabelWidth(body_width, editable);
+            float label_height = LabelHeight(label, PICO_FONT_UI, label_width);
             snprintf(g_ui.option_nums[i], sizeof(g_ui.option_nums[i]), "%d", i + 1);
             Clay_Color bg = selected ? (Clay_Color){62, 78, 124, 255}
                                      : (hover || focused ? COLOR_CODE_BG : COLOR_FOOTER_BG);
@@ -1655,7 +1755,8 @@ static void RenderSelectQuestion(const AskQuestion *q, float body_width)
                              .childGap = 10,
                              .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                              .padding = {10, 10, 8, 8},
-                             .sizing = {.width = CLAY_SIZING_GROW(0)}},
+                             .sizing = {.width = CLAY_SIZING_GROW(0),
+                                        .height = CLAY_SIZING_FIXED(label_height + 16)}},
                   .backgroundColor = bg,
                   .cornerRadius = CLAY_CORNER_RADIUS(6)})
             {
@@ -1663,7 +1764,24 @@ static void RenderSelectQuestion(const AskQuestion *q, float body_width)
                           CLAY_TEXT_CONFIG({.fontId = FONT_MONO,
                                             .fontSize = PICO_FONT_UI,
                                             .textColor = selected ? COLOR_LINK : COLOR_MUTED}));
-                RenderAskLabel(label, FONT_REGULAR, PICO_FONT_UI, COLOR_TEXT, label_width);
+                CLAY(CLAY_IDI("AskUserOptionLabel", i),
+                     {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_FIXED(label_height)}}})
+                {
+                    RenderAskLabel(label, FONT_REGULAR, PICO_FONT_UI, COLOR_TEXT, label_width);
+                }
+                if (editable)
+                {
+                    bool edit_hover = Clay_PointerOver(CLAY_IDI("AskUserOptionEdit", i));
+                    CLAY(CLAY_IDI("AskUserOptionEdit", i),
+                         {.layout = {.padding = {8, 8, 0, 0},
+                                     .sizing = {.width = CLAY_SIZING_FIXED(OptionEditWidth())}}})
+                    {
+                        CLAY_TEXT(CLAY_STRING("Edit"), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                            .fontSize = PICO_FONT_UI, .textColor = edit_hover ? COLOR_TEXT : COLOR_MUTED,
+                            .wrapMode = CLAY_TEXT_WRAP_NONE}));
+                    }
+                }
             }
         }
     }
@@ -1673,7 +1791,7 @@ static void RenderSelectQuestion(const AskQuestion *q, float body_width)
     }
     else
     {
-        CLAY_TEXT(CLAY_STRING("Up/Down or 1-N select  •  Enter next"),
+        CLAY_TEXT(CStr(kSelectHint),
                   CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED, .wrapMode = CLAY_TEXT_WRAP_WORDS}));
     }
 }
@@ -1776,17 +1894,26 @@ static void AskUserRender(PicoHost *app, void *state)
     if (g_ui.text_box_max > text_max)
         g_ui.text_box_max = text_max;
     float body_h = LabelHeight(q->prompt, PICO_FONT_BODY, body_width) + 12;
-    if (q->kind == ASK_QUESTION_SELECT)
+    if (q->pending_edit)
     {
-        for (int i = 0; i <= q->option_count; i++)
-            body_h += LabelHeight(i < q->option_count ? q->options[i] : "Other…",
-                                  PICO_FONT_UI, body_width > 55 ? body_width - 54 : 1) +
-                      16 + (i ? 8 : 0);
-        body_h += 12;
+        body_h += LabelHeight(kReplacePrompt, PICO_FONT_BODY, body_width) + 12;
+        body_h += LabelHeight(q->options[q->pending_edit - 1], PICO_FONT_UI, body_width) + 12;
+        body_h += LabelHeight(kReplaceHint, PICO_FONT_CAPTION, body_width);
     }
-    if (TextFieldOpen(q))
-        body_h += g_ui.text_box_max + 12;
-    body_h += LabelHeight(TextFieldOpen(q) ? "Enter next  •  Shift+Enter newline  •  Shift+Tab back" : "Up/Down or 1-N select  •  Enter next", PICO_FONT_CAPTION, body_width);
+    else
+    {
+        if (q->kind == ASK_QUESTION_SELECT)
+        {
+            for (int i = 0; i <= q->option_count; i++)
+                body_h += LabelHeight(i < q->option_count ? q->options[i] : "Custom answer…",
+                                      PICO_FONT_UI, OptionLabelWidth(body_width, i < q->option_count)) +
+                          16 + (i ? 8 : 0);
+            body_h += 12;
+        }
+        if (TextFieldOpen(q))
+            body_h += g_ui.text_box_max + 12;
+        body_h += LabelHeight(TextFieldOpen(q) ? "Enter next  •  Shift+Enter newline  •  Shift+Tab back" : kSelectHint, PICO_FONT_CAPTION, body_width);
+    }
     if (g_ui.validation[0])
         body_h += LabelHeight(g_ui.validation, PICO_FONT_CAPTION, body_width) + 12;
     float chrome_h = 24 + header_h + control_h + 16;
@@ -1900,7 +2027,14 @@ static void AskUserRender(PicoHost *app, void *state)
                           .clip = {.vertical = true, .horizontal = false, .childOffset = Clay_GetScrollOffset()}})
                     {
                         RenderAskLabel(q->prompt, FONT_REGULAR, PICO_FONT_BODY, COLOR_TEXT, body_width);
-                        if (q->kind == ASK_QUESTION_SELECT)
+                        if (q->pending_edit)
+                        {
+                            RenderAskLabel(kReplacePrompt, FONT_REGULAR, PICO_FONT_BODY, COLOR_TEXT, body_width);
+                            RenderAskLabel(q->options[q->pending_edit - 1], FONT_REGULAR, PICO_FONT_UI, COLOR_TEXT, body_width);
+                            CLAY_TEXT(CStr(kReplaceHint), CLAY_TEXT_CONFIG({.fontId = FONT_REGULAR,
+                                .fontSize = PICO_FONT_CAPTION, .textColor = COLOR_MUTED}));
+                        }
+                        else if (q->kind == ASK_QUESTION_SELECT)
                         {
                             RenderSelectQuestion(q, body_width);
                         }
@@ -1930,12 +2064,20 @@ static void AskUserRender(PicoHost *app, void *state)
                                  .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
                                  .sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(control_h)}}})
                 {
-                    RenderButton(CLAY_STRING("AskUserBack"), "Back", g_ui.current > 0, false);
-                    RenderButton(CLAY_STRING("AskUserClarify"), "Ask about this", true, false);
-                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
-                    bool answered = QuestionAnswered(q);
-                    RenderButton(CLAY_STRING("AskUserNext"),
-                                 g_ui.current + 1 == g_ui.question_count ? "Submit" : "Next", answered, true);
+                    if (q->pending_edit)
+                    {
+                        RenderButton(CLAY_STRING("AskUserKeepDraft"), "Keep draft", true, !q->replace_focused);
+                        RenderButton(CLAY_STRING("AskUserReplaceDraft"), "Replace", true, q->replace_focused);
+                    }
+                    else
+                    {
+                        RenderButton(CLAY_STRING("AskUserBack"), "Back", g_ui.current > 0, false);
+                        RenderButton(CLAY_STRING("AskUserClarify"), "Ask about this", true, false);
+                        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+                        bool answered = QuestionAnswered(q);
+                        RenderButton(CLAY_STRING("AskUserNext"),
+                                     g_ui.current + 1 == g_ui.question_count ? "Submit" : "Next", answered, true);
+                    }
                 }
             }
         }
@@ -2030,7 +2172,7 @@ static void EnsureAskCaretVisible(PicoHost *app, const AskQuestion *q)
         app->ui_relayout_requested = true;
 }
 
-static void UpdateQuestionScroll(PicoHost *app, const AskQuestion *q)
+static void ApplyQuestionScrollReset(PicoHost *app)
 {
     Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
     if (!body.found || !body.scrollPosition)
@@ -2048,14 +2190,20 @@ static void UpdateQuestionScroll(PicoHost *app, const AskQuestion *q)
             text.scrollPosition->y = 0;
         }
         g_ui.reset_body_scroll = false;
-        g_ui.reveal_input = false;
     }
+}
+
+static void UpdateQuestionScroll(PicoHost *app, const AskQuestion *q)
+{
+    Clay_ScrollContainerData body = Clay_GetScrollContainerData(CLAY_ID("AskUserBody"));
+    if (!body.found || !body.scrollPosition)
+        return;
     if (!g_ui.reveal_input)
         return;
     Clay_ElementData view = Clay_GetElementData(CLAY_ID("AskUserBody"));
     Clay_ElementData target = Clay_GetElementData(TextFieldOpen(q) ? CLAY_ID("AskUserTextBox") : CLAY_IDI("AskUserOption", q->selected));
     if (!target.found)
-        return; /* Other's editor is created by the next layout. */
+        return; /* The custom editor is created by the next layout. */
     if (TextFieldOpen(q) && target.boundingBox.height > view.boundingBox.height)
     {
         Clay_ElementData text = Clay_GetElementData(CLAY_ID("AskUserTextScroll"));
@@ -2113,6 +2261,23 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     if (g_ui.collapsed)
         return;
     AskQuestion *q = &g_ui.questions[g_ui.current];
+    ApplyQuestionScrollReset(app);
+
+    if (q->pending_edit)
+    {
+        UpdateQuestionScroll(app, q);
+        g_ui.body_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskUserBody"));
+        g_ui.text_overflow = false;
+        bool keep = PointerOver(CLAY_STRING("AskUserKeepDraft"));
+        bool replace = PointerOver(CLAY_STRING("AskUserReplaceDraft"));
+        if (keep || replace)
+            app->hovered_clickable = true;
+        if (pressed && keep)
+            KeepCustomDraft(q);
+        else if (pressed && replace)
+            EditOption(q, q->pending_edit - 1);
+        return;
+    }
 
     bool over_clarify = PointerOver(CLAY_STRING("AskUserClarify"));
     if (over_clarify)
@@ -2156,7 +2321,6 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
         }
     }
 
-    UpdateQuestionScroll(app, q);
     if (TextFieldOpen(q))
     {
         Clay_ElementData scroll_box = Clay_GetElementData(Clay_GetElementId(CLAY_STRING("AskUserTextScroll")));
@@ -2171,6 +2335,9 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
     {
         g_ui.text_overflow = false;
     }
+    /* Scroll the editor to its caret first; body reveal must use that updated
+     * offset when the editor is taller than the visible question body. */
+    UpdateQuestionScroll(app, q);
     g_ui.body_overflow = PicoScrollbar_Overflows(CLAY_STRING("AskUserBody"));
 
     if (TextFieldOpen(q))
@@ -2207,6 +2374,11 @@ static void AskUserAfterLayout(PicoHost *app, const PicoHookEvent *event, void *
         int choice_count = q->option_count + 1;
         for (int i = 0; i < choice_count; i++)
         {
+            if (i < q->option_count && Clay_PointerOver(CLAY_IDI("AskUserOptionEdit", i)))
+            {
+                RequestOptionEdit(q, i);
+                return;
+            }
             if (Clay_PointerOver(CLAY_IDI("AskUserOption", i)))
             {
                 q->selected = i;
@@ -2483,7 +2655,7 @@ static int AskUserWorkspaceInit(PicoWorkspace *workspace, void **state_out)
     pico_add_tool(workspace, "ask_user",
                   "Ask the user one required clarifying question or a multi-step questionnaire. Provide all questions "
                   "in one call. Use kind 'select' with options for a single choice; select questions always include a "
-                  "free-form Other choice do not include it in options. "
+                  "free-form custom-answer choice; do not include it in options. "
                   "Use kind 'text' for a free-form answer. "
                   "Results are returned as an ordered answers array keyed by question id.",
                   kAskUserParams, AskUserRun, NULL, PICO_TOOL_SEQUENTIAL);

@@ -1,4 +1,4 @@
-#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "clarification.h"
@@ -95,6 +95,7 @@ typedef struct InboxVisit
     char session_id[40];
     PicoAgentId live_id;
     int ws_index;
+    bool matches_search;
     bool unseen;
     bool pinned;
     bool missing;
@@ -142,6 +143,10 @@ typedef struct SidebarState
     Texture2D copy_icon;
     Texture2D trash_icon;
     Texture2D back_icon;
+    Texture2D search_icon, search_hover_icon;
+    bool search_open, search_focused, search_claimed_input;
+    bool search_matches_valid;
+    PicoTextField search_field;
     bool edit_open;
     bool delete_confirm;
     bool edit_pointer_latched;
@@ -979,6 +984,8 @@ static void EnsureFolderIcons(SidebarState *s)
         return;
     }
     s->icons_tried = true;
+    s->search_icon = LoadFolderIcon("resources/search.png", COLOR_MUTED);
+    s->search_hover_icon = LoadFolderIcon("resources/search.png", COLOR_TEXT);
     s->copy_icon = LoadFolderIcon("resources/copy.png", COLOR_TEXT);
     s->trash_icon = LoadFolderIcon("resources/trash.png", (Clay_Color){235, 105, 105, 255});
     s->back_icon = LoadFolderIcon("resources/arrow-left.png", COLOR_TEXT);
@@ -995,6 +1002,8 @@ static void UnloadFolderIcons(SidebarState *s)
     {
         return;
     }
+    if (s->search_icon.id != 0) UnloadTexture(s->search_icon);
+    if (s->search_hover_icon.id != 0) UnloadTexture(s->search_hover_icon);
     if (s->copy_icon.id != 0)
         UnloadTexture(s->copy_icon);
     if (s->trash_icon.id != 0)
@@ -1669,6 +1678,25 @@ static Clay_ElementId InboxSessionId(const InboxVisit *row)
     return CLAY_IDI("SidebarInboxSession", Clay_GetElementIdWithIndex(CStr(row->path), session).id);
 }
 
+/* Search the full labels, not the ellipsized display copies. Keep filtering
+ * separate from inbox membership so clearing a query restores the same rows. */
+static char *FoldSidebarSearch(const char *text)
+{
+    utf8proc_uint8_t *folded = NULL;
+    if (utf8proc_map((const utf8proc_uint8_t *)text, 0, &folded,
+                     UTF8PROC_NULLTERM | UTF8PROC_STABLE | UTF8PROC_COMPOSE | UTF8PROC_CASEFOLD) < 0)
+        return NULL;
+    return (char *)folded;
+}
+
+static bool SidebarSearchContains(const char *text, const char *query, const char *folded_query)
+{
+    char *folded = FoldSidebarSearch(text);
+    bool match = folded && folded_query ? strstr(folded, folded_query) != NULL : strcasestr(text, query) != NULL;
+    free(folded);
+    return match;
+}
+
 static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ctx)
 {
     if (!s->inbox_valid)
@@ -1678,6 +1706,20 @@ static int VisitInbox(PicoHost *host, SidebarState *s, InboxVisitFn fn, void *ct
         if (s->inbox_count > 1)
             qsort(s->inbox_rows, (size_t)s->inbox_count, sizeof(*s->inbox_rows), InboxNewestFirst);
         s->inbox_valid = true;
+        s->search_matches_valid = false;
+    }
+    if (!s->search_matches_valid)
+    {
+        const char *query = s->search_open && s->search_field.text ? s->search_field.text : "";
+        char *folded_query = query[0] ? FoldSidebarSearch(query) : NULL;
+        for (int i = 0; i < s->inbox_count; i++)
+        {
+            InboxVisit *row = &s->inbox_rows[i];
+            row->matches_search = !query[0] || SidebarSearchContains(row->title, query, folded_query) ||
+                SidebarSearchContains(s->workspaces[row->ws_index].name, query, folded_query);
+        }
+        free(folded_query);
+        s->search_matches_valid = true;
     }
     for (int i = 0; fn && i < s->inbox_count; i++)
         if (fn(host, s, &s->inbox_rows[i], s->inbox_rows[i].index, ctx)) return i + 1;
@@ -1779,7 +1821,7 @@ static void DrawInboxWorkingWave(Clay_BoundingBox content, void *userData)
 
 static int RenderInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
 {
-    if (row->section != *(InboxSection *)ctx) return 0;
+    if (!row->matches_search || row->section != *(InboxSection *)ctx) return 0;
     Clay_ElementId id = InboxSessionId(row);
     bool selected = SessionIsSelected(host, row->path, row->session_id, row->live_id);
     float width = s->row_width - 2.0f * SIDEBAR_ROW_PAD_X;
@@ -1890,7 +1932,7 @@ typedef struct SidebarInboxAckTargets
 static int AckInboxIdle(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
 {
     (void)index;
-    if (InboxSectionFor(host, row) != INBOX_COMPLETED || InboxPinned(s, row->path, row->session_id)) return 0;
+    if (!row->matches_search || InboxSectionFor(host, row) != INBOX_COMPLETED || InboxPinned(s, row->path, row->session_id)) return 0;
     if (row->live_id)
     {
         PicoAgent *agent = PicoHost_FindAgent(host, row->live_id);
@@ -1935,7 +1977,7 @@ static void AcknowledgeInbox(PicoHost *host, SidebarState *s)
 static int ClickInboxRow(PicoHost *host, SidebarState *s, const InboxVisit *row, int index, void *ctx)
 {
     (void)index;
-    if (!Clay_PointerOver(InboxSessionId(row)))
+    if (!row->matches_search || !Clay_PointerOver(InboxSessionId(row)))
         return 0;
     if (row->live_id)
         SelectAgent(host, row->live_id);
@@ -1956,6 +1998,7 @@ static void RenderInbox(PicoHost *host, SidebarState *s)
     uint64_t signature = 0;
     for (int i = 0; i < s->inbox_count; i++)
     {
+        if (!s->inbox_rows[i].matches_search) continue;
         counts[s->inbox_rows[i].section]++;
         signature = (signature ^ InboxSessionId(&s->inbox_rows[i]).id) * UINT64_C(1099511628211);
         signature = (signature ^ s->inbox_rows[i].section) * UINT64_C(1099511628211);
@@ -2002,7 +2045,7 @@ static bool PointerOverInbox(PicoHost *host, SidebarState *s)
     if (Clay_PointerOver(CLAY_ID("SidebarInboxDone"))) return true;
     VisitInbox(host, s, NULL, NULL);
     for (int i = 0; i < s->inbox_count; i++)
-        if (Clay_PointerOver(InboxSessionId(&s->inbox_rows[i]))) return true;
+        if (s->inbox_rows[i].matches_search && Clay_PointerOver(InboxSessionId(&s->inbox_rows[i]))) return true;
     return false;
 }
 
@@ -2171,7 +2214,7 @@ bool PicoSidebar_RenderProjectPicker(PicoHost *host)
 static void PicoSidebar_Render(PicoHost *host, void *state)
 {
     SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
-    bool add_hover, has_shortcuts = false;
+    bool add_hover, search_hover, has_shortcuts = false;
     if (!s)
     {
         return;
@@ -2188,6 +2231,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
             break;
         }
     add_hover = Clay_PointerOver(Clay_GetElementId(CLAY_STRING("SidebarAddWs")));
+    search_hover = Clay_PointerOver(CLAY_ID("SidebarSearchToggle"));
     CLAY(CLAY_ID("SidebarRoot"),
          {.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = 6,
@@ -2203,25 +2247,58 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                          .sizing = {.width = CLAY_SIZING_PERCENT(1),
                                     .height = CLAY_SIZING_FIXED(fmaxf(Pico_FontPx(PICO_FONT_UI), Pico_FontPx(SIDEBAR_FOLDER_ICON)) + 8)}}})
         {
-            /* An empty strip needs no scroll state: a no-op scroller would
-             * trigger shell reconciliation when the sidebar is unmounted. */
-            CLAY(CLAY_ID("SidebarShortcuts"),
-                 {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = SIDEBAR_ROW_GAP,
-                             .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
-                             .sizing = {.width = CLAY_SIZING_GROW(0),
-                                        .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}},
-                  .clip = {.horizontal = has_shortcuts, .childOffset = Clay_GetScrollOffset()}})
+            CLAY(CLAY_ID("SidebarSearchToggle"),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON)),
+                                        .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))},
+                             .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER}}})
             {
-                for (int i = 0; i < s->workspace_count; i++)
+                if (s->search_open) RenderGlyph("×", search_hover ? COLOR_TEXT : COLOR_MUTED);
+                else if (s->search_icon.id)
                 {
-                    const PicoCatalogWorkspace *ws = &s->workspaces[i];
-                    if (!ws->starred || ws->stashed || ws->missing) continue;
-                    Clay_ElementId shortcut = CLAY_IDI("SidebarShortcut", i);
-                    CLAY(shortcut, {.layout = {.sizing = {
-                                        .width = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON)),
-                                        .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}}})
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON)),
+                                                        .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}},
+                                  .image = {.imageData = search_hover && s->search_hover_icon.id
+                                                            ? &s->search_hover_icon : &s->search_icon}}) {}
+                }
+                else RenderGlyph("⌕", search_hover ? COLOR_TEXT : COLOR_MUTED);
+            }
+            if (s->search_open)
+            {
+                CLAY(CLAY_ID("SidebarSearchInput"),
+                     {.layout = {.padding = {4, 4, 0, 0},
+                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_FIXED(fmaxf(Pico_FontPx(PICO_FONT_UI), Pico_FontPx(SIDEBAR_FOLDER_ICON)))}},
+                      .clip = {.horizontal = true, .vertical = true, .childOffset = {.x = -s->search_field.scroll_x}},
+                      .backgroundColor = COLOR_CODE_BG, .cornerRadius = CLAY_CORNER_RADIUS(4)})
+                {
+                    Clay_TextElementConfig config = PicoTextField_Config(FONT_REGULAR);
+                    if (!s->search_field.length) config.textColor = COLOR_MUTED;
+                    CLAY_TEXT(CStr(s->search_field.length ? s->search_field.text : "Search sessions…"), CLAY_TEXT_CONFIG(config));
+                }
+            }
+            else
+            {
+                /* An empty strip needs no scroll state: a no-op scroller would
+                 * trigger shell reconciliation when the sidebar is unmounted. */
+                CLAY(CLAY_ID("SidebarShortcuts"),
+                     {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = SIDEBAR_ROW_GAP,
+                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .sizing = {.width = CLAY_SIZING_GROW(0),
+                                            .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}},
+                      .clip = {.horizontal = has_shortcuts, .childOffset = Clay_GetScrollOffset()}})
+                {
+                    for (int i = 0; i < s->workspace_count; i++)
                     {
-                        RenderProjectBadge(s, ws);
+                        const PicoCatalogWorkspace *ws = &s->workspaces[i];
+                        if (!ws->starred || ws->stashed || ws->missing) continue;
+                        Clay_ElementId shortcut = CLAY_IDI("SidebarShortcut", i);
+                        CLAY(shortcut, {.layout = {.sizing = {
+                                            .width = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON)),
+                                            .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}}})
+                        {
+                            RenderProjectBadge(s, ws);
+                        }
                     }
                 }
             }
@@ -2699,7 +2776,7 @@ static void RenderFolderModal(PicoHost *host, void *state)
 
 static bool SidebarPointerOverClickable(PicoHost *host, SidebarState *s)
 {
-    if (Clay_PointerOver(CLAY_ID("SidebarAddWs")) || PointerOverInbox(host, s)) return true;
+    if (Clay_PointerOver(CLAY_ID("SidebarSearchToggle")) || Clay_PointerOver(CLAY_ID("SidebarAddWs")) || PointerOverInbox(host, s)) return true;
     for (int i = 0; i < s->workspace_count; i++)
         if (Clay_PointerOver(CLAY_IDI("SidebarShortcut", i))) return true;
     if (!PicoHost_SelectedAgent(host))
@@ -2747,6 +2824,7 @@ static bool VisitVisibleSessions(PicoHost *host, SidebarState *s, bool pointer_o
     for (int i = 0; i < s->inbox_count; i++)
     {
         const InboxVisit *row = &s->inbox_rows[i];
+        if (!row->matches_search) continue;
         Clay_ElementId id = InboxSessionId(row);
         if (pointer_only ? !Clay_PointerOver(id) :
             (!want_id || strcmp(row->session_id, want_id) ||
@@ -2973,6 +3051,86 @@ static void SessionMenuInput(PicoHost *host, SidebarState *s)
     }
 }
 
+bool PicoSidebar_BlocksInput(const PicoHost *host)
+{
+    SidebarState *s = host ? PicoPlugins_HostState((PicoHost *)host, "sidebar") : NULL;
+    return s && (s->search_claimed_input || (s->search_open && s->search_focused));
+}
+
+/* Run before composer/questionnaire input and agent Escape handling. Like chat
+ * find, search is a non-modal field and yields keyboard focus on outside clicks. */
+void PicoSidebar_HandleSearchInput(PicoHost *host)
+{
+    SidebarState *s = host ? PicoPlugins_HostState(host, "sidebar") : NULL;
+    if (!s) return;
+    s->search_claimed_input = false;
+    if (!host->view_count[PICO_SLOT_SIDEBAR])
+    {
+        s->search_focused = s->search_field.dragging = false;
+        return;
+    }
+    if (PicoUi_ModalOpen(host) || PicoHost_SidebarResizeBlocksInput(host))
+    {
+        s->search_field.dragging = false;
+        return;
+    }
+    bool toggle = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && Clay_PointerOver(CLAY_ID("SidebarSearchToggle"));
+    if (toggle || (s->search_open && !host->find.focused && IsKeyPressed(KEY_ESCAPE)))
+    {
+        s->search_open = !s->search_open;
+        s->search_focused = s->search_open;
+        s->search_claimed_input = true;
+        if (!s->search_field.bound) PicoTextField_BindGrowable(&s->search_field);
+        PicoTextField_SetText(&s->search_field, "");
+        s->search_field.dragging = false;
+        s->search_matches_valid = false;
+        PicoChatFind_Blur(host);
+        host->ui_relayout_requested = true;
+        pico_host_request_redraw(host);
+        return;
+    }
+    if (!s->search_open) return;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        s->search_focused = Clay_PointerOver(CLAY_ID("SidebarSearchInput"));
+        if (s->search_focused) PicoChatFind_Blur(host);
+    }
+    /* Ctrl+F retains its global chat-find meaning even while editing here. */
+    if (s->search_focused && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) &&
+        Pico_ShortcutPressed('f') && PicoHost_TranscriptAgent(host))
+    {
+        s->search_focused = s->search_field.dragging = false;
+        return;
+    }
+    PicoTextField_HandlePointer(&s->search_field, CLAY_ID("SidebarSearchInput"), 4, FONT_REGULAR);
+    if (!s->search_focused) return;
+    s->search_claimed_input = true;
+    unsigned revision = s->search_field.revision;
+    if (PicoTextField_HandleKeys(&s->search_field)) pico_host_request_redraw(host);
+    if (revision != s->search_field.revision)
+    {
+        s->search_matches_valid = false;
+        host->ui_relayout_requested = true;
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("SidebarScroll"));
+        if (scroll.found && scroll.scrollPosition) scroll.scrollPosition->y = 0;
+    }
+    Clay_ElementData input = Clay_GetElementData(CLAY_ID("SidebarSearchInput"));
+    if (input.found) PicoTextField_KeepCaretVisible(&s->search_field, input.boundingBox.width - 8, FONT_REGULAR);
+}
+
+static void SidebarDrawSearch(PicoHost *host, const PicoHookEvent *event, void *state)
+{
+    SidebarState *s = state;
+    (void)event;
+    if (!s || !s->search_open || !s->search_focused || PicoUi_ModalOpen(host) ||
+        !host->view_count[PICO_SLOT_SIDEBAR]) return;
+    Clay_ElementData input = Clay_GetElementData(CLAY_ID("SidebarSearchInput"));
+    if (!input.found) return;
+    float pad_y = fmaxf(0, (input.boundingBox.height - Pico_FontPx(PICO_FONT_UI)) / 2);
+    PicoTextField_Draw(&s->search_field, CLAY_ID("SidebarSearchInput"), 4, pad_y, FONT_REGULAR);
+    pico_host_request_redraw_after(host, PicoTextField_NextBlink(&s->search_field));
+}
+
 static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void *state)
 {
     SidebarState *s = state ? (SidebarState *)state : (SidebarState *)PicoPlugins_HostState(host, "sidebar");
@@ -3020,6 +3178,7 @@ static void SidebarAfterLayout(PicoHost *host, const PicoHookEvent *event, void 
         return;
     }
 
+    if (s->search_open && Clay_PointerOver(CLAY_ID("SidebarSearchInput"))) host->hovered_text = true;
     if (s->is_dragging)
     {
         host->hovered_drag = true;
@@ -3299,6 +3458,7 @@ static int SidebarInit(PicoHost *host, void **state_out)
     pico_host_add_view(host, PICO_SLOT_OVERLAY, 43, RenderSessionMenu);
     pico_host_add_hook(host, PICO_HOOK_AFTER_LAYOUT, SidebarAfterLayout);
     pico_host_add_hook(host, PICO_HOOK_AFTER_RENDER, SidebarDrawEditOverlay);
+    pico_host_add_hook(host, PICO_HOOK_AFTER_RENDER, SidebarDrawSearch);
     return 0;
 }
 
@@ -3316,6 +3476,7 @@ static void SidebarShutdown(PicoHost *host, void *state)
     {
         host->ui_drag_active = false;
     }
+    PicoTextField_Free(&s->search_field);
     UnloadFolderIcons(s);
     if (s->scan_worker)
     {

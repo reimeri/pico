@@ -17,6 +17,10 @@
 #include "subagent_config.h"
 #include "usage.h"
 #include "host_internal.h"
+#include "builtins/sidebar.h"
+
+/* This isolated harness has no sidebar; full-shell tests cover search focus. */
+bool PicoSidebar_BlocksInput(const PicoHost *host) { (void)host; return false; }
 
 #include "clarification.h"
 void PicoComplete_Close(void) {}

@@ -134,6 +134,8 @@ void DrawRectangle(int x, int y, int w, int h, Color c)
 }
 
 bool PicoChatFind_BlocksInput(const PicoHost *app) { (void)app; return find_focused; }
+/* This standalone fixture has no sidebar; focus integration is tested by host/workspace tests. */
+bool PicoSidebar_BlocksInput(const PicoHost *app) { (void)app; return false; }
 bool PicoChatSel_HasSelection(const PicoHost *app) { (void)app; return false; }
 void PicoChatSel_Copy(PicoHost *app) { (void)app; }
 float PicoHost_MainColumnWidth(const PicoHost *host) { (void)host; return Clay_GetLayoutDimensions().width; }

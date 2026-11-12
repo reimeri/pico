@@ -4840,7 +4840,7 @@ bool PicoHost_AgentEscapeEnabled(const PicoHost *host, bool had_warn,
                                  bool had_complete, bool had_modal)
 {
     return host && !had_warn && !had_complete && !had_modal &&
-           !PicoChatFind_BlocksInput(host) && !host->ui_drag_active;
+           !PicoChatFind_BlocksInput(host) && !PicoSidebar_BlocksInput(host) && !host->ui_drag_active;
 }
 
 void PicoHost_Frame(PicoHost *app)
@@ -4943,7 +4943,9 @@ void PicoHost_Frame(PicoHost *app)
      * Remember ownership before callbacks so that same key cannot cancel a turn. */
     bool had_modal = pico_ui_modal_claimed(app);
     PicoPlugins_Poll(app);
-    if (!PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app)) PicoChatFind_HandleInput(app);
+    if (!PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app))
+        PicoSidebar_HandleSearchInput(app);
+    if (!PicoHost_SidebarResizeBlocksInput(app) && !PicoBrowser_BlocksKeyboard(app) && !PicoSettingsUi_BlocksKeyboard(app) && !PicoDiffUi_BlocksKeyboard(app) && !PicoSidebar_BlocksInput(app)) PicoChatFind_HandleInput(app);
     /* Builtin frame callbacks update scrollbar drags. Preserve that ownership
      * until Clay's scroll update so it cannot also drag the content. */
     PicoScrollbar_BeginFrame();

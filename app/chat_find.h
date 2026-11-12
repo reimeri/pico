@@ -27,6 +27,8 @@ void PicoChatFind_Reset(struct PicoHost *app);
 void PicoChatFind_Sync(struct PicoHost *app);
 void PicoChatFind_Open(struct PicoHost *app);
 void PicoChatFind_Close(struct PicoHost *app);
+/* Yield editing focus without closing or clearing the search. */
+void PicoChatFind_Blur(struct PicoHost *app);
 void PicoChatFind_SetQuery(struct PicoHost *app, const char *query);
 void PicoChatFind_Navigate(struct PicoHost *app, int direction);
 void PicoChatFind_HandleInput(struct PicoHost *app);

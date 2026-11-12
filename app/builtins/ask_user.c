@@ -13,6 +13,7 @@
 #include "host_internal.h"
 #include "agent.h"
 #include "clarification.h"
+#include "builtins/sidebar.h"
 #include "chat_sel.h"
 
 #include "clay/clay.h"
@@ -1628,7 +1629,7 @@ static void AskUserOnFrame(PicoHost *app, void *state, float dt)
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         !Clay_PointerOver(CLAY_ID("Composer")))
         g_ui.focused = false;
-    if (PicoChatFind_BlocksInput(app))
+    if ((PicoChatFind_BlocksInput(app) || PicoSidebar_BlocksInput(app)))
     {
         g_ui.focused = false;
         return;
@@ -2415,7 +2416,7 @@ static void AskUserDrawOverlay(PicoHost *app, const PicoHookEvent *event, void *
     }
     AskQuestion *q = &g_ui.questions[g_ui.current];
     if (!TextFieldOpen(q) || g_ui.collapsed || !g_ui.focused || PicoUi_ModalOpen(app) ||
-        PicoChatFind_BlocksInput(app))
+        (PicoChatFind_BlocksInput(app) || PicoSidebar_BlocksInput(app)))
     {
         return;
     }

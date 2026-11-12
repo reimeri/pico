@@ -101,6 +101,14 @@ void PicoChatFind_Open(PicoHost *app)
     }
 }
 
+void PicoChatFind_Blur(PicoHost *app)
+{
+    PicoChatFind *f = &app->find;
+    f->focused = f->claimed_input = false;
+    f->field.dragging = false;
+    f->pressed_button = 0;
+}
+
 void PicoChatFind_Close(PicoHost *app)
 {
     PicoChatFind *f = &app->find;

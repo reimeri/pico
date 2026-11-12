@@ -19387,10 +19387,12 @@ static int RunInboxShellCase(bool with_sidebar)
 {
     InteractionFixture f = {0};
     bool good = false;
+    int checked_frame = -1;
+    const char *phase = "fixture";
     ChatStabilitySnapshot expected, current;
     Clay_BoundingBox sidebar_root = {0};
     Clay_Color project_color = {0};
-    Clay_BoundingBox shortcut_header = {0}, shortcut_strip = {0};
+    Clay_BoundingBox shortcut_header = {0}, shortcut_strip = {0}, search_input = {0}, sidebar_scroll = {0};
     char favorites[] = "/tmp/pico-shortcuts-shell-XXXXXX";
     if (!InteractionFixtureInit(&f)) goto done;
     if (!mkdtemp(favorites)) goto done;
@@ -19415,20 +19417,38 @@ static int RunInboxShellCase(bool with_sidebar)
     }
     for (int frame = 0; frame < 240; frame++)
     {
+        checked_frame = frame;
+        phase = "layout";
         /* Exercise full, empty and overflowing Inbox sections, including moving rows,
          * while the independent chat remains pinned to its content bottom. */
         for (int i = 0; i < 6; i++)
         {
             PicoAgent *agent = PicoHost_FindAgent(f.host, ids[i]);
             if (!agent) goto done;
-            agent->inbox_pending = frame < 120 || frame >= 160;
+            agent->inbox_pending = frame < 140 || frame >= 160;
             /* Age width/unit changes must not feed residue into bottom-follow. */
             const int ages[] = {9, 59, 60, 3599, 3600, 3 * 86400};
             agent->last_user_action = (int64_t)time(NULL) - ages[(i + frame / 20) % 6];
             agent->state = frame < 80 ? PICO_AGENT_IDLE :
                            frame < 120 ? (i % 2 ? PICO_AGENT_ERROR : PICO_AGENT_LLM_WAIT) : PICO_AGENT_IDLE;
         }
+        if (with_sidebar && (frame == 80 || frame == 160))
+        {
+            Clay_ElementData button = Clay_GetElementData(CLAY_ID("SidebarSearchToggle"));
+            g_find_pointer = (Vector2){button.boundingBox.x + button.boundingBox.width / 2,
+                                       button.boundingBox.y + button.boundingBox.height / 2};
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+            g_find_press = true;
+            PicoSidebar_HandleSearchInput(f.host);
+            g_find_press = false;
+        }
+        if (with_sidebar && frame == 120)
+        {
+            g_find_character = 'z'; /* zero results must not resize the shell */
+            PicoSidebar_HandleSearchInput(f.host);
+        }
         LayoutChatStabilityFrame(f.host, (Clay_Dimensions){1100, 360});
+        phase = "chat overflow";
         Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
         if (!scroll.found || scroll.contentDimensions.height <= scroll.scrollContainerDimensions.height) goto done;
         /* Verify production bottom-follow without repairing the scroll offset. */
@@ -19445,12 +19465,14 @@ static int RunInboxShellCase(bool with_sidebar)
         }
         /* Removing the status gutter must remain stable across repeated
          * bottom-follow passes, including section transitions. */
+        phase = "row bounds";
         if (with_sidebar && frame > 20)
         {
             Clay_ElementData row = Clay_GetElementData(CLAY_IDI("SidebarInbox", 0));
             if (row.found && (row.boundingBox.x < sidebar_root.x ||
                 row.boundingBox.x + row.boundingBox.width > sidebar_root.x + sidebar_root.width + 0.1f)) goto done;
         }
+        phase = "chat snapshot";
         if (!CaptureChatStabilitySnapshot(with_sidebar, &current)) goto done;
         if (with_sidebar && frame == 40)
         {
@@ -19463,6 +19485,7 @@ static int RunInboxShellCase(bool with_sidebar)
             sidebar_root = Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox;
             shortcut_header = Clay_GetElementData(CLAY_ID("SidebarInboxHeader")).boundingBox;
             shortcut_strip = Clay_GetElementData(CLAY_ID("SidebarShortcuts")).boundingBox;
+            sidebar_scroll = Clay_GetElementData(CLAY_ID("SidebarScroll")).boundingBox;
             if (with_sidebar)
             {
                 Clay_ScrollContainerData shortcuts = Clay_GetScrollContainerData(CLAY_ID("SidebarShortcuts"));
@@ -19472,8 +19495,18 @@ static int RunInboxShellCase(bool with_sidebar)
         else if (frame > 20 && (!ChatBottomFollowGeometryStable(&expected, &current, with_sidebar) ||
             (with_sidebar && (!ShellBoxStable(sidebar_root, Clay_GetElementData(CLAY_ID("SidebarRoot")).boundingBox) ||
              !ShellBoxStable(shortcut_header, Clay_GetElementData(CLAY_ID("SidebarInboxHeader")).boundingBox) ||
-             !ShellBoxStable(shortcut_strip, Clay_GetElementData(CLAY_ID("SidebarShortcuts")).boundingBox)))))
+             !ShellBoxStable(sidebar_scroll, Clay_GetElementData(CLAY_ID("SidebarScroll")).boundingBox) ||
+             ((frame < 80 || frame >= 160) && !ShellBoxStable(shortcut_strip, Clay_GetElementData(CLAY_ID("SidebarShortcuts")).boundingBox))))))
         {
+            phase = "shell bounds";
+            goto done;
+        }
+        phase = "search input bounds";
+        if (with_sidebar && (frame == 100 || frame == 120)) search_input = Clay_GetElementData(CLAY_ID("SidebarSearchInput")).boundingBox;
+        if (with_sidebar && frame > 100 && frame < 160 &&
+            !ShellBoxStable(search_input, Clay_GetElementData(CLAY_ID("SidebarSearchInput")).boundingBox)) {
+            Clay_BoundingBox now = Clay_GetElementData(CLAY_ID("SidebarSearchInput")).boundingBox;
+            fprintf(stderr, "search bounds expected={%g,%g,%g,%g} now={%g,%g,%g,%g}\n", search_input.x, search_input.y, search_input.width, search_input.height, now.x, now.y, now.width, now.height);
             goto done;
         }
     }
@@ -19487,6 +19520,7 @@ done:
         }
     InteractionFixtureFree(&f);
     RmRf(favorites);
+    if (!good) fprintf(stderr, "inbox shell: sidebar=%d frame=%d phase=%s\n", with_sidebar, checked_frame, phase);
     if (!good) Fail("real sidebar and moving Inbox rows must not perturb bottom-follow shell geometry");
     return !good;
 }
@@ -19583,6 +19617,258 @@ static Clay_ElementId TestInboxIdentity(const char *path, const char *id)
     Clay_String workspace = {.chars = path, .length = (int)strlen(path)};
     Clay_String session = {.chars = id, .length = (int)strlen(id)};
     return CLAY_IDI("SidebarInboxSession", Clay_GetElementIdWithIndex(workspace, Clay_GetElementId(session).id).id);
+}
+
+static int TestSidebarSearchStyle(void)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    if (!InteractionFixtureInit(&f)) goto done;
+    for (int open = 0; open < 2; open++)
+    {
+        Clay_Color idle_ink = {0};
+        for (int hover = 0; hover < 2; hover++)
+        {
+            Clay_ElementData button = Clay_GetElementData(CLAY_ID("SidebarSearchToggle"));
+            if (!button.found) goto done;
+            g_find_pointer = hover ? (Vector2){button.boundingBox.x + button.boundingBox.width / 2,
+                                               button.boundingBox.y + button.boundingBox.height / 2}
+                                   : (Vector2){0};
+            Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+            Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+            bool rounded_input = false;
+            for (int i = 0; i < commands.length; i++)
+            {
+                Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+                if (command->commandType != CLAY_RENDER_COMMAND_TYPE_RECTANGLE) continue;
+                if (command->id == CLAY_ID("SidebarSearchToggle").id &&
+                    command->renderData.rectangle.backgroundColor.a > 0) goto done;
+                if (command->id == CLAY_ID("SidebarSearchInput").id)
+                {
+                    Clay_CornerRadius corners = command->renderData.rectangle.cornerRadius;
+                    rounded_input = corners.topLeft > 0 && corners.topRight > 0 &&
+                                    corners.bottomLeft > 0 && corners.bottomRight > 0 &&
+                                    corners.topLeft < command->boundingBox.height / 2;
+                }
+            }
+            if (open)
+            {
+                Clay_RenderCommand *close = FindCardText(&commands, "×");
+                if (!close || !rounded_input) goto done;
+                Clay_Color ink = close->renderData.text.textColor;
+                if (!hover) idle_ink = ink;
+                else if (ink.r + ink.g + ink.b <= idle_ink.r + idle_ink.g + idle_ink.b) goto done;
+            }
+        }
+        if (!open && !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSearchToggle")))) goto done;
+    }
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) Fail("search controls must stay transparent, close ink must brighten on hover, and search input must have subtly rounded corners");
+    return !good;
+}
+
+static int TestSidebarSearch(void)
+{
+    InteractionFixture f = {0};
+    char other[] = "/tmp/pico-sidebar-search-XXXXXX";
+    bool good = false;
+    const char *phase = "fixture";
+    PicoAgentId agents[4] = {0};
+    Clay_ElementId rows[4];
+    const char *titles[] = {"Alpha Straße", "Beta Work", "Gamma Check", "Alpha archived"};
+    if (!InteractionFixtureInit(&f) || !mkdtemp(other)) goto done;
+    PicoWorkspaceId second = 0;
+    if (pico_workspace_open(f.host, other, &second) != PICO_OK ||
+        PicoCatalog_Ensure(other) || PicoCatalog_SetProjectName(other, "Rocket") ||
+        PicoCatalog_SetProjectStarred(f.dir, true)) goto done;
+    agents[0] = f.agent;
+    PicoSession_Start(f.host, PicoHost_FindAgent(f.host, f.agent), PICO_SESSION_NEW, NULL);
+    for (int i = 0; i < 4; i++)
+    {
+        if (i)
+        {
+            PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
+            if (pico_main_agent_create(f.host, i == 2 ? second : f.workspace, &options, &agents[i]) != PICO_OK) goto done;
+        }
+        PicoAgent *agent = PicoHost_FindAgent(f.host, agents[i]);
+        if (PicoSession_LogUser(f.host, agent, titles[i], titles[i], NULL) != PICO_SESSION_WRITE_OK ||
+            PicoSession_LogTitle(f.host, agent, titles[i]) != PICO_SESSION_WRITE_OK ||
+            PicoSession_LogInboxPending(f.host, agent, i != 3) != PICO_SESSION_WRITE_OK ||
+            !DrainSessionForAssertion(f.host, agent)) goto done;
+        rows[i] = TestInboxIdentity(PicoAgent_WorkspacePath(agent), agent->session_id);
+    }
+    /* Search must include both offline rows and live drafts without a catalog session. */
+    if (pico_agent_close(f.host, agents[2]) != PICO_OK) goto done;
+    PicoAgentId draft = 0;
+    PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NONE};
+    if (pico_main_agent_create(f.host, second, &options, &draft) != PICO_OK) goto done;
+    PicoHost_FindAgent(f.host, draft)->inbox_pending = true;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    Clay_ElementData toggle = Clay_GetElementData(CLAY_ID("SidebarSearchToggle"));
+    Clay_ElementData badge = Clay_GetElementData(CLAY_IDI("SidebarShortcut", 0));
+    if (!badge.found) badge = Clay_GetElementData(CLAY_IDI("SidebarShortcut", 1));
+    phase = "badge-sized leading search button";
+    if (!toggle.found || !badge.found || toggle.boundingBox.x >= badge.boundingBox.x ||
+        toggle.boundingBox.width != badge.boundingBox.width || toggle.boundingBox.height != badge.boundingBox.height) goto done;
+    PicoComposer_SetText(f.host, "keep draft");
+    phase = "open and autofocus";
+    if (!SidebarFrameClick(f.host, toggle) || !Clay_GetElementData(CLAY_ID("SidebarSearchInput")).found ||
+        Clay_GetElementData(CLAY_ID("SidebarShortcuts")).found || !Clay_GetElementData(CLAY_ID("SidebarAddWs")).found) goto done;
+    g_find_character = 'a';
+    PicoHost_Frame(f.host);
+    if (!PicoSidebar_BlocksInput(f.host) || strcmp(f.host->composer.text, "keep draft")) goto done;
+    phase = "Ctrl+F transfers focus to chat find; clicking search takes it back";
+    g_find_ctrl = true; g_find_key = KEY_F;
+    PicoSidebar_HandleSearchInput(f.host);
+    if (!PicoSidebar_BlocksInput(f.host)) PicoChatFind_HandleInput(f.host);
+    g_find_ctrl = false; g_find_key = -1;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    if (!f.host->find.open || !f.host->find.focused || PicoSidebar_BlocksInput(f.host) ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSearchInput"))) ||
+        f.host->find.focused || PicoChatFind_BlocksInput(f.host)) goto done;
+    phase = "case-insensitive title substring; no archived history";
+    if (!InteractionReplaceText(f.host, CLAY_ID("SidebarSearchInput"), "pHa")) goto done;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!Clay_GetElementData(rows[0]).found || Clay_GetElementData(rows[1]).found ||
+        Clay_GetElementData(rows[2]).found || Clay_GetElementData(rows[3]).found ||
+        !FindCardText(&commands, "Completed · 1")) goto done;
+    phase = "Unicode case-insensitive matching";
+    if (!InteractionReplaceText(f.host, CLAY_ID("SidebarSearchInput"), "STRASSE") ||
+        !Clay_GetElementData(rows[0]).found || Clay_GetElementData(rows[1]).found) goto done;
+    phase = "workspace substring includes offline sessions and live drafts";
+    if (!InteractionReplaceText(f.host, CLAY_ID("SidebarSearchInput"), "oCk")) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (Clay_GetElementData(rows[0]).found || Clay_GetElementData(rows[1]).found ||
+        !Clay_GetElementData(rows[2]).found || !FindCardText(&commands, "New session") ||
+        !FindCardText(&commands, "Completed · 2")) goto done;
+    phase = "matching offline row opens normally";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(rows[2]))) goto done;
+    PICO_TEST_WAIT(PicoSession_LoadPending(f.host)) pico_host_pump(f.host);
+    if (!PicoHost_SelectedAgent(f.host) ||
+        strcmp(PicoAgent_WorkspacePath(PicoHost_SelectedAgent(f.host)), other)) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    phase = "typing outside search goes to composer, not query";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("Composer")))) goto done;
+    g_find_character = '!';
+    PicoHost_Frame(f.host);
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (PicoSidebar_BlocksInput(f.host) || !FindCardText(&commands, "oCk")) goto done;
+    phase = "no matching rows";
+    if (!InteractionReplaceText(f.host, CLAY_ID("SidebarSearchInput"), "not-a-session")) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (Clay_GetElementData(rows[0]).found || Clay_GetElementData(rows[1]).found ||
+        Clay_GetElementData(rows[2]).found || !FindCardText(&commands, "Completed · 0")) goto done;
+    phase = "Escape clears search without cancelling a turn";
+    PicoAgent *active = PicoHost_SelectedAgent(f.host);
+    active->state = PICO_AGENT_LLM_WAIT;
+    g_find_key = KEY_ESCAPE;
+    PicoHost_Frame(f.host);
+    g_find_key = -1;
+    bool cancelled = PicoAgent_CancelRequested(active);
+    active->state = PICO_AGENT_IDLE;
+    if (cancelled || Clay_GetElementData(CLAY_ID("SidebarSearchInput")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarShortcuts")).found) goto done;
+    phase = "reopening starts empty; checkmark only acknowledges matches";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSearchToggle")))) goto done;
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindCardText(&commands, "Search sessions…") || !Clay_GetElementData(rows[0]).found ||
+        !Clay_GetElementData(rows[1]).found ||
+        !InteractionReplaceText(f.host, CLAY_ID("SidebarSearchInput"), "alpha") ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarInboxDone"))) ||
+        PicoHost_FindAgent(f.host, agents[0])->inbox_pending ||
+        !PicoHost_FindAgent(f.host, agents[1])->inbox_pending) goto done;
+    phase = "close button restores badges and hidden rows";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSearchToggle"))) ||
+        Clay_GetElementData(CLAY_ID("SidebarSearchInput")).found ||
+        !Clay_GetElementData(CLAY_ID("SidebarShortcuts")).found || !Clay_GetElementData(rows[1]).found) goto done;
+    phase = "filtered offline acknowledgement leaves other offline sessions pending";
+    PicoAgentId reopened = pico_agent_active(f.host);
+    if (pico_agent_close(f.host, reopened) != PICO_OK || pico_agent_close(f.host, agents[1]) != PICO_OK ||
+        !pico_agent_select(f.host, agents[0])) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSearchToggle"))) ||
+        !InteractionReplaceText(f.host, CLAY_ID("SidebarSearchInput"), "beta") ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarInboxDone"))) ||
+        !PicoCatalog_DrainPersistBefore(f.host, NULL)) goto done;
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1) ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSearchToggle")))) goto done;
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    if (Clay_GetElementData(rows[1]).found || !Clay_GetElementData(rows[2]).found) goto done;
+    good = true;
+done:
+    if (!good) fprintf(stderr, "sidebar search: %s\n", phase);
+    InteractionFixtureFree(&f);
+    RmRf(other);
+    if (!good) Fail("sidebar search must filter visible sessions by title/workspace and own only its focused input");
+    return !good;
+}
+
+static int TestSidebarSearchQuestionnaire(void)
+{
+    InteractionFixture f = {0};
+    MatrixProviderState state;
+    MatrixStateInit(&state, MATRIX_PROVIDER_ASK);
+    state.ask_request = "{\"type\":\"questionnaire\",\"ui\":\"custom\",\"questions\":["
+        "{\"id\":\"answer\",\"question\":\"What should we do?\",\"kind\":\"text\"}]}";
+    PicoToolAsk ask = {0}, pending = {0};
+    PicoAgent *agent = NULL;
+    bool good = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f) ||
+        !ConfigureMatrixWorkspace(f.host, PicoHost_FindWorkspace(f.host, f.workspace), &state, true)) goto done;
+    agent = PicoHost_FindAgent(f.host, f.agent);
+    if (!PicoSettings_SetModel(agent, "matrix-model")) goto done;
+    PicoAgent_StartTurn(f.host, agent, "ask");
+    PICO_TEST_WAIT(!ask.id)
+    {
+        pico_host_pump(f.host);
+        pico_tool_pending_ask(f.host, &ask);
+    }
+    (void)PicoHost_LayoutShell(f.host, 800, 0);
+    phase = "question text focus";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("AskUserTextBox")))) goto done;
+    g_find_character = 'q';
+    PicoHost_Frame(f.host);
+    phase = "search focus";
+    if (!SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("SidebarSearchToggle")))) goto done;
+    g_find_character = 'z';
+    PicoHost_Frame(f.host);
+    g_find_key = KEY_ENTER;
+    PicoHost_Frame(f.host);
+    g_find_key = -1;
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    phase = "search typing and Enter";
+    if (!FindCardText(&commands, "q") || !FindCardText(&commands, "z") ||
+        !pico_tool_pending_ask(f.host, &pending)) goto done;
+    g_find_key = KEY_ESCAPE;
+    PicoHost_Frame(f.host);
+    g_find_key = -1;
+    phase = "Escape";
+    if (PicoAgent_CancelRequested(agent) || !pico_tool_pending_ask(f.host, &pending) ||
+        Clay_GetElementData(CLAY_ID("SidebarSearchInput")).found ||
+        !SidebarFrameClick(f.host, Clay_GetElementData(CLAY_ID("AskUserTextBox")))) goto done;
+    g_find_key = KEY_END;
+    PicoHost_Frame(f.host);
+    g_find_key = -1;
+    g_find_character = 'r';
+    PicoHost_Frame(f.host);
+    commands = PicoHost_LayoutShell(f.host, 800, 0);
+    phase = "question typing after search";
+    if (!FindCardText(&commands, "qr")) goto done;
+    good = true;
+done:
+    if (f.host && ask.id) pico_tool_answer(f.host, ask.id, "{\"answer\":\"done\"}");
+    if (agent) (void)PumpUntilIdle(f.host, agent);
+    InteractionFixtureFree(&f);
+    MatrixStateDestroy(&state);
+    if (!good) fprintf(stderr, "sidebar search questionnaire: %s\n", phase);
+    if (!good) Fail("sidebar search must not edit, submit or cancel a waiting questionnaire, and must yield focus back to it");
+    return !good;
 }
 
 static int TestSidebarInboxPins(void)
@@ -22452,6 +22738,8 @@ int main(int argc, char **argv)
                PICO_TEST_RUN(TestSubagentSettingsPresentation()) || PICO_TEST_RUN(TestSubagentSettingsWorkflow(false)) ||
                PICO_TEST_RUN(TestSubagentSettingsWorkflow(true)) || PICO_TEST_RUN(TestSubagentSettingsDiscardAndRepair()) ||
                PICO_TEST_RUN(TestSubagentProfileRefreshWaitsForWork()) || PICO_TEST_RUN(TestSubagentSettingsDraftSurvivesReload());
+    if (argc == 2 && strcmp(argv[1], "--sidebar-search") == 0)
+        return PICO_TEST_RUN(TestSidebarSearchStyle()) || PICO_TEST_RUN(TestSidebarSearch()) || PICO_TEST_RUN(TestSidebarSearchQuestionnaire());
     if (argc == 2 && strcmp(argv[1], "--sidebar-pins") == 0)
         return PICO_TEST_RUN(TestSidebarInboxPins());
     if (argc == 2 && strcmp(argv[1], "--sidebar-age") == 0)
@@ -22472,7 +22760,7 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--sidebar-working") == 0)
         return PICO_TEST_RUN(RunWorkingIndicatorShellCase(false)) || PICO_TEST_RUN(RunWorkingIndicatorShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--sidebar-inbox") == 0)
-        return PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestSidebarProjectPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
+        return PICO_TEST_RUN(TestSidebarSearchStyle()) || PICO_TEST_RUN(TestSidebarSearch()) || PICO_TEST_RUN(TestSidebarSearchQuestionnaire()) || PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestSidebarProjectPicker()) || PICO_TEST_RUN(TestSidebarInbox()) ||
                PICO_TEST_RUN(TestSidebarInboxAsk()) || PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) ||
                PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) || PICO_TEST_RUN(RunInboxShellCase(false)) ||
                PICO_TEST_RUN(RunInboxShellCase(true)) ||
@@ -22549,7 +22837,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestRefinementAfterLayoutMutation())) return 1;
     if (PICO_TEST_RUN(TestMountedTraceRowsRemainInteractive())) return 1;
     if (PICO_TEST_RUN(TestSidebarStoppedInInbox(false)) || PICO_TEST_RUN(TestSidebarStoppedInInbox(true)) ||
-        PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestSidebarProjectPicker()) ||
+        PICO_TEST_RUN(TestSidebarSearchStyle()) || PICO_TEST_RUN(TestSidebarSearch()) || PICO_TEST_RUN(TestSidebarSearchQuestionnaire()) || PICO_TEST_RUN(TestSidebarInboxHeadingLifetime()) || PICO_TEST_RUN(TestSidebarProjectBadges()) || PICO_TEST_RUN(TestProjectPickerControls(true)) || PICO_TEST_RUN(TestProjectPickerControls(false)) || PICO_TEST_RUN(TestSidebarShortcutStrip()) || PICO_TEST_RUN(TestSidebarProjectPicker()) ||
         PICO_TEST_RUN(TestSidebarInboxPins()) || PICO_TEST_RUN(TestSidebarInboxAge()) || PICO_TEST_RUN(TestSidebarInboxKeepsSessionOrder()) || PICO_TEST_RUN(TestSidebarInboxWorkingOrder()) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_MAIN)) ||
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_ANSWER_DELEGATED)) ||

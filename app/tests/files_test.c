@@ -6,6 +6,10 @@
 #include "sanitizer_detect.h"
 #include "pico/app.h"
 #include "host_internal.h"
+#include "builtins/sidebar.h"
+
+/* This isolated harness has no sidebar; full-shell tests cover search focus. */
+bool PicoSidebar_BlocksInput(const PicoHost *host) { (void)host; return false; }
 #include "md_view_internal.h"
 #include "settings_ui.h"
 

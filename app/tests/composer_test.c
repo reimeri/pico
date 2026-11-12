@@ -3,6 +3,10 @@
 #include "session_ref.h"
 #include "json.h"
 #include "host_internal.h"
+#include "builtins/sidebar.h"
+
+/* This isolated harness has no sidebar; full-shell tests cover search focus. */
+bool PicoSidebar_BlocksInput(const PicoHost *host) { (void)host; return false; }
 #include "settings_ui.h"
 
 /* This isolated harness has no settings panel. */

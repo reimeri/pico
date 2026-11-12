@@ -4,6 +4,7 @@
 #include "settings_ui.h"
 #include "diff_ui.h"
 #include "clarification.h"
+#include "builtins/sidebar.h"
 #include "pico/plugin.h"
 #include "canonical.h"
 #include "render_scale.h"
@@ -1750,7 +1751,7 @@ void PicoComposer_HandleInput(PicoHost *app)
 {
     if (PicoHost_SidebarResizeBlocksInput(app) || PicoBrowser_BlocksKeyboard(app) || PicoSettingsUi_BlocksKeyboard(app) || PicoDiffUi_BlocksKeyboard(app)) return;
     s_active_composer_state = (ComposerState *)PicoPlugins_HostState(app, "composer");
-    if (!s_active_composer_state || PicoUi_QuestionnaireOpen(app) || PicoUi_ModalOpen(app) || PicoChatFind_BlocksInput(app))
+    if (!s_active_composer_state || PicoUi_QuestionnaireOpen(app) || PicoUi_ModalOpen(app) || (PicoChatFind_BlocksInput(app) || PicoSidebar_BlocksInput(app)))
     {
         return;
     }

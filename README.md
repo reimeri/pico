@@ -2,13 +2,12 @@
 
 ![Pico banner](app/resources/banner.png)
 
-A small (~3MB app + 150MB CEF) C99 AI agent harness with a native chat UI. The core is a loader, agent loop, and session; most behavior is extensions (builtins plus your own `.c` files).
+A small (~3MB app + 150MB CEF) C99 AI agent harness with a native chat UI.
 
 > In active development. Expect breakage
 
 ## Features
 
-- Markdown chat UI, composer, and footer
 - `@` file and `#` session tags
 - Find in the current conversation with Ctrl+F
 - Diff viewer
@@ -16,8 +15,7 @@ A small (~3MB app + 150MB CEF) C99 AI agent harness with a native chat UI. The c
   - OpenAI, including native server-side compaction
   - Charm Hyper
   - xAI
-- By default the agent gets just the `sh` tool for reading, writing, and editing
-- Built-in extensions for questionnaires, session titling, and subagents
+- Built-in extensions for questionnaires and subagents
 - [Embedded Chromium browser](docs/extend/browser.md) in a collapsible dock for smooth web dev
 - Concurrent agents across multiple workspaces in one window
 - [Image generation and editing](docs/extend/image-generation.md) using Codex login or the OpenAI API

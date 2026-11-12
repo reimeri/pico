@@ -30,7 +30,18 @@ typedef enum FooterMenu
     FOOTER_MENU_NONE = 0,
     FOOTER_MENU_MODEL,
     FOOTER_MENU_EFFORT,
+    FOOTER_MENU_ACTIONS,
 } FooterMenu;
+
+static const struct
+{
+    const char *label;
+    PicoWorkspaceAction action;
+} workspace_actions[] = {
+    {"Open in file manager", PICO_WORKSPACE_OPEN_FILES},
+    {"Open in terminal", PICO_WORKSPACE_OPEN_TERMINAL},
+    {"Open in VS Code", PICO_WORKSPACE_OPEN_VSCODE},
+};
 
 typedef enum FooterStatusKind
 {
@@ -300,6 +311,8 @@ static void Sep(void)
 
 static int MenuCount(const PicoHost *app)
 {
+    if (g_menu == FOOTER_MENU_ACTIONS)
+        return (int)(sizeof(workspace_actions) / sizeof(workspace_actions[0]));
     if (g_menu == FOOTER_MENU_MODEL)
     {
         const PicoWorkspace *ws = PicoHost_SelectedWorkspaceConst(app);
@@ -393,7 +406,7 @@ static void OpenMenu(PicoHost *app, FooterMenu which)
             }
         }
     }
-    else
+    else if (which == FOOTER_MENU_EFFORT)
     {
         PicoModel *m = PicoSettings_SelectedModel(PicoHost_SelectedAgent(app));
         const char *cur = PicoSettings_ActiveEffort(PicoHost_SelectedAgent(app));
@@ -430,6 +443,13 @@ static void Accept(PicoHost *app)
         {
             PicoSettings_SetFast(agent, !agent->fast);
         }
+    }
+    else if (g_menu == FOOTER_MENU_ACTIONS && g_selected >= 0 && g_selected < MenuCount(app))
+    {
+        PicoWorkspaceAction action = workspace_actions[g_selected].action;
+        if (CloseMenu())
+            PicoHost_OpenWorkspaceAction(app, action);
+        return;
     }
     CloseMenu();
 }
@@ -714,6 +734,10 @@ static void RenderMenu(PicoHost *app)
                         PicoModel *m = ws ? &ws->models[i] : NULL;
                         label = m && m->name[0] ? m->name : (m ? m->id : "");
                         detail = m ? m->provider : "";
+                    }
+                    else if (g_menu == FOOTER_MENU_ACTIONS)
+                    {
+                        label = workspace_actions[i].label;
                     }
                     else
                     {
@@ -1058,6 +1082,8 @@ void PicoFooter_Render(PicoHost *app, void *state)
             Sep();
             Chip(CLAY_ID("FooterEffort"), g_effort, g_menu == FOOTER_MENU_EFFORT, true, app);
         }
+        Sep();
+        Chip(CLAY_ID("FooterActions"), "Actions", g_menu == FOOTER_MENU_ACTIONS, true, app);
     }
 }
 
@@ -1125,7 +1151,7 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     }
 
     int hovered = HoveredItem(app);
-    app->hovered_clickable = Over("FooterCwd") || Over("FooterWorktree") || Over("FooterModel") || Over("FooterEffort") || hovered >= 0 ||
+    app->hovered_clickable = Over("FooterCwd") || Over("FooterWorktree") || Over("FooterModel") || Over("FooterEffort") || Over("FooterActions") || hovered >= 0 ||
                              (g_menu != FOOTER_MENU_NONE && Over("FooterMenu"));
 
     if (g_menu != FOOTER_MENU_NONE)
@@ -1160,6 +1186,11 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
             OpenMenu(app, FOOTER_MENU_EFFORT);
             return;
         }
+        if (Over("FooterActions"))
+        {
+            OpenMenu(app, FOOTER_MENU_ACTIONS);
+            return;
+        }
         if (Over("FooterCwd"))
         {
             RequestFolder(app);
@@ -1184,6 +1215,10 @@ static void FooterAfterLayout(PicoHost *app, const PicoHookEvent *event, void *s
     else if (Over("FooterEffort"))
     {
         OpenMenu(app, FOOTER_MENU_EFFORT);
+    }
+    else if (Over("FooterActions"))
+    {
+        OpenMenu(app, FOOTER_MENU_ACTIONS);
     }
 }
 

@@ -45,6 +45,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -163,12 +164,12 @@ static void PicoHost_ReapExternal(PicoHost *host)
         pid_t result = waitpid(pid, &status, WNOHANG);
         if (result == pid || (result < 0 && errno == ECHILD))
         {
-            bool report_failure = host->external_report_failures[i];
+            const char *failure_notice = host->external_failure_notices[i];
             host->external_children[i] = 0;
-            host->external_report_failures[i] = false;
-            if (result == pid && report_failure &&
+            host->external_failure_notices[i] = NULL;
+            if (result == pid && failure_notice &&
                 (!WIFEXITED(status) || WEXITSTATUS(status) != 0))
-                PicoOverlay_Notify(host, "Could not open link: the system opener reported an error.");
+                PicoOverlay_Notify(host, failure_notice);
         }
     }
 }
@@ -236,14 +237,51 @@ static bool PicoHost_DetachExternal(PicoHost *host)
         return false;
     }
     memset(host->external_children, 0, sizeof(host->external_children));
-    memset(host->external_report_failures, 0, sizeof(host->external_report_failures));
+    memset(host->external_failure_notices, 0, sizeof(host->external_failure_notices));
     return true;
 }
 
-bool PicoHost_OpenExternal(PicoHost *host, const char *target, bool report_failure)
+/* Resolve before child-only chdir: relative/empty PATH entries must never
+ * turn a selected repository's executable into Pico's desktop launcher. */
+static int PicoHost_ResolveExternalCommand(const char *command, char resolved[PATH_MAX])
 {
-    if (!host || !target || !target[0] || host->terminal_shutdown || g_pico_process_retired)
-        return false;
+    const char *path = getenv("PATH");
+    char defaults[PATH_MAX];
+    if (!path)
+    {
+        size_t n = confstr(_CS_PATH, defaults, sizeof(defaults));
+        if (!n || n > sizeof(defaults)) return ENOENT;
+        path = defaults;
+    }
+    int error = ENOENT;
+    for (const char *part = path;;)
+    {
+        const char *end = strchr(part, ':');
+        size_t length = end ? (size_t)(end - part) : strlen(part);
+        char candidate[PATH_MAX];
+        if (length < sizeof(candidate) &&
+            PicoPath_Format(candidate, sizeof(candidate), "%.*s%s%s", (int)length, part,
+                            length ? "/" : "", command))
+        {
+            struct stat st;
+            if (stat(candidate, &st) == 0 && S_ISREG(st.st_mode))
+            {
+                if (access(candidate, X_OK) == 0 && realpath(candidate, resolved)) return 0;
+                if (errno == EACCES) error = EACCES;
+            }
+        }
+        if (!end) return error;
+        part = end + 1;
+    }
+}
+
+/* Returns a spawn error so callers can fall back only when a launcher is
+ * absent, not when an installed launcher fails or the child exits with error. */
+static int PicoHost_SpawnExternal(PicoHost *host, char *const argv[], const char *cwd,
+                                  const char *failure_notice)
+{
+    if (!host || host->terminal_shutdown || g_pico_process_retired)
+        return ECANCELED;
     PicoHost_ReapExternal(host);
     pid_t *slot = NULL;
     for (size_t i = 0; i < sizeof(host->external_children) / sizeof(host->external_children[0]); i++)
@@ -253,25 +291,94 @@ bool PicoHost_OpenExternal(PicoHost *host, const char *target, bool report_failu
             break;
         }
     if (!slot)
-        return false;
+        return EAGAIN;
+    char resolved[PATH_MAX];
+    if (cwd)
+    {
+        int error = PicoHost_ResolveExternalCommand(argv[0], resolved);
+        if (error) return error;
+    }
     extern char **environ;
-    char *argv[] = {"xdg-open", (char *)target, NULL};
     posix_spawn_file_actions_t actions;
-    if (posix_spawn_file_actions_init(&actions) != 0)
-        return false;
-    /* No shell, no blocking wait, and no target-bearing diagnostics in logs. */
+    int error = posix_spawn_file_actions_init(&actions);
+    if (error)
+        return error;
+    /* No shell, no blocking wait, and no target-bearing diagnostics in logs.
+     * chdir is child-only: opening a terminal never changes Pico's process cwd. */
     pid_t pid = 0;
-    bool ok = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0 &&
-              posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
-              posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
-              posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ) == 0;
+    if (cwd) error = posix_spawn_file_actions_addchdir_np(&actions, cwd);
+    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    if (!error) error = posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    if (!error)
+        error = cwd ? posix_spawn(&pid, resolved, &actions, NULL, argv, environ)
+                    : posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
-    if (ok)
+    if (!error)
     {
         *slot = pid;
-        host->external_report_failures[slot - host->external_children] = report_failure;
+        host->external_failure_notices[slot - host->external_children] = failure_notice;
     }
-    return ok;
+    return error;
+}
+
+bool PicoHost_OpenExternal(PicoHost *host, const char *target, bool report_failure)
+{
+    if (!target || !target[0])
+        return false;
+    char *argv[] = {"xdg-open", (char *)target, NULL};
+    return PicoHost_SpawnExternal(host, argv, NULL, report_failure ?
+        "Could not open link: the system opener reported an error." : NULL) == 0;
+}
+
+bool PicoHost_OpenWorkspaceAction(PicoHost *host, PicoWorkspaceAction action)
+{
+    if (!host) return false;
+    const PicoAgent *agent = PicoHost_SelectedAgentConst(host);
+    const char *path = agent ? PicoAgent_WorkspacePath(agent) : NULL;
+    const char *start_error = NULL;
+    int error;
+    if (!path || !path[0])
+        return false;
+    switch (action)
+    {
+    case PICO_WORKSPACE_OPEN_FILES:
+    {
+        char *argv[] = {"xdg-open", (char *)path, NULL};
+        start_error = "Could not open workspace in file manager: xdg-open could not be started.";
+        error = PicoHost_SpawnExternal(host, argv, NULL,
+            "Could not open workspace in file manager: the launcher reported an error.");
+        break;
+    }
+    case PICO_WORKSPACE_OPEN_TERMINAL:
+    {
+        char directory[sizeof(agent->workspace->path) + 6];
+        snprintf(directory, sizeof(directory), "--dir=%s", path);
+        char *argv[] = {"xdg-terminal-exec", directory, NULL};
+        start_error = "Could not open workspace in terminal: install xdg-terminal-exec or x-terminal-emulator.";
+        error = PicoHost_SpawnExternal(host, argv, path,
+            "Could not open workspace in terminal: the launcher reported an error.");
+        if (error == ENOENT)
+        {
+            char *fallback[] = {"x-terminal-emulator", NULL};
+            error = PicoHost_SpawnExternal(host, fallback, path,
+                "Could not open workspace in terminal: the launcher reported an error.");
+        }
+        break;
+    }
+    case PICO_WORKSPACE_OPEN_VSCODE:
+    {
+        char *argv[] = {"code", (char *)path, NULL};
+        start_error = "Could not open workspace in VS Code: code could not be started. Check that it is in PATH.";
+        error = PicoHost_SpawnExternal(host, argv, NULL,
+            "Could not open workspace in VS Code: the launcher reported an error.");
+        break;
+    }
+    default:
+        return false;
+    }
+    if (error) PicoOverlay_Notify(host, start_error);
+    return error == 0;
 }
 
 static bool PicoHost_TasksQuiesceBefore(PicoHost *host, const struct timespec *deadline)

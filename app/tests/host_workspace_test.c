@@ -2461,6 +2461,40 @@ static int RunFastFooterCase(bool with_sidebar, bool cold_history)
     }
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
     g_find_input_test = true;
+    /* The actions popup floats above the rightmost chip. Repeated bottom-follow
+     * relayouts must preserve both shell geometry and the popup anchor. */
+    ChatStabilitySnapshot before_actions;
+    if (!CaptureChatStabilitySnapshot(with_sidebar, &before_actions)) goto done;
+    Clay_ElementData actions = Clay_GetElementData(CLAY_ID("FooterActions"));
+    g_find_pointer = (Vector2){actions.boundingBox.x + actions.boundingBox.width / 2,
+                               actions.boundingBox.y + actions.boundingBox.height / 2};
+    Clay_SetPointerState((Clay_Vector2){g_find_pointer.x, g_find_pointer.y}, false);
+    g_find_press = true;
+    pico_run_hooks(host, PICO_HOOK_AFTER_LAYOUT, 0);
+    g_find_press = false;
+    Clay_BoundingBox popup_bounds = {0};
+    for (int frame = 0; frame < 40; frame++)
+    {
+        (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+        PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height,
+                                   scroll.contentDimensions.height, &scroll.scrollPosition->y);
+        (void)PicoHost_LayoutShell(host, viewport.height, 0.0f);
+        PicoChat_HarvestVirtualHeights(host);
+        ChatStabilitySnapshot current;
+        Clay_ElementData popup = Clay_GetElementData(CLAY_ID("FooterMenu"));
+        Clay_ElementData anchor = Clay_GetElementData(CLAY_ID("FooterActions"));
+        if (!CaptureChatStabilitySnapshot(with_sidebar, &current) || !popup.found || !anchor.found ||
+            !ChatStabilitySnapshotStable(&before_actions, &current, with_sidebar) ||
+            !ShellBoxStable(actions.boundingBox, anchor.boundingBox) ||
+            (frame && !ShellBoxStable(popup_bounds, popup.boundingBox)))
+        {
+            Fail("actions popup must preserve bottom-follow shell geometry and its footer anchor");
+            goto done;
+        }
+        popup_bounds = popup.boundingBox;
+    }
+    /* Switch directly between footer pickers, then exercise the existing Fast row. */
     /* Open the production effort menu and click its Fast row. */
     Clay_ElementData chip = Clay_GetElementData(CLAY_ID("FooterEffort"));
     g_find_pointer = (Vector2){chip.boundingBox.x + chip.boundingBox.width / 2,
@@ -19839,6 +19873,7 @@ done:
 }
 
 #include "link_navigation_test.c"
+#include "workspace_actions_test.c"
 
 static bool InteractionReplaceText(PicoHost *host, Clay_ElementId id, const char *text)
 {
@@ -22387,6 +22422,7 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestSidebarOlderSavedInbox()) ||
                PICO_TEST_RUN(TestSidebarInboxMissingSavedTitle()) ||
                PICO_TEST_RUN(TestSidebarCachedLiveRowIdentity());
+    if (argc == 2 && strcmp(argv[1], "--workspace-actions") == 0) return PICO_TEST_RUN(TestWorkspaceActions());
     if (argc == 2 && strcmp(argv[1], "--external-links") == 0) return PICO_TEST_RUN(TestExternalLinkOpener());
     if (argc == 2 && strcmp(argv[1], "--docs-links") == 0) return PICO_TEST_RUN(TestDocsLinkOrigins());
     if (argc == 2 && strcmp(argv[1], "--chat-links") == 0) return PICO_TEST_RUN(TestChatLinkWorkspacePaths());
@@ -22396,6 +22432,7 @@ int main(int argc, char **argv)
     if (PICO_TEST_RUN(TestChatLinkWorkspacePaths())) return 1;
     if (PICO_TEST_RUN(TestDocsLinkOrigins())) return 1;
     if (PICO_TEST_RUN(TestExternalLinkOpener())) return 1;
+    if (PICO_TEST_RUN(TestWorkspaceActions())) return 1;
 #endif
     if (argc == 2 && strcmp(argv[1], "--browser-failures") == 0) return PICO_TEST_RUN(TestBrowserHelperFaultRecovery());
     if (argc == 2 && strcmp(argv[1], "--browser-profiles") == 0) return PICO_TEST_RUN(TestBrowserProfiles());

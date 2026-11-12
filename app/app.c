@@ -4407,8 +4407,17 @@ static void LayoutLinkTooltip(PicoHost *app)
         p += length;
         if (*p == '\n') p++;
     }
-    width += 16;
+    /* Reserve the target's text first; a preview must not crowd it out. */
     float height = fminf(lines * PICO_FONT_CAPTION + 12, viewport.height - 16);
+    Clay_Dimensions preview_size = {0};
+    Texture2D *preview = MdView_LinkPreview(target, fminf(320, max_width),
+        fminf(200, viewport.height - 16 - height - 8), &preview_size);
+    if (preview)
+    {
+        width = fmaxf(width, preview_size.width);
+        height += preview_size.height + 8;
+    }
+    width += 16;
     Clay_ElementData link = MdView_HoveredLinkElement();
     if (!link.found) return;
     Clay_BoundingBox anchor = link.boundingBox;
@@ -4427,6 +4436,17 @@ static void LayoutLinkTooltip(PicoHost *app)
         .clip = {.horizontal = true, .vertical = true},
         .backgroundColor = COLOR_CONTENT_BG, .cornerRadius = CLAY_CORNER_RADIUS(4)})
     {
+        if (preview)
+        {
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                               .height = CLAY_SIZING_FIXED(preview_size.height + 8)},
+                                    .childAlignment = {.x = CLAY_ALIGN_X_CENTER}}})
+            {
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(preview_size.width),
+                                                   .height = CLAY_SIZING_FIXED(preview_size.height)}},
+                              .image = {.imageData = preview}}) {}
+            }
+        }
         for (const char *p = target; *p; )
         {
             int length = LinkTooltipLine(p, max_width, config);

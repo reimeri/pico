@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "pico/md_view.h"
 #include "clay/clay.h"
+#include "raylib.h"
 
 /* Scope text/link tint to one notice document, without altering ordinary chat. */
 void MdView_RenderNoticeDocument(MdDocument *doc, int id_base, float available_width,
@@ -11,6 +12,13 @@ void MdView_RenderNoticeDocument(MdDocument *doc, int id_base, float available_w
 
 // Last-layout bounds of the hovered link run, for shell tooltip placement.
 Clay_ElementData MdView_HoveredLinkElement(void);
+
+/* Preview an already-resolved local image link, or NULL when unavailable.
+ * Main/render thread; borrows the markdown cache's texture until the next
+ * BeginFrame/ClearImages, just like document image commands. Never fetches URLs.
+ * Fits without upscaling; size is set only on success. */
+Texture2D *MdView_LinkPreview(const char *target, float max_width, float max_height,
+                              Clay_Dimensions *size);
 
 // Poll the last layout's image files; true requests an idle UI redraw.
 bool MdView_ImagesChanged(void);

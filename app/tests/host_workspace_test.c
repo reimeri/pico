@@ -17420,11 +17420,12 @@ done_host:
     return rc;
 }
 
-static int TestChatLinkTooltip(void)
+static int RunChatLinkTooltipCase(const char *destination, bool expect_preview, Clay_Dimensions viewport)
 {
-    const Clay_Dimensions viewport = {1100, 800};
     char dir[] = "/tmp/pico-ws-link-tip-XXXXXX";
     char cfg[] = "/tmp/pico-cfg-link-tip-XXXXXX";
+    char image_path[4096] = {0}, invalid_path[4096] = {0}, text_path[4096] = {0};
+    char target[8192], markdown[8192];
     uint32_t arena_size = Clay_MinMemorySize();
     void *memory = malloc(arena_size);
     Clay_Context *previous = Clay_GetCurrentContext();
@@ -17477,8 +17478,24 @@ static int TestChatLinkTooltip(void)
         Fail("link tooltip create agent");
         goto done_host;
     }
-    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT,
-                         "A little context before the [destination](https://example.com/hidden-target)");
+    snprintf(target, sizeof(target), "%s%s%s", strstr(destination, "://") ? "" : dir,
+             strstr(destination, "://") ? "" : "/", destination);
+    snprintf(markdown, sizeof(markdown), "A little context before the [destination](%s)", destination);
+    PicoAgent_AddMessage(host, agent, PICO_ROLE_ASSISTANT, markdown);
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    snprintf(image_path, sizeof(image_path), "%s/preview.png", dir);
+    snprintf(invalid_path, sizeof(invalid_path), "%s/invalid.png", dir);
+    snprintf(text_path, sizeof(text_path), "%s/notes.txt", dir);
+    Image image = GenImageColor(800, 400, RED);
+    bool saved = ExportImage(image, image_path);
+    UnloadImage(image);
+    if (!saved || WriteFile(invalid_path, "not an image") || WriteFile(text_path, "a document"))
+    {
+        Fail("link preview fixtures");
+        goto done_host;
+    }
+    g_chat_image_test = true;
+#endif
 
     arena = Clay_CreateArenaWithCapacityAndMemory(arena_size, memory);
     if (!Clay_Initialize(arena, viewport, (Clay_ErrorHandler){0}))
@@ -17495,7 +17512,7 @@ static int TestChatLinkTooltip(void)
     commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
 
     chip = Clay_GetElementData(CLAY_IDI("MdLink", 0));
-    if (!chip.found || FindCardText(&commands, "https://example.com/hidden-target"))
+    if (!chip.found || FindCardText(&commands, target))
     {
         Fail("link destination must stay hidden before hover");
         goto done;
@@ -17511,7 +17528,7 @@ static int TestChatLinkTooltip(void)
         commands = PicoHost_LayoutShell(host, viewport.height, 1.0f / 60.0f);
     }
     Clay_ElementData tip = Clay_GetElementData(CLAY_ID("LinkTargetTooltip"));
-    if (!tip.found || !FindCardText(&commands, "https://example.com/hidden-target") ||
+    if (!tip.found || !FindCardText(&commands, target) ||
         tip.boundingBox.x < 0 || tip.boundingBox.y < 0 ||
         tip.boundingBox.x + tip.boundingBox.width > viewport.width ||
         tip.boundingBox.y + tip.boundingBox.height > viewport.height)
@@ -17529,6 +17546,32 @@ static int TestChatLinkTooltip(void)
         Fail("tooltip must center on the link, above it or below when space is insufficient");
         goto done;
     }
+    Clay_RenderCommand *preview = NULL;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *command = Clay_RenderCommandArray_Get(&commands, i);
+        if (command->commandType == CLAY_RENDER_COMMAND_TYPE_IMAGE) preview = command;
+    }
+    if ((preview != NULL) != expect_preview)
+    {
+        Fail("only available local image links should render a preview");
+        goto done;
+    }
+    if (preview)
+    {
+        Clay_BoundingBox box = preview->boundingBox;
+        Clay_RenderCommand *label = FindCardText(&commands, target);
+        if (!preview->renderData.image.imageData || box.width <= 0 || box.height <= 0 ||
+            fabsf(box.width / box.height - 2) > 0.02f ||
+            box.x < tip.boundingBox.x || box.x + box.width > tip.boundingBox.x + tip.boundingBox.width ||
+            !ShellVerticallyContains(tip.boundingBox, box) || !label ||
+            label->boundingBox.y < box.y + box.height ||
+            !ShellVerticallyContains(tip.boundingBox, label->boundingBox))
+        {
+            Fail("preview must fit proportionally above the still-visible link target");
+            goto done;
+        }
+    }
     /* A floating tooltip must not move its source or capture the hover. */
     for (frame = 0; frame < 20; frame++)
     {
@@ -17539,7 +17582,7 @@ static int TestChatLinkTooltip(void)
         Clay_ElementData link = Clay_GetElementData(CLAY_IDI("MdLink", 0));
         if (!ShellBoxStable(chip.boundingBox, link.boundingBox) ||
             !ShellBoxStable(tip.boundingBox, Clay_GetElementData(CLAY_ID("LinkTargetTooltip")).boundingBox) ||
-            !FindCardText(&commands, "https://example.com/hidden-target"))
+            !FindCardText(&commands, target))
         {
             Fail("tooltip must preserve link geometry and hover across layouts");
             goto done;
@@ -17568,11 +17611,30 @@ done_host:
     {
         pico_host_free(host);
     }
+    MdView_ClearImages();
+    g_chat_image_test = false;
+    if (image_path[0]) unlink(image_path);
+    if (invalid_path[0]) unlink(invalid_path);
+    if (text_path[0]) unlink(text_path);
     free(memory);
     unsetenv("XDG_CONFIG_HOME");
     rmdir(cfg);
     rmdir(dir);
     return rc;
+}
+
+static int TestChatLinkTooltip(void)
+{
+    if (RunChatLinkTooltipCase("https://example.com/hidden-target.png", false,
+                              (Clay_Dimensions){1100, 800})) return 1;
+#ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (RunChatLinkTooltipCase("preview.png", true, (Clay_Dimensions){1100, 800}) ||
+        RunChatLinkTooltipCase("preview.png", true, (Clay_Dimensions){640, 240}) ||
+        RunChatLinkTooltipCase("missing.png", false, (Clay_Dimensions){1100, 800}) ||
+        RunChatLinkTooltipCase("invalid.png", false, (Clay_Dimensions){1100, 800}) ||
+        RunChatLinkTooltipCase("notes.txt", false, (Clay_Dimensions){1100, 800})) return 1;
+#endif
+    return 0;
 }
 
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS

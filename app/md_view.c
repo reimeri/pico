@@ -489,6 +489,24 @@ static CachedImage *GetCachedImage(const char *path)
     return entry;
 }
 
+Texture2D *MdView_LinkPreview(const char *target, float max_width, float max_height,
+                              Clay_Dimensions *size)
+{
+    if (!target || !*target || *target == '#' || HasUriScheme(target) ||
+        max_width < 1 || max_height < 1 ||
+        !IsFileExtension(target, ".png;.jpg;.jpeg;.webp;.gif;.bmp;.tga;.qoi;.psd;.hdr;.pic;.pnm;.ppm;.pgm;.dds;.ktx;.astc;.pkm;.pvr"))
+        return NULL;
+    /* Do not try decoding arbitrary linked documents, directories or devices. */
+    struct stat stamp;
+    if (stat(target, &stamp) != 0 || !S_ISREG(stamp.st_mode)) return NULL;
+    CachedImage *image = GetCachedImage(target);
+    if (!image || !image->texture.id || image->texture.width < 1 || image->texture.height < 1) return NULL;
+    int width, height;
+    ChatImageFit(image->texture.width, image->texture.height, max_width, max_height, &width, &height);
+    *size = (Clay_Dimensions){(float)width, (float)height};
+    return &image->texture;
+}
+
 bool MdView_ImagesChanged(void)
 {
     static double next_check;

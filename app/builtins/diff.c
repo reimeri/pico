@@ -989,7 +989,10 @@ static void DiffHostAfterLayout(PicoHost *host, const PicoHookEvent *event, void
     bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     if (Clay_PointerOver(CLAY_ID("FooterDiff"))) {
         host->hovered_clickable = true;
-        if (click) PicoDiffUi_Open(host);
+        if (click) {
+            if (PicoDiff_IsOpen(host)) PicoDiffUi_Close(host);
+            else PicoDiffUi_Open(host);
+        }
     }
     if (!PicoDiff_IsOpen(host) || s->pointer_claimed) return;
     const char *buttons[] = {"DiffClose", "DiffFilesToggle", "DiffPrevious", "DiffNext", "DiffSticky"};

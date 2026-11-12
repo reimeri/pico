@@ -43,14 +43,16 @@ static int TestDiffPanelInteraction(void)
         if (FindCardText(&commands, "review line 000")) break;
     }
     pico_host_request_redraw(host); PicoHost_Frame(host);
-    phase = "scroll position survives panel switching";
+    phase = "footer toggles panel and preserves scroll position";
     Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("DiffScroll"));
     if (!scroll.found || !scroll.scrollPosition) goto done;
     scroll.scrollPosition->y = -600;
     pico_host_request_redraw(host); PicoHost_Frame(host);
     float before = Clay_GetScrollContainerData(CLAY_ID("DiffScroll")).scrollPosition->y;
-    if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("DiffClose"))) || PicoDiff_IsOpen(host) ||
-        !SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("FooterDiff"))) || !PicoDiff_IsOpen(host)) goto done;
+    if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("FooterDiff"))) || PicoDiff_IsOpen(host) ||
+        Clay_GetElementData(CLAY_ID("ChangesPane")).found ||
+        !SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("FooterDiff"))) || !PicoDiff_IsOpen(host) ||
+        !Clay_GetElementData(CLAY_ID("ChangesPane")).found) goto done;
     PicoHost_Frame(host);
     scroll = Clay_GetScrollContainerData(CLAY_ID("DiffScroll"));
     if (!scroll.found || fabsf(scroll.scrollPosition->y - before) > 0.01f) { fprintf(stderr, "diff retention before=%f after=%f found=%d\n", before, scroll.found ? scroll.scrollPosition->y : 0, scroll.found); goto done; }

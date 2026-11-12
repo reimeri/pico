@@ -74,7 +74,7 @@ Supports `x86_64-linux` and `aarch64-linux`; the package puts GCC on `PATH` so e
 
 </details>
 
-Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`. Use `/apikey <openai|hyper|xai>` to save a key in a masked dialog for future restarts, then `/login <provider> key` to select it. Saved keys are plaintext in your private `auth.json`; environment keys take precedence.
+Authenticate with `/login openai`, `/login hyper`, or `/login xai`, or set `PICO_API_KEY`, `OPENAI_API_KEY`, `HYPER_API_KEY`, or `XAI_API_KEY`. Use `/apikey <openai|hyper|xai>` to save an api key for a provider.
 
 ## Workspace actions
 

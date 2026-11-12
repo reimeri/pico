@@ -2283,7 +2283,7 @@ static void PicoSidebar_Render(PicoHost *host, void *state)
                  * trigger shell reconciliation when the sidebar is unmounted. */
                 CLAY(CLAY_ID("SidebarShortcuts"),
                      {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = SIDEBAR_ROW_GAP,
-                                 .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                                 .childAlignment = {.x = CLAY_ALIGN_X_CENTER, .y = CLAY_ALIGN_Y_CENTER},
                                  .sizing = {.width = CLAY_SIZING_GROW(0),
                                             .height = CLAY_SIZING_FIXED(Pico_FontPx(SIDEBAR_FOLDER_ICON))}},
                       .clip = {.horizontal = has_shortcuts, .childOffset = Clay_GetScrollOffset()}})

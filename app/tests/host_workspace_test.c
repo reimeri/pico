@@ -19091,6 +19091,20 @@ static int TestSidebarShortcutStrip(void)
     {
         if (!PicoPath_Format(path, sizeof(path), "%s/project-%02d", root, i) ||
             mkdir(path, 0700) || PicoCatalog_Ensure(path) || PicoCatalog_SetProjectStarred(path, true)) goto done;
+        if (i == 1)
+        {
+            phase = "favorites centered when they fit";
+            g_sidebar_poll_due = true;
+            if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+            (void)PicoHost_LayoutShell(f.host, 800, 0);
+            Clay_ElementData strip = Clay_GetElementData(CLAY_ID("SidebarShortcuts"));
+            Clay_ElementData first = Clay_GetElementData(CLAY_IDI("SidebarShortcut", 1));
+            Clay_ElementData last = Clay_GetElementData(CLAY_IDI("SidebarShortcut", 2));
+            if (!strip.found || !first.found || !last.found ||
+                first.boundingBox.x <= strip.boundingBox.x ||
+                fabsf((first.boundingBox.x + last.boundingBox.x + last.boundingBox.width) * 0.5f -
+                      (strip.boundingBox.x + strip.boundingBox.width * 0.5f)) > 0.1f) goto done;
+        }
     }
     g_sidebar_poll_due = true;
     if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;

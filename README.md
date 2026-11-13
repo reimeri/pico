@@ -19,7 +19,7 @@ A small (~3MB app + 150MB CEF) C99 AI agent harness with a native chat UI.
 - [Embedded Chromium browser](docs/extend/browser.md) in a collapsible dock for smooth web dev
 - Concurrent agents across multiple workspaces in one window
 - [Image generation and editing](docs/extend/image-generation.md) using Codex login or the OpenAI API
-- Hot-reloadable C99 extensions (views, tools, commands, providers). Just ask the agent to build one
+- Manually reloadable C99 extensions (views, tools, commands, providers). Ask the agent to build one, then use F5 or `/reload`
 - Slash commands (`/help`, `/docs`, `/reload`, …)
 - Spell checking (uses `enchant`)
 
@@ -33,7 +33,7 @@ chmod +x pico-*-linux-x86_64.AppImage && ./pico-*-linux-x86_64.AppImage
 tar -xzf pico-*-linux-x86_64.tar.gz && cd pico-*-linux-x86_64 && ./bin/pico
 ```
 
-A host C compiler (`cc`) is needed only to compile hot-reloadable C extensions; releases do not bundle one.
+A host C compiler (`cc`) is needed only to compile reloadable C extensions; releases do not bundle one.
 
 <details>
 <summary>NixOS / Nix</summary>

@@ -139,7 +139,6 @@ int TestClipboardPaste(void)
     PicoAgentId agent;
     if (pico_main_agent_create(host, ws, &options, &agent) != PICO_OK) goto done;
     /* Keep the wake assertion specific to clipboard completion. */
-    PicoPlugins_StopScanner(host);
     ClipboardDrain(host);
     setenv("PATH", dir, 1);
     setenv("PICO_CLIP_FIXTURE", dir, 1);

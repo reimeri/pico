@@ -414,20 +414,6 @@ static uint64_t SourceHash(const char *src)
                : hash;
 }
 
-/* The scanner receives these paths as copies: it never reads mutable host state
- * (or test-controlled process environment) while walking the filesystem. */
-static uint64_t ScanSourceHash(const char *src, const char *cache_dir,
-                               const char *sdk_include)
-{
-    char manifest[4096];
-    uint64_t hash = FileHash(src);
-    return cache_dir[0] && sdk_include[0] &&
-                   PicoPath_Format(manifest, sizeof(manifest), "%s/%08x-%08x.deps",
-                                   cache_dir, PathHash(src), PathHash(sdk_include))
-               ? HashDependencies(manifest, hash, NULL, NULL)
-               : hash;
-}
-
 static bool SoPathFor(const char *src, time_t mtime, uint64_t content_hash, char *out, size_t cap)
 {
     char cache[4096];
@@ -926,19 +912,19 @@ static int LoadSo(PicoHost *app, const char *src, const char *so, time_t mtime, 
     return 0;
 }
 
-static void LoadUserFile(PicoHost *app, const char *src)
+static bool LoadUserFile(PicoHost *app, const char *src)
 {
     struct stat st;
     if (stat(src, &st) != 0)
     {
-        return;
+        return true;
     }
     char so[4096];
     uint64_t content_hash = SourceHash(src);
     LoadedPlugin *current = FindDesiredSource(app, src);
     if (current && current->mtime == st.st_mtime && current->content_hash == content_hash)
     {
-        return;
+        return true;
     }
     if (!SoPathFor(src, st.st_mtime, content_hash, so, sizeof(so)))
     {
@@ -947,7 +933,7 @@ static void LoadUserFile(PicoHost *app, const char *src)
         {
             RecordStub(app, src, st.st_mtime, "Extension cache path is too long.");
         }
-        return;
+        return true;
     }
     if (access(so, R_OK) != 0)
     {
@@ -955,12 +941,12 @@ static void LoadUserFile(PicoHost *app, const char *src)
         if (CompileExt(app, src, so, err, sizeof(err)) != 0)
         {
             if (app->plugin_compile_pending)
-                return;
+                return false;
             char line[8700];
             snprintf(line, sizeof(line), "compile %s:\n%s", src, err);
             pico_status_warn(app, line);
             RememberCompileFailure(app, src, st.st_mtime, content_hash);
-            return;
+            return true;
         }
     }
     if (LoadSo(app, src, so, st.st_mtime, true) != 0 && current)
@@ -969,6 +955,7 @@ static void LoadUserFile(PicoHost *app, const char *src)
         current->desired = true;
         (void)ActivatePlugin(app, current);
     }
+    return true;
 }
 
 static int LoadUserCandidate(PicoHost *app, const char *src,
@@ -1056,10 +1043,76 @@ static void WalkExtTree(const char *dir, int depth, int *seen, int seen_max,
     closedir(d);
 }
 
+/* Initial discovery is a one-shot operation. Keep only the exact source paths
+ * awaiting compilation so normal pumps can finish loading without rescanning
+ * extension trees or noticing unrelated file changes. */
+typedef struct PicoInitialPluginLoad
+{
+    struct PicoInitialPluginLoad *next;
+    PicoWorkspaceId workspace_id;
+    char source[4096];
+} PicoInitialPluginLoad;
+
+static void QueueInitialLoad(PicoHost *host, const char *source)
+{
+    for (PicoInitialPluginLoad *load = host->plugin_initial_load; load; load = load->next)
+        if (strcmp(load->source, source) == 0)
+            return;
+    PicoInitialPluginLoad *load = calloc(1, sizeof(*load));
+    if (!load)
+    {
+        pico_status_warn(host, "Could not queue initial extension load.");
+        return;
+    }
+    PicoWorkspace *workspace = SourceWorkspace(host, source);
+    load->workspace_id = workspace ? workspace->id : 0;
+    snprintf(load->source, sizeof(load->source), "%s", source);
+    load->next = host->plugin_initial_load;
+    host->plugin_initial_load = load;
+}
+
+static void AdvanceInitialLoads(PicoHost *host)
+{
+    PicoInitialPluginLoad *loads = host->plugin_initial_load;
+    host->plugin_initial_load = NULL;
+    while (loads)
+    {
+        PicoInitialPluginLoad *load = loads;
+        loads = load->next;
+        PicoWorkspace *workspace = SourceWorkspace(host, load->source);
+        bool wanted = load->workspace_id == 0 ||
+                      (workspace && workspace->id == load->workspace_id &&
+                       workspace->state != PICO_WORKSPACE_CLOSING &&
+                       workspace->state != PICO_WORKSPACE_CLOSED);
+        if (wanted && !LoadUserFile(host, load->source))
+        {
+            load->next = host->plugin_initial_load;
+            host->plugin_initial_load = load;
+        }
+        else
+        {
+            /* Profiles were first checked before these asynchronous tools and
+             * providers existed. Reconcile them at the usual safe barrier. */
+            LoadedPlugin *module = wanted ? FindDesiredSource(host, load->source) : NULL;
+            if (module && module->handle)
+            {
+                for (int w = 0; w < host->workspace_count; w++)
+                {
+                    PicoWorkspace *ws = host->workspaces[w];
+                    if (ws && ModuleAppliesToWorkspace(host, ws, module))
+                        ws->profiles_refresh_pending = true;
+                }
+            }
+            free(load);
+        }
+    }
+}
+
 static bool LoadWalk(void *ctx, const char *path, time_t mtime)
 {
     (void)mtime;
-    LoadUserFile((PicoHost *)ctx, path);
+    if (!LoadUserFile((PicoHost *)ctx, path))
+        QueueInitialLoad((PicoHost *)ctx, path);
     return true;
 }
 
@@ -1424,6 +1477,12 @@ static void *ReapCompiler(void *arg)
 
 void PicoPlugins_CancelCompiles(PicoHost *app)
 {
+    while (app && app->plugin_initial_load)
+    {
+        PicoInitialPluginLoad *load = app->plugin_initial_load;
+        app->plugin_initial_load = load->next;
+        free(load);
+    }
     while (app && app->plugin_compile)
     {
         PicoCompileJob *job = app->plugin_compile;
@@ -1616,273 +1675,9 @@ static bool ValidateUserSources(PicoHost *app, bool retry_compile_failures)
     return true;
 }
 
-/* Only the worker owns source discovery and dependency reads. Neither request nor
- * result holds a host, workspace, module, or registration pointer. */
-typedef struct PollSourceSet
-{
-    char dir[4096];
-    PicoWorkspaceId id; /* zero for the global extension root */
-    int count;
-    char paths[PICO_MAX_USER_PLUGINS][4096];
-    time_t mtimes[PICO_MAX_USER_PLUGINS];
-    uint64_t hashes[PICO_MAX_USER_PLUGINS];
-} PollSourceSet;
-
-typedef struct PluginScan
-{
-    char cache_dir[4096];
-    char sdk_include[4096];
-    int workspace_count;
-    uint64_t module_generation;
-    PollSourceSet sets[1 + PICO_MAX_WORKSPACES];
-} PluginScan;
-
-struct PicoPluginScanner
-{
-    pthread_t thread;
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
-    bool stop;
-    bool exited;
-    bool scanning;
-    PluginScan *request;
-    PluginScan *result;
-};
-
-typedef struct PollCollectCtx
-{
-    PluginScan *scan;
-    PollSourceSet *set;
-} PollCollectCtx;
-
-static bool PollSourceOwnedBy(const PluginScan *scan, const PollSourceSet *set,
-                              const char *path)
-{
-    const PollSourceSet *best = NULL;
-    size_t best_len = 0;
-    for (int i = 1; i <= scan->workspace_count; i++)
-    {
-        const PollSourceSet *ws = &scan->sets[i];
-        size_t len = strlen(ws->dir);
-        if (len > best_len && strncmp(path, ws->dir, len) == 0 &&
-            (path[len] == '/' || path[len] == '\0'))
-        {
-            best = ws;
-            best_len = len;
-        }
-    }
-    return best == set;
-}
-
-static bool PollCollectWalk(void *ctx, const char *path, time_t mtime)
-{
-    PollCollectCtx *collect = ctx;
-    PollSourceSet *set = collect->set;
-    if (set->id && !PollSourceOwnedBy(collect->scan, set, path))
-        return false;
-    int n = set->count;
-    snprintf(set->paths[n], sizeof(set->paths[n]), "%s", path);
-    set->mtimes[n] = mtime;
-    set->hashes[n] = ScanSourceHash(path, collect->scan->cache_dir,
-                                    collect->scan->sdk_include);
-    return true;
-}
-
-static void *PluginScannerMain(void *arg)
-{
-    struct PicoPluginScanner *scanner = arg;
-    for (;;)
-    {
-        pthread_mutex_lock(&scanner->mu);
-        while (!scanner->stop && !scanner->request)
-            pthread_cond_wait(&scanner->cv, &scanner->mu);
-        if (scanner->stop)
-        {
-            free(scanner->request);
-            scanner->request = NULL;
-            free(scanner->result);
-            scanner->result = NULL;
-            scanner->exited = true;
-            pthread_cond_broadcast(&scanner->cv);
-            pthread_mutex_unlock(&scanner->mu);
-            return NULL;
-        }
-        PluginScan *scan = scanner->request;
-        scanner->request = NULL;
-        scanner->scanning = true;
-        pthread_mutex_unlock(&scanner->mu);
-
-        for (int i = 0; i <= scan->workspace_count; i++)
-        {
-            PollSourceSet *set = &scan->sets[i];
-            PollCollectCtx collect = {.scan = scan, .set = set};
-            if (set->dir[0])
-                WalkExtTree(set->dir, 0, &set->count, PICO_MAX_USER_PLUGINS,
-                            PollCollectWalk, &collect);
-        }
-
-        pthread_mutex_lock(&scanner->mu);
-        scanner->scanning = false;
-        if (!scanner->stop)
-        {
-            scanner->result = scan;
-            scan = NULL;
-        }
-        pthread_mutex_unlock(&scanner->mu);
-        pico_host_wakeup(NULL);
-        free(scan);
-    }
-}
-
-static bool PluginScanMatches(const PicoHost *host, const PluginScan *scan)
-{
-    char path[4096] = {0};
-    if (scan->module_generation != host->next_module_generation ||
-        scan->workspace_count != host->workspace_count ||
-        (ConfigExtDir(path, sizeof(path)) ? strcmp(path, scan->sets[0].dir) != 0
-                                          : scan->sets[0].dir[0] != '\0'))
-        return false;
-    path[0] = '\0';
-    if ((CacheDir(path, sizeof(path)) ? strcmp(path, scan->cache_dir) != 0
-                                      : scan->cache_dir[0] != '\0'))
-        return false;
-    path[0] = '\0';
-    if ((Pico_SdkIncludeDir(path, sizeof(path)) ? strcmp(path, scan->sdk_include) != 0
-                                                : scan->sdk_include[0] != '\0'))
-        return false;
-    for (int i = 0; i < host->workspace_count; i++)
-    {
-        PicoWorkspace *ws = host->workspaces[i];
-        path[0] = '\0';
-        if (!ws || ws->id != scan->sets[i + 1].id ||
-            (WorkspaceExtDir(ws, path, sizeof(path))
-                 ? strcmp(path, scan->sets[i + 1].dir) != 0
-                 : scan->sets[i + 1].dir[0] != '\0'))
-            return false;
-    }
-    return true;
-}
-
-static PluginScan *PluginScanSnapshot(const PicoHost *host)
-{
-    PluginScan *scan = calloc(1, sizeof(*scan));
-    if (!scan)
-        return NULL;
-    (void)ConfigExtDir(scan->sets[0].dir, sizeof(scan->sets[0].dir));
-    (void)CacheDir(scan->cache_dir, sizeof(scan->cache_dir));
-    (void)Pico_SdkIncludeDir(scan->sdk_include, sizeof(scan->sdk_include));
-    scan->workspace_count = host->workspace_count;
-    scan->module_generation = host->next_module_generation;
-    for (int i = 0; i < host->workspace_count; i++)
-    {
-        PicoWorkspace *ws = host->workspaces[i];
-        if (ws)
-        {
-            scan->sets[i + 1].id = ws->id;
-            (void)WorkspaceExtDir(ws, scan->sets[i + 1].dir,
-                                  sizeof(scan->sets[i + 1].dir));
-        }
-    }
-    return scan;
-}
-
-static bool SourceSetChanged(const PicoHost *host, const PicoWorkspace *workspace,
-                             const PollSourceSet *set)
-{
-    int desired_count = 0;
-    for (int i = 0; i < host->module_count; i++)
-    {
-        const LoadedPlugin *module = &host->modules[i];
-        if (module->builtin || !module->desired)
-            continue;
-        PicoWorkspace *owner = SourceWorkspace(host, module->source);
-        if ((workspace && owner == workspace) || (!workspace && !owner))
-            desired_count++;
-    }
-    if (set->count != desired_count)
-        return true;
-    for (int i = 0; i < set->count; i++)
-    {
-        bool found = false;
-        for (int m = 0; m < host->module_count; m++)
-        {
-            const LoadedPlugin *module = &host->modules[m];
-            if (!module->builtin && module->desired &&
-                strcmp(module->source, set->paths[i]) == 0)
-            {
-                found = true;
-                if (module->mtime != set->mtimes[i] ||
-                    module->content_hash != set->hashes[i])
-                    return true;
-                break;
-            }
-        }
-        if (!found)
-            return true;
-    }
-    return false;
-}
-
-static void PluginScannerStart(PicoHost *host)
-{
-    struct PicoPluginScanner *scanner = calloc(1, sizeof(*scanner));
-    if (!scanner)
-        return;
-    if (pthread_mutex_init(&scanner->mu, NULL) != 0)
-    {
-        free(scanner);
-        return;
-    }
-    if (pthread_cond_init(&scanner->cv, NULL) != 0)
-    {
-        pthread_mutex_destroy(&scanner->mu);
-        free(scanner);
-        return;
-    }
-    if (pthread_create(&scanner->thread, NULL, PluginScannerMain, scanner) != 0)
-    {
-        pthread_cond_destroy(&scanner->cv);
-        pthread_mutex_destroy(&scanner->mu);
-        free(scanner);
-        return;
-    }
-    host->plugin_scanner = scanner;
-}
-
-void PicoPlugins_StopScanner(PicoHost *host)
-{
-    struct PicoPluginScanner *scanner = host ? host->plugin_scanner : NULL;
-    if (!scanner)
-        return;
-    pthread_mutex_lock(&scanner->mu);
-    scanner->stop = true;
-    pthread_cond_broadcast(&scanner->cv);
-    pthread_mutex_unlock(&scanner->mu);
-}
-
-bool PicoPlugins_QuiesceScannerBefore(PicoHost *host, const struct timespec *deadline)
-{
-    struct PicoPluginScanner *scanner = host ? host->plugin_scanner : NULL;
-    if (!scanner)
-        return true;
-    pthread_mutex_lock(&scanner->mu);
-    while (!scanner->exited)
-    {
-        if (!deadline || pthread_cond_timedwait(&scanner->cv, &scanner->mu, deadline) != 0)
-            break;
-    }
-    bool exited = scanner->exited;
-    pthread_mutex_unlock(&scanner->mu);
-    if (!exited)
-        return false; /* retain scanner/host until process exit */
-    pthread_join(scanner->thread, NULL);
-    pthread_cond_destroy(&scanner->cv);
-    pthread_mutex_destroy(&scanner->mu);
-    free(scanner);
-    host->plugin_scanner = NULL;
-    return true;
-}
-
+/* Advance initial loads and explicitly requested reloads only. Source and
+ * dependency changes are discovered when loading or requesting a reload, never
+ * by background filesystem scanning. */
 void PicoPlugins_Poll(PicoHost *app)
 {
     if (!app || app->terminal_shutdown || PicoHost_ProcessRetired() || app->reload_queued)
@@ -1891,101 +1686,31 @@ void PicoPlugins_Poll(PicoHost *app)
     }
     if (app->safe_mode)
     {
-        /* Safe mode disables source scanning, not an explicit reload deferred
-         * by a settings draft or in-flight persistence. */
+        /* An explicit reload can be deferred by a settings draft or save. */
         if (app->plugin_reload_pending)
             (void)ReloadHostWithPolicy(app, app->plugin_reload_retry);
         return;
     }
     AdvanceCompiles(app);
-    double now = GetTime();
-    struct PicoPluginScanner *scanner = app->plugin_scanner;
-    if (!scanner)
-        PluginScannerStart(app);
-    scanner = app->plugin_scanner;
-    PluginScan *scan = NULL;
-    if (scanner)
+    AdvanceInitialLoads(app);
+    if (app->plugin_reload_pending)
     {
-        pthread_mutex_lock(&scanner->mu);
-        scan = scanner->result;
-        scanner->result = NULL;
-        if (scan)
-            app->plugin_scan_pending = false;
-        pthread_mutex_unlock(&scanner->mu);
-    }
-    if (scan && !PluginScanMatches(app, scan))
-    {
-        free(scan);
-        scan = NULL;
-        app->plugin_last_poll = -1;
-    }
-    bool explicit_reload = app->plugin_reload_pending;
-    bool due = now - app->plugin_last_poll >= 0.5;
-    /* Never queue a new scan while a completed one is waiting to be applied.
-     * A scan in progress is coalesced; the next poll will recheck the tree. */
-    if (scanner && due && !scan && !app->plugin_scan_pending)
-    {
-        pthread_mutex_lock(&scanner->mu);
-        bool available = !scanner->request && !scanner->scanning && !scanner->result;
-        if (available)
+        bool global_ready = ReloadHostWithPolicy(app, app->plugin_reload_retry);
+        if (global_ready)
         {
-            PluginScan *request = PluginScanSnapshot(app);
-            if (request)
+            if (!app->plugin_reload_retry || app->plugin_rollout_pending)
             {
-                scanner->request = request;
-                app->plugin_scan_pending = true;
-                pthread_cond_signal(&scanner->cv);
-                app->plugin_last_poll = now;
+                for (int w = 0; w < app->workspace_count; w++)
+                    RequestWorkspaceRollout(app, app->workspaces[w], app->plugin_rollout_pending);
             }
-        }
-        pthread_mutex_unlock(&scanner->mu);
-    }
-    if (!scan && !explicit_reload)
-    {
-        for (int w = 0; w < app->workspace_count; w++)
-        {
-            PicoWorkspace *workspace = app->workspaces[w];
-            if (workspace && workspace->reload_queued && !PicoWorkspace_BlocksReload(workspace))
-                (void)PicoWorkspace_Reload(workspace);
-        }
-        return;
-    }
-    bool workspace_changed[PICO_MAX_WORKSPACES] = {0};
-    bool global_changed = explicit_reload || (scan && SourceSetChanged(app, NULL, &scan->sets[0]));
-    if (scan)
-    {
-        for (int w = 0; w < app->workspace_count; w++)
-            workspace_changed[w] = app->workspaces[w] &&
-                                   SourceSetChanged(app, app->workspaces[w], &scan->sets[w + 1]);
-        free(scan);
-    }
-
-    bool global_ready = !global_changed;
-    if (global_changed)
-    {
-        global_ready = ReloadHostWithPolicy(app, explicit_reload && app->plugin_reload_retry);
-        if (global_ready && (!explicit_reload || !app->plugin_reload_retry || app->plugin_rollout_pending))
-        {
-            for (int w = 0; w < app->workspace_count; w++)
-            {
-                RequestWorkspaceRollout(app, app->workspaces[w], app->plugin_rollout_pending);
-            }
+            app->plugin_rollout_pending = false;
         }
     }
-    if (global_ready)
-        app->plugin_rollout_pending = false;
     for (int w = 0; w < app->workspace_count; w++)
     {
         PicoWorkspace *workspace = app->workspaces[w];
-        if (workspace && workspace_changed[w] && !(global_changed && global_ready))
-        {
-            RequestWorkspaceRollout(app, workspace, false);
-        }
-        else if (workspace && workspace->reload_queued &&
-                 !PicoWorkspace_BlocksReload(workspace))
-        {
+        if (workspace && workspace->reload_queued && !PicoWorkspace_BlocksReload(workspace))
             (void)PicoWorkspace_Reload(workspace);
-        }
     }
 }
 

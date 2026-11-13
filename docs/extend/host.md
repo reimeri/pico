@@ -68,7 +68,7 @@ main-thread adoption when it changes extension-owned UI state. See
 
 ## CLI shutdown
 
-`/quit` requests exit without a confirmation prompt rather than closing the window inside a callback. Subsequent host frame callbacks are skipped, and the shell returns before the remaining layout/render work. Main then runs the existing bounded host shutdown (including quiescing the source scanner or retaining it if stuck), releases the Clay arena, unloads fonts, and closes the renderer/window exactly once. Normal window-close uses the same cleanup sequence. See [contracts](contracts.md#reload-and-workspace-quiescence) for extension ownership requirements.
+`/quit` requests exit without a confirmation prompt rather than closing the window inside a callback. Subsequent host frame callbacks are skipped, and the shell returns before the remaining layout/render work. Main then runs the existing bounded host shutdown, releases the Clay arena, unloads fonts, and closes the renderer/window exactly once. Normal window-close uses the same cleanup sequence. See [contracts](contracts.md#reload-and-workspace-quiescence) for extension ownership requirements.
 
 ## Limits
 
@@ -103,7 +103,7 @@ Register these only from `host_init`. Workspace init cannot add them:
 
 Host builtins include the sidebar catalog, chat renderer, composer, footer shell, overlay presentation, extension manager UI, prompt UI, clipboard state, and auth UI. Dual-scope builtins keep separate host and workspace states connected only through core APIs and IDs. With no selected agent, sidebar, main, and overlay host views may still render; the complete composer and footer slots are withheld.
 
-Automatic extension source detection happens on a core filesystem worker; the host pump adopts current results, while validation and host-extension replacement remain on the main thread between frames. Host extensions cannot register worker callbacks, so only active host callback depth must reach zero before replacement. F5 and `/reload` request host-extension replacement (user-global / config sources only), compiling asynchronously when needed and request reload of the selected agent's workspace; other workspaces keep accepting work. See [workspace](workspace.md) and [anatomy](anatomy.md).
+Extensions load initially at startup and workspace open; source and dependency changes are not scanned or applied automatically. Manual reload validation and host-extension replacement run on the main thread between frames. Host extensions cannot register worker callbacks, so only active host callback depth must reach zero before replacement. F5 and `/reload` request host-extension replacement (user-global / config sources only), compiling asynchronously when needed and request reload of the selected agent's workspace; other workspaces keep accepting work. See [workspace](workspace.md) and [anatomy](anatomy.md).
 
 ## Routing
 

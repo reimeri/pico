@@ -4055,7 +4055,6 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
     }
     PicoClarification_Back(host);
     PicoPlugins_CancelCompiles(host);
-    PicoPlugins_StopScanner(host);
     PicoSession_LoadCancel(host);
     PicoChat_InspectClose();
     bool clean = true;
@@ -4076,8 +4075,6 @@ PicoHostShutdownResult PicoHost_Shutdown(PicoHost *host)
         }
     }
     if (!PicoHost_TasksQuiesceBefore(host, &deadline))
-        clean = false;
-    if (!PicoPlugins_QuiesceScannerBefore(host, &deadline))
         clean = false;
     if (!PicoHost_DetachExternal(host))
         clean = false;

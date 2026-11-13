@@ -249,9 +249,7 @@ struct PicoHost {
     int module_count;
     int module_capacity;
     uint64_t next_module_generation;
-    double plugin_last_poll;
-    struct PicoPluginScanner *plugin_scanner;
-    bool plugin_scan_pending;
+    struct PicoInitialPluginLoad *plugin_initial_load;
     struct PicoCompileJob *plugin_compile;
     bool plugin_compile_pending;
     bool plugin_reload_pending;
@@ -468,8 +466,6 @@ uint64_t PicoHost_AllocAskId(PicoHost *host);
 bool PicoHost_RejectAsk(PicoHost *host, uint64_t id, const char *answer_json);
 int PicoHost_TotalAgentCount(const PicoHost *host);
 void PicoPlugins_CancelCompiles(PicoHost *host);
-void PicoPlugins_StopScanner(PicoHost *host);
-bool PicoPlugins_QuiesceScannerBefore(PicoHost *host, const struct timespec *deadline);
 void PicoModule_Retain(PicoModuleGeneration *module);
 void PicoModule_Release(PicoModuleGeneration *module);
 

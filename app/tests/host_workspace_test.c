@@ -317,20 +317,19 @@ _Static_assert((PicoAgentId)0 == 0, "zero is an invalid agent id");
  * while keeping the actual production entry points nonblocking. */
 static void WaitPluginLoad(PicoHost *host)
 {
+    PicoPlugins_Load(host);
     PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
-        PicoPlugins_Load(host);
-        if (!host->plugin_compile) return;
+        pico_host_pump(host);
+        if (!host->plugin_initial_load && !host->plugin_compile) return;
     }
 }
 static void WaitPluginPoll(PicoHost *host)
 {
-    /* A due poll schedules detection; the next poll adopts its result. */
-    host->plugin_last_poll = -1;
     PICO_TEST_WAIT_LOOP("asynchronous completion")
     {
         PicoPlugins_Poll(host);
-        if (!host->plugin_scan_pending && !host->plugin_compile) return;
+        if (!host->plugin_initial_load && !host->plugin_compile && !host->plugin_reload_pending) return;
     }
 }
 static bool WaitHostReload(PicoHost *host)
@@ -9423,12 +9422,14 @@ static int TestNestedWorkspaceExtensionOwnership(void)
     return 0;
 }
 
-static const char *kWorkspaceLocalPollExtV1 =
+static const char *kWorkspaceLocalManualExtV1 =
     "#include \"pico/plugin.h\"\n"
     "#include <stdlib.h>\n"
+    "static void Run(PicoAgentContext *ctx, const char *args, PicoToolResult *out, void *state)\n"
+    "{ (void)ctx; (void)args; (void)state; *out = (PicoToolResult){0}; }\n"
     "static int Init(PicoWorkspace *workspace, void **state_out)\n"
     "{\n"
-    "    (void)workspace;\n"
+    "    pico_add_tool(workspace, \"local_manual_tool\", \"Initial tool\", \"{}\", Run, NULL, PICO_TOOL_SEQUENTIAL);\n"
     "    *state_out = malloc(1);\n"
     "    return *state_out ? 0 : -1;\n"
     "}\n"
@@ -9441,19 +9442,21 @@ static const char *kWorkspaceLocalPollExtV1 =
     "{\n"
     "    return (PicoExt){\n"
     "        .abi = PICO_EXT_ABI,\n"
-    "        .name = \"local_poll\",\n"
+    "        .name = \"local_manual\",\n"
     "        .description = \"version one\",\n"
     "        .workspace_init = Init,\n"
     "        .workspace_shutdown = Shutdown,\n"
     "    };\n"
     "}\n";
 
-static const char *kWorkspaceLocalPollExtV2 =
+static const char *kWorkspaceLocalManualExtV2 =
     "#include \"pico/plugin.h\"\n"
     "#include <stdlib.h>\n"
+    "static void Run(PicoAgentContext *ctx, const char *args, PicoToolResult *out, void *state)\n"
+    "{ (void)ctx; (void)args; (void)state; *out = (PicoToolResult){0}; }\n"
     "static int Init(PicoWorkspace *workspace, void **state_out)\n"
     "{\n"
-    "    (void)workspace;\n"
+    "    pico_add_tool(workspace, \"local_manual_tool\", \"Initial tool\", \"{}\", Run, NULL, PICO_TOOL_SEQUENTIAL);\n"
     "    *state_out = malloc(1);\n"
     "    return *state_out ? 0 : -1;\n"
     "}\n"
@@ -9466,7 +9469,7 @@ static const char *kWorkspaceLocalPollExtV2 =
     "{\n"
     "    return (PicoExt){\n"
     "        .abi = PICO_EXT_ABI,\n"
-    "        .name = \"local_poll\",\n"
+    "        .name = \"local_manual\",\n"
     "        .description = \"version two\",\n"
     "        .workspace_init = Init,\n"
     "        .workspace_shutdown = Shutdown,\n"
@@ -9491,145 +9494,65 @@ static uint64_t WorkspaceSourceGeneration(const PicoWorkspace *workspace,
     return 0;
 }
 
-/* A dependency manifest can be on a slow filesystem. A pending read must not
- * block an ordinary automatic poll, and closing the host must quiesce the
- * scanner once the read completes. */
-static int TestPluginSourceScanDoesNotBlockUi(void)
+/* Ordinary host pumping must leave edited extensions alone. Keep pumping
+ * across idle ticks so a background detection result could have been adopted. */
+static void PumpWithoutReload(PicoHost *host)
 {
-    char cfg[] = "/tmp/pico-scan-cfg-XXXXXX";
-    char cache[] = "/tmp/pico-scan-cache-XXXXXX";
-    char ext_dir[4096], src[8192], header[8192], cache_dir[4096];
-    char manifest[8192] = {0}, saved[8192] = {0};
+    for (int i = 0; i < 1000; i++)
+    {
+        pico_host_pump(host);
+        PicoTest_Poll();
+    }
+}
+
+static int TestHeaderChangesRequireManualReload(void)
+{
+    char cfg[] = "/tmp/pico-manual-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-manual-cache-XXXXXX";
+    char ext_dir[4096], src[8192], header[8192];
     PicoHost *host = NULL;
     int failed = 1;
     if (!mkdtemp(cfg) || !mkdtemp(cache)) return 1;
     snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
-    snprintf(cache_dir, sizeof(cache_dir), "%s/pico/ext", cache);
     snprintf(src, sizeof(src), "%s/probe.c", ext_dir);
     snprintf(header, sizeof(header), "%s/value.h", ext_dir);
     const char *code =
         "#include \"pico/plugin.h\"\n#include \"value.h\"\n"
         "static int Init(PicoHost *h, void **s) { (void)h; int *v=malloc(sizeof(*v)); if(!v)return -1; *v=VALUE; *s=v; return 0; }\n"
         "static void Stop(PicoHost *h, void *s) { (void)h; free(s); }\n"
-        "PicoExt pico_ext(void) { return (PicoExt){.abi=PICO_EXT_ABI,.name=\"scan_probe\",.host_init=Init,.host_shutdown=Stop}; }\n";
+        "PicoExt pico_ext(void) { return (PicoExt){.abi=PICO_EXT_ABI,.name=\"manual_probe\",.host_init=Init,.host_shutdown=Stop}; }\n";
     if (MkdirParents(ext_dir) || WriteFile(src, code) ||
         WriteFile(header, "#define VALUE 10\n")) goto done;
     setenv("XDG_CONFIG_HOME", cfg, 1);
     setenv("XDG_CACHE_HOME", cache, 1);
     if (pico_host_init(&host, NULL, false) != PICO_OK) goto done;
     WaitPluginLoad(host);
-    int *value = PicoPlugins_HostState(host, "scan_probe");
-    if (!value || *value != 10) goto done;
-    DIR *dir = opendir(cache_dir);
-    if (!dir) goto done;
-    struct dirent *entry;
-    while ((entry = readdir(dir)))
-    {
-        size_t n = strlen(entry->d_name);
-        if (n > 5 && strcmp(entry->d_name + n - 5, ".deps") == 0)
-        {
-            snprintf(manifest, sizeof(manifest), "%s/%s", cache_dir, entry->d_name);
-            break;
-        }
-    }
-    closedir(dir);
-    if (!manifest[0]) goto done;
-    snprintf(saved, sizeof(saved), "%s.saved", manifest);
-    if (rename(manifest, saved) || mkfifo(manifest, 0600)) goto done;
-
-    host->plugin_last_poll = -1;
-    PicoPlugins_Poll(host);
-    if (!host->plugin_scan_pending) goto done;
-    /* Opening the writer proves the scanner has opened the FIFO. Keep it
-     * open so a UI poll must return while the dependency read is still held. */
-    PicoTest_Wait(__func__, "scanner opened dependency FIFO");
-    int writer = open(manifest, O_WRONLY);
-    if (writer < 0) goto done;
-    PicoPlugins_Poll(host);
-    bool responsive = PicoPlugins_HostState(host, "scan_probe") == value;
-    close(writer);
-    if (!responsive || rename(saved, manifest)) goto done;
-    WaitPluginPoll(host);
-    value = PicoPlugins_HostState(host, "scan_probe");
+    int *value = PicoPlugins_HostState(host, "manual_probe");
     if (!value || *value != 10) goto done;
     if (WriteFile(header, "#define VALUE 20\n")) goto done;
-    host->plugin_last_poll = -1;
-    WaitPluginPoll(host);
-    value = PicoPlugins_HostState(host, "scan_probe");
+    PumpWithoutReload(host);
+    if (PicoPlugins_HostState(host, "manual_probe") != value || *value != 10) goto done;
+    if (!WaitHostReload(host)) goto done;
+    value = PicoPlugins_HostState(host, "manual_probe");
+    if (!value || *value != 20) goto done;
+    if (unlink(src)) goto done;
+    PumpWithoutReload(host);
+    if (PicoPlugins_HostState(host, "manual_probe") != value) goto done;
+    if (!WaitHostReload(host) || PicoPlugins_HostState(host, "manual_probe")) goto done;
+    if (WriteFile(src, code)) goto done;
+    PumpWithoutReload(host);
+    if (PicoPlugins_HostState(host, "manual_probe")) goto done;
+    if (!WaitHostReload(host)) goto done;
+    value = PicoPlugins_HostState(host, "manual_probe");
     if (!value || *value != 20) goto done;
     failed = 0;
 done:
-    if (failed) Fail("source detection must not block UI on a slow dependency read");
-    if (saved[0] && manifest[0]) rename(saved, manifest);
+    if (failed) Fail("source additions, deletions, and header edits require manual reload");
     pico_host_free(host);
     unsetenv("XDG_CONFIG_HOME");
     unsetenv("XDG_CACHE_HOME");
     RmRf(cfg); RmRf(cache);
     return failed;
-}
-
-static int TestBlockedSourceScanRetainsShutdown(void)
-{
-    pid_t child = fork();
-    if (child < 0) { Fail("source scanner shutdown fork"); return 1; }
-    if (child == 0)
-    {
-        char cfg[] = "/tmp/pico-scan-shutdown-cfg-XXXXXX";
-        char cache[] = "/tmp/pico-scan-shutdown-cache-XXXXXX";
-        char ext_dir[4096], src[8192], cache_dir[4096], manifest[8192] = {0};
-        PicoHost *host = NULL;
-        if (!mkdtemp(cfg) || !mkdtemp(cache)) _exit(2);
-        snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
-        snprintf(cache_dir, sizeof(cache_dir), "%s/pico/ext", cache);
-        snprintf(src, sizeof(src), "%s/probe.c", ext_dir);
-        if (MkdirParents(ext_dir) ||
-            WriteFile(src, "#include \"pico/plugin.h\"\nPicoExt pico_ext(void) { return (PicoExt){.abi=PICO_EXT_ABI,.name=\"shutdown_scan_probe\"}; }\n"))
-            _exit(3);
-        setenv("XDG_CONFIG_HOME", cfg, 1);
-        setenv("XDG_CACHE_HOME", cache, 1);
-        if (pico_host_init(&host, NULL, false) != PICO_OK) _exit(4);
-        WaitPluginLoad(host);
-        bool loaded = false;
-        for (int i = 0; i < host->module_count; i++)
-            if (host->modules[i].desired && strcmp(host->modules[i].source, src) == 0)
-                loaded = true;
-        if (!loaded) _exit(5);
-        DIR *dir = opendir(cache_dir);
-        if (!dir) _exit(6);
-        struct dirent *entry;
-        while ((entry = readdir(dir)))
-        {
-            size_t n = strlen(entry->d_name);
-            if (n > 5 && strcmp(entry->d_name + n - 5, ".deps") == 0)
-            {
-                snprintf(manifest, sizeof(manifest), "%s/%s", cache_dir, entry->d_name);
-                break;
-            }
-        }
-        closedir(dir);
-        if (!manifest[0] || unlink(manifest) || mkfifo(manifest, 0600)) _exit(7);
-        host->plugin_last_poll = -1;
-        PicoPlugins_Poll(host);
-        /* Keep the writer open, so the scanner has opened the FIFO but cannot
-         * reach EOF. Unlike a sleep, this guarantees it stays blocked. */
-        PicoTest_Wait(__func__, "scanner opened dependency FIFO");
-        int writer = open(manifest, O_WRONLY);
-        if (writer < 0) _exit(8);
-        PicoHostShutdownResult result = PicoHost_Shutdown(host);
-
-        close(writer);
-        RmRf(cfg); RmRf(cache);
-        _exit(result == PICO_HOST_SHUTDOWN_RETAINED ? 0 : 10);
-    }
-    int status = 0;
-    pid_t waited;
-    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
-    if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
-    {
-        Fail("blocked source scan must use retained bounded shutdown");
-        return 1;
-    }
-    return 0;
 }
 
 static int TestHeaderReloadIsAsynchronous(void)
@@ -9895,12 +9818,11 @@ static int TestSdkDependencyManifestsDoNotCrossReloadHosts(void)
 
     setenv("PICO_DATA_DIR", sdk_a, 1);
     Pico_PathsInit(NULL);
-    host_a->plugin_last_poll = -1.0;
-    WaitPluginPoll(host_a);
+    if (!WaitHostReload(host_a)) goto done;
     state_a = PicoPlugins_HostState(host_a, "manifest_probe");
-    if (HostSourceGeneration(host_a, source) != generation || !state_a || *state_a != 1)
+    if (!state_a || *state_a != 1)
     {
-        Fail("another SDK root's dependency manifest must not reload this host");
+        Fail("another SDK root's dependency manifest must not affect this host's reload");
         goto done;
     }
     failed = 0;
@@ -9918,27 +9840,33 @@ done:
     return failed;
 }
 
-static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
+static int TestWorkspaceLocalChangesRequireManualReload(void)
 {
-    char cfg[] = "/tmp/pico-local-poll-cfg-XXXXXX";
-    char cache[] = "/tmp/pico-local-poll-cache-XXXXXX";
-    char dir_a[] = "/tmp/pico-local-poll-a-XXXXXX";
-    char dir_b[] = "/tmp/pico-local-poll-b-XXXXXX";
+    char cfg[] = "/tmp/pico-local-manual-cfg-XXXXXX";
+    char cache[] = "/tmp/pico-local-manual-cache-XXXXXX";
+    char dir_a[] = "/tmp/pico-local-manual-a-XXXXXX";
+    char dir_b[] = "/tmp/pico-local-manual-b-XXXXXX";
     char ext_dir[4096];
     char source[8192];
+    char profile_dir[4096], profile_path[8192];
     PicoHost *host = NULL;
     if (!mkdtemp(cfg) || !mkdtemp(cache) || !mkdtemp(dir_a) || !mkdtemp(dir_b))
     {
-        Fail("mkdtemp local polling isolation");
+        Fail("mkdtemp local manual reload isolation");
         return 1;
     }
     snprintf(ext_dir, sizeof(ext_dir), "%s/.pico/extensions", dir_a);
-    snprintf(source, sizeof(source), "%s/local_poll.c", ext_dir);
-    if (MkdirParents(ext_dir) != 0 || WriteFile(source, kWorkspaceLocalPollExtV1) != 0)
+    snprintf(source, sizeof(source), "%s/local_manual.c", ext_dir);
+    if (MkdirParents(ext_dir) != 0 || WriteFile(source, kWorkspaceLocalManualExtV1) != 0)
     {
-        Fail("write initial workspace-local polling extension");
+        Fail("write initial workspace-local extension");
         return 1;
     }
+    snprintf(profile_dir, sizeof(profile_dir), "%s/pico/subagents", cfg);
+    snprintf(profile_path, sizeof(profile_path), "%s/manual.json", profile_dir);
+    if (MkdirParents(profile_dir) ||
+        WriteFile(profile_path, "{\"purpose\":\"Use the initial extension tool\",\"tools\":[\"local_manual_tool\"]}"))
+        goto fail;
     setenv("XDG_CONFIG_HOME", cfg, 1);
     setenv("XDG_CACHE_HOME", cache, 1);
     PicoWorkspaceId id_a = 0;
@@ -9947,12 +9875,18 @@ static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
         pico_workspace_open(host, dir_a, &id_a) != PICO_OK ||
         pico_workspace_open(host, dir_b, &id_b) != PICO_OK)
     {
-        Fail("open workspaces for local polling isolation");
+        Fail("open workspaces for local manual reload isolation");
         goto fail;
     }
     WaitPluginPoll(host);
+    pico_host_pump(host);
     PicoWorkspace *workspace_a = PicoHost_FindWorkspace(host, id_a);
     PicoWorkspace *workspace_b = PicoHost_FindWorkspace(host, id_b);
+    if (!PicoSubagentConfig_Find(workspace_a, "manual"))
+    {
+        Fail("initial asynchronous extension loading must make dependent profiles available");
+        goto fail;
+    }
     PicoRegistrationGeneration *old_a = workspace_a->active_registration;
     PicoRegistrationGeneration *old_b = workspace_b->active_registration;
     PicoModuleGeneration *old_host_module = host->host_plugin_count > 0
@@ -9960,14 +9894,21 @@ static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
                                                 : NULL;
     uint64_t old_local_generation = WorkspaceSourceGeneration(workspace_a, source);
     if (!old_a || !old_b || !old_host_module || !old_local_generation ||
-        WriteFile(source, kWorkspaceLocalPollExtV2) != 0)
+        WriteFile(source, kWorkspaceLocalManualExtV2) != 0)
     {
-        Fail("prepare workspace-local polling change");
+        Fail("prepare workspace-local source change");
         goto fail;
     }
 
-    host->plugin_last_poll = -1.0;
-    WaitPluginPoll(host);
+    PumpWithoutReload(host);
+    if (WorkspaceSourceGeneration(workspace_a, source) != old_local_generation ||
+        workspace_a->active_registration != old_a || workspace_a->reload_queued ||
+        !PicoWorkspace_AcceptsNewWork(workspace_a))
+    {
+        Fail("editing workspace-local sources must not queue or activate a reload");
+        goto fail;
+    }
+    if (!WaitWorkspaceReload(workspace_a)) goto fail;
     uint64_t new_local_generation = WorkspaceSourceGeneration(workspace_a, source);
     bool isolated = new_local_generation > old_local_generation &&
                     workspace_a->active_registration != old_a &&
@@ -9977,7 +9918,7 @@ static int TestWorkspaceLocalPollingReloadsOnlyOwner(void)
                     host->host_plugins[0].module == old_host_module;
     if (!isolated)
     {
-        Fail("workspace-local source polling must reload only its owning workspace");
+        Fail("manual workspace reload must affect only its owning workspace");
         goto fail;
     }
 
@@ -10019,24 +9960,6 @@ static const char *kQuarantineHostExt =
     "    };\n"
     "}\n";
 
-static const char *kQuarantineOtherHostExt =
-    "#include \"pico/plugin.h\"\n"
-    "static int HostInit(PicoHost *host, void **state_out)\n"
-    "{\n"
-    "    static int state;\n"
-    "    (void)host;\n"
-    "    *state_out = &state;\n"
-    "    return 0;\n"
-    "}\n"
-    "PicoExt pico_ext(void)\n"
-    "{\n"
-    "    return (PicoExt){\n"
-    "        .abi = PICO_EXT_ABI,\n"
-    "        .name = \"quarantine_other_host\",\n"
-    "        .host_init = HostInit,\n"
-    "    };\n"
-    "}\n";
-
 static const char *kQuarantineWorkspaceExt =
     "#include \"pico/plugin.h\"\n"
     "static int WorkspaceInit(PicoWorkspace *workspace, void **state_out)\n"
@@ -10055,14 +9978,13 @@ static const char *kQuarantineWorkspaceExt =
     "    };\n"
     "}\n";
 
-static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
+static int TestHostCompileFailurePreservesActiveUntilManualRetry(void)
 {
     char cfg[] = "/tmp/pico-qhost-cfg-XXXXXX";
     char cache[] = "/tmp/pico-qhost-cache-XXXXXX";
     char ws[] = "/tmp/pico-qhost-ws-XXXXXX";
     char ext_dir[4096];
     char source[8192];
-    char other_source[8192];
     PicoHost *host = NULL;
     PicoWorkspaceId id = 0;
     void *working_state = NULL;
@@ -10075,7 +9997,6 @@ static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
     }
     snprintf(ext_dir, sizeof(ext_dir), "%s/pico/extensions", cfg);
     snprintf(source, sizeof(source), "%s/quarantine_host.c", ext_dir);
-    snprintf(other_source, sizeof(other_source), "%s/quarantine_other_host.c", ext_dir);
     if (MkdirParents(ext_dir) != 0 || WriteFile(source, kQuarantineHostExt) != 0)
     {
         Fail("write host compile quarantine extension");
@@ -10104,8 +10025,7 @@ static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
         Fail("overwrite host compile quarantine extension");
         goto fail;
     }
-    host->plugin_last_poll = -1.0;
-    WaitPluginPoll(host);
+    (void)WaitHostReload(host);
     if (!host->status_warn || !strstr(host->status_warn, "quarantine_host.c"))
     {
         Fail("host compile failure must warn");
@@ -10122,24 +10042,10 @@ static int TestHostCompileFailureQuarantinesUnchangedPoll(void)
         Fail("strdup host compile quarantine warning");
         goto fail;
     }
-    host->plugin_last_poll = -1.0;
     WaitPluginPoll(host);
     if (!host->status_warn || strcmp(host->status_warn, warned) != 0)
     {
         Fail("unchanged host compile failure must not retry on poll");
-        goto fail;
-    }
-    if (WriteFile(other_source, kQuarantineOtherHostExt) != 0)
-    {
-        Fail("write second host extension beside quarantined failure");
-        goto fail;
-    }
-    host->plugin_last_poll = -1.0;
-    WaitPluginPoll(host);
-    if (!host->status_warn || strcmp(host->status_warn, warned) != 0 ||
-        !PicoPlugins_HostState(host, "quarantine_other_host"))
-    {
-        Fail("another host source change must skip the quarantined failure");
         goto fail;
     }
     if (WaitHostReload(host) || !host->status_warn ||
@@ -10168,15 +10074,13 @@ fail:
     return 1;
 }
 
-static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
+static int TestWorkspaceCompileFailurePreservesActiveUntilManualRetry(void)
 {
     char cfg[] = "/tmp/pico-qws-cfg-XXXXXX";
     char cache[] = "/tmp/pico-qws-cache-XXXXXX";
     char ws[] = "/tmp/pico-qws-ws-XXXXXX";
     char ext_dir[4096];
     char source[8192];
-    char global_ext_dir[4096];
-    char global_source[8192];
     PicoHost *host = NULL;
     PicoWorkspaceId id = 0;
     PicoWorkspace *workspace;
@@ -10190,8 +10094,6 @@ static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
     }
     snprintf(ext_dir, sizeof(ext_dir), "%s/.pico/extensions", ws);
     snprintf(source, sizeof(source), "%s/quarantine_ws.c", ext_dir);
-    snprintf(global_ext_dir, sizeof(global_ext_dir), "%s/pico/extensions", cfg);
-    snprintf(global_source, sizeof(global_source), "%s/quarantine_other_host.c", global_ext_dir);
     if (MkdirParents(ext_dir) != 0 || WriteFile(source, kQuarantineWorkspaceExt) != 0)
     {
         Fail("write initial workspace compile quarantine extension");
@@ -10217,8 +10119,7 @@ static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
         Fail("activate and overwrite workspace compile quarantine extension");
         goto fail;
     }
-    host->plugin_last_poll = -1.0;
-    WaitPluginPoll(host);
+    (void)WaitWorkspaceReload(workspace);
     if (!host->status_warn || !strstr(host->status_warn, "quarantine_ws.c"))
     {
         Fail("workspace compile failure must warn");
@@ -10235,25 +10136,10 @@ static int TestWorkspaceCompileFailureQuarantinesUnchangedPoll(void)
         Fail("strdup workspace compile quarantine warning");
         goto fail;
     }
-    host->plugin_last_poll = -1.0;
     WaitPluginPoll(host);
     if (!host->status_warn || strcmp(host->status_warn, warned) != 0)
     {
         Fail("unchanged workspace compile failure must not retry on poll");
-        goto fail;
-    }
-    if (MkdirParents(global_ext_dir) != 0 ||
-        WriteFile(global_source, kQuarantineOtherHostExt) != 0)
-    {
-        Fail("write global extension beside workspace quarantine");
-        goto fail;
-    }
-    host->plugin_last_poll = -1.0;
-    WaitPluginPoll(host);
-    if (!host->status_warn || strcmp(host->status_warn, warned) != 0 ||
-        !PicoPlugins_HostState(host, "quarantine_other_host"))
-    {
-        Fail("global rollout must skip unchanged workspace compile failure");
         goto fail;
     }
     (void)WaitWorkspaceReload(workspace);
@@ -23373,21 +23259,20 @@ int main(int argc, char **argv)
         return 1;
     }
     if (PICO_TEST_RUN(TestHeaderReloadIsAsynchronous())) return 1;
-    if (PICO_TEST_RUN(TestPluginSourceScanDoesNotBlockUi())) return 1;
-    if (PICO_TEST_RUN(TestBlockedSourceScanRetainsShutdown())) return 1;
+    if (PICO_TEST_RUN(TestHeaderChangesRequireManualReload())) return 1;
     if (PICO_TEST_RUN(TestSdkDependencyManifestsDoNotCrossReloadHosts()) != 0)
     {
         return 1;
     }
-    if (PICO_TEST_RUN(TestWorkspaceLocalPollingReloadsOnlyOwner()) != 0)
+    if (PICO_TEST_RUN(TestWorkspaceLocalChangesRequireManualReload()) != 0)
     {
         return 1;
     }
-    if (PICO_TEST_RUN(TestHostCompileFailureQuarantinesUnchangedPoll()) != 0)
+    if (PICO_TEST_RUN(TestHostCompileFailurePreservesActiveUntilManualRetry()) != 0)
     {
         return 1;
     }
-    if (PICO_TEST_RUN(TestWorkspaceCompileFailureQuarantinesUnchangedPoll()) != 0)
+    if (PICO_TEST_RUN(TestWorkspaceCompileFailurePreservesActiveUntilManualRetry()) != 0)
     {
         return 1;
     }

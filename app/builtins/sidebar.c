@@ -17,6 +17,7 @@
 #include "text_range.h"
 #include "text_ink.h"
 #include "text_field_ui.h"
+#include "richtext.h"
 
 #include "clay/clay.h"
 #include "clay_custom.h"
@@ -66,6 +67,8 @@ typedef struct SidebarScanWorker
     int live_title_count;
     bool failed;
     bool reconcile;
+    bool read_activity, activity_valid;
+    PicoActivitySnapshot activity;
 } SidebarScanWorker;
 
 typedef struct SidebarLiveAgent
@@ -105,6 +108,15 @@ typedef struct InboxVisit
     InboxSection section;
 } InboxVisit;
 
+typedef struct SidebarActivityTooltip
+{
+    char heading[128], subtitle[128];
+    const char *labels[4];
+    char values[4][64];
+    char model_labels[3][260];
+    int count;
+} SidebarActivityTooltip;
+
 typedef struct SidebarState
 {
     PicoHost *host;
@@ -138,6 +150,10 @@ typedef struct SidebarState
     uint64_t project_epoch;
     uint64_t order_epoch;
     SidebarScanWorker *scan_worker;
+    PicoActivitySnapshot activity;
+    bool activity_loaded, activity_visible, activity_attempted;
+    SidebarActivityTooltip activity_tip;
+    double activity_checked;
     Texture2D archive_closed;
     Texture2D pen_icon;
     Texture2D copy_icon;
@@ -434,6 +450,8 @@ static void *SidebarScanRun(void *arg)
         (!atomic_load(&worker->cancelled) &&
          !PicoCatalog_ReadSessionTitles(worker->live_titles, worker->live_title_count, &worker->cancelled)))
         worker->failed = true;
+    if (worker->read_activity && !atomic_load(&worker->cancelled))
+        worker->activity_valid = PicoActivity_Read((int64_t)time(NULL), &worker->activity);
     worker->token_after_valid = PicoCatalog_ReadChangeToken(worker->token_after);
     return NULL;
 }
@@ -494,6 +512,17 @@ static void SidebarRestorePickerOrder(PicoHost *host, PicoCatalogWorkspace *next
 
 static void SidebarFinishRefresh(SidebarState *s, SidebarScanWorker *worker)
 {
+    if (worker->read_activity)
+    {
+        s->activity_checked = GetTime();
+        s->activity_attempted = true;
+        if (worker->activity_valid)
+        {
+            s->activity = worker->activity;
+            s->activity_loaded = true;
+            pico_host_request_redraw(s->host);
+        }
+    }
     if (s->pin_saving) { s->dirty = true; return; }
     /* Failed maintenance leaves the last successful snapshot on screen. Do
      * not spin a failed reconciliation on every frame; retry on its interval. */
@@ -572,16 +601,25 @@ static void SidebarScanCompleted(PicoHost *host, void *arg)
 {
     SidebarScanWorker *worker = (SidebarScanWorker *)arg;
     SidebarState *s = host ? (SidebarState *)PicoPlugins_HostState(host, "sidebar") : NULL;
-    if (s && s->scan_worker == worker)
-        s->scan_worker = NULL;
-    if (!s || s->scan_serial != worker->serial || atomic_load(&worker->cancelled))
+    /* Core tasks can outlive host-extension reload. Serials restart in each
+     * instance, so only the exact active worker may publish its snapshot. */
+    if (!s || s->scan_worker != worker) return;
+    s->scan_worker = NULL;
+    if (s->scan_serial != worker->serial || atomic_load(&worker->cancelled))
         return;
     SidebarFinishRefresh(s, worker);
+}
+
+static bool SidebarActivityDue(const SidebarState *s)
+{
+    return !PicoHost_SelectedAgent(s->host) &&
+           (!s->activity_attempted || GetTime() - s->activity_checked >= 60);
 }
 
 static void SidebarRefreshSync(SidebarState *s, bool reconcile)
 {
     SidebarScanWorker worker = {.reconcile = reconcile,
+                                .read_activity = SidebarActivityDue(s),
                                 .inbox_epoch = PicoCatalog_InboxEpoch(s->host),
                                 .project_epoch = s->host->project_preference_epoch,
                                 .order_epoch = s->order_epoch};
@@ -632,6 +670,7 @@ static void SidebarStartRefresh(SidebarState *s, bool reconcile)
     worker->project_epoch = s->host->project_preference_epoch;
     worker->order_epoch = s->order_epoch;
     worker->reconcile = reconcile;
+    worker->read_activity = SidebarActivityDue(s);
     if (!SidebarCopyLiveTitleTargets(s, worker))
     {
         SidebarScanDestroy(worker);
@@ -2085,6 +2124,316 @@ static void RenderWorkspaceDragPreview(SidebarState *s)
     }
 }
 
+static void ActivityText(const char *text, bool bold, bool muted)
+{
+    CLAY_TEXT(CStr(text), CLAY_TEXT_CONFIG({.fontId = bold ? FONT_BOLD : FONT_REGULAR,
+        .fontSize = PICO_FONT_CAPTION, .textColor = muted ? COLOR_MUTED : COLOR_TEXT,
+        .wrapMode = CLAY_TEXT_WRAP_NONE}));
+}
+
+static void ActivityGap(float height)
+{
+    CLAY_AUTO_ID({.layout = {.sizing = {.height = CLAY_SIZING_FIXED(height)}}}) {}
+}
+
+static const char *ActivityAmount(SidebarState *s, int64_t amount)
+{
+    char *label = SidebarNextLabel(s);
+    if (!label) return "—";
+    if (amount >= 1000000000) snprintf(label, SIDEBAR_LABEL_CAPACITY, "%.2fb", (double)amount / 1000000000);
+    else if (amount >= 1000000) snprintf(label, SIDEBAR_LABEL_CAPACITY, "%.2fm", (double)amount / 1000000);
+    else if (amount >= 1000) snprintf(label, SIDEBAR_LABEL_CAPACITY, "%.0fk", (double)amount / 1000);
+    else snprintf(label, SIDEBAR_LABEL_CAPACITY, "%lld", (long long)amount);
+    return label;
+}
+
+static void ActivityPair(const char *left, const char *right, bool heading)
+{
+    CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+        .sizing = {.width = CLAY_SIZING_GROW(0)}}})
+    {
+        ActivityText(left, heading, !heading);
+        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+        ActivityText(right, false, heading);
+    }
+}
+
+/* Split on explicit newlines and bound even an unbroken provider/model ID.
+ * Use the same measurement callback as rendering, including font scaling. */
+static int ActivityTooltipLine(const char *text, float width, Clay_TextElementConfig config)
+{
+    int length = 0;
+    while (text[length] && text[length] != '\n')
+    {
+        int next = length + 1;
+        while (((unsigned char)text[next] & 0xc0) == 0x80) next++;
+        if (length && RichText_MeasureWidth((Clay_String){.chars = text, .length = next}, config) > width)
+            break;
+        length = next;
+    }
+    return length;
+}
+
+static void ActivityGroupedAmount(char *out, size_t cap, int64_t amount)
+{
+    char digits[32];
+    snprintf(digits, sizeof(digits), "%lld", (long long)amount);
+    size_t length = strlen(digits), used = 0;
+    for (size_t i = 0; i < length && used + 1 < cap; i++)
+    {
+        if (i && (length - i) % 3 == 0 && used + 1 < cap) out[used++] = ',';
+        if (used + 1 < cap) out[used++] = digits[i];
+    }
+    out[used] = '\0';
+}
+
+static float ActivityTooltipTextSize(const char *text, float max_width, Clay_TextElementConfig config,
+                                     int *lines)
+{
+    float width = 0;
+    for (const char *p = text; *p; )
+    {
+        int length = ActivityTooltipLine(p, max_width, config);
+        width = fmaxf(width, RichText_MeasureWidth((Clay_String){.chars = p, .length = length}, config));
+        (*lines)++;
+        p += length;
+        if (*p == '\n') p++;
+    }
+    return width;
+}
+
+static void ActivityTooltipText(const char *text, float width, Clay_TextElementConfig config)
+{
+    for (const char *p = text; *p; )
+    {
+        int length = ActivityTooltipLine(p, width, config);
+        CLAY_TEXT(((Clay_String){.chars = p, .length = length}), CLAY_TEXT_CONFIG(config));
+        p += length;
+        if (*p == '\n') p++;
+    }
+}
+
+static void RenderActivityTooltip(const SidebarActivityTooltip *tip, Clay_ElementId anchor_id)
+{
+    Clay_BoundingBox anchor = Clay_GetElementData(anchor_id).boundingBox;
+    Clay_Dimensions viewport = Clay_GetLayoutDimensions();
+    float scale = Pico_FontScale();
+    const uint16_t padding = 12;
+    float line = Pico_FontPxU16(PICO_FONT_CAPTION_LINE), row_gap = 4 * scale, heading_gap = 10 * scale;
+    Clay_TextElementConfig value_config = {.fontId = FONT_REGULAR, .fontSize = PICO_FONT_CAPTION,
+        .lineHeight = (uint16_t)line, .textColor = COLOR_TEXT, .wrapMode = CLAY_TEXT_WRAP_NONE};
+    Clay_TextElementConfig heading_config = value_config, muted_config = value_config;
+    heading_config.fontId = FONT_BOLD;
+    muted_config.textColor = COLOR_MUTED;
+    float max_text_width = fminf(380 * scale, viewport.width - 24) - 2 * padding;
+    int header_lines = 0;
+    float text_width = ActivityTooltipTextSize(tip->heading, max_text_width, heading_config, &header_lines);
+    text_width = fmaxf(text_width, ActivityTooltipTextSize(tip->subtitle, max_text_width, muted_config, &header_lines));
+    float label_width = 0, value_width = 0;
+    for (int i = 0; i < tip->count; i++)
+    {
+        label_width = fmaxf(label_width, RichText_MeasureWidth(CStr(tip->labels[i]), muted_config));
+        value_width = fmaxf(value_width, RichText_MeasureWidth(CStr(tip->values[i]), value_config));
+    }
+    /* Round measured columns outward before subtraction: otherwise float
+     * cancellation can wrap the last glyph of a label that fits exactly. */
+    label_width = ceilf(label_width);
+    value_width = ceilf(value_width);
+    text_width = fminf(max_text_width, fmaxf(text_width, label_width + 24 * scale + value_width));
+    float row_heights[4] = {0}, rows_height = 0;
+    label_width = fmaxf(1, text_width - value_width - 24 * scale);
+    for (int i = 0; i < tip->count; i++)
+    {
+        int lines = 0;
+        (void)ActivityTooltipTextSize(tip->labels[i], label_width, muted_config, &lines);
+        row_heights[i] = fmaxf(1, lines) * line;
+        rows_height += row_heights[i];
+    }
+    float width = text_width + 2 * padding;
+    float height = fminf(header_lines * line + heading_gap + rows_height +
+                        (tip->count - 1) * row_gap + 2 * padding, viewport.height - 24);
+    float x = fmaxf(12, fminf(anchor.x + anchor.width + 12, viewport.width - width - 12));
+    float y = fmaxf(12, fminf(anchor.y, viewport.height - height - 12));
+    CLAY(CLAY_ID("ActivityTooltip"), {
+        .floating = {.attachTo = CLAY_ATTACH_TO_ROOT, .offset = {.x = x, .y = y},
+            .zIndex = 30, .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+        .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM, .padding = CLAY_PADDING_ALL(padding),
+            .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(height)}},
+        .clip = {.horizontal = true, .vertical = true},
+        .backgroundColor = COLOR_CODE_BG, .cornerRadius = CLAY_CORNER_RADIUS(6)})
+    {
+        ActivityTooltipText(tip->heading, max_text_width, heading_config);
+        ActivityTooltipText(tip->subtitle, max_text_width, muted_config);
+        ActivityGap(heading_gap);
+        for (int i = 0; i < tip->count; i++)
+        {
+            if (i) ActivityGap(row_gap);
+            CLAY(CLAY_IDI("ActivityTooltipRow", i), {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                .sizing = {.width = CLAY_SIZING_FIXED(text_width), .height = CLAY_SIZING_FIXED(row_heights[i])}}})
+            {
+                CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+                    .sizing = {.width = CLAY_SIZING_FIXED(label_width), .height = CLAY_SIZING_FIXED(row_heights[i])}}})
+                { ActivityTooltipText(tip->labels[i], label_width, muted_config); }
+                CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0)}}}) {}
+                CLAY_TEXT(CStr(tip->values[i]), CLAY_TEXT_CONFIG(value_config));
+            }
+        }
+    }
+}
+
+static void RenderActivity(SidebarState *s)
+{
+    float scale = Pico_FontScale(), width = 280 * scale, gap = 64 * scale;
+    float line = Pico_FontPx(PICO_FONT_CAPTION_LINE), row_height = line + 6 * scale;
+    /* The rail never participates in the picker's normal-flow sizing. Reserve
+     * symmetric room around the existing centered column, including sidebar. */
+    if (PicoHost_MainColumnWidth(s->host) < 480 + 2 * (width + gap + 20)) return;
+    int rows = 0;
+    double max_speed = 1;
+    for (int i = 0; i < s->activity.model_count; i++)
+        for (int mode = 0; mode < 2; mode++)
+        {
+            const PicoActivityMode *r = &s->activity.models[i].modes[mode];
+            if (r->requests) rows++;
+            if (r->tps > max_speed) max_speed = r->tps;
+        }
+    float height = 5 * line + 3 * row_height + 144 * scale +
+                   s->activity.model_count * (line + 12 * scale) + rows * row_height;
+    Clay_ElementData picker = Clay_GetElementData(CLAY_ID("InboxProjectPicker"));
+    Clay_Dimensions viewport = Clay_GetLayoutDimensions();
+    if (height + 40 > viewport.height) return;
+    float top = picker.found ? picker.boundingBox.y : 20;
+    float offset_y = fmaxf(20, fminf(top, viewport.height - height - 20)) - top;
+    bool hover_allowed = !PicoUi_ModalOpen(s->host) && !PicoHost_SidebarResizeBlocksInput(s->host);
+    SidebarActivityTooltip *tip = &s->activity_tip;
+    memset(tip, 0, sizeof(*tip));
+    Clay_ElementId tip_anchor = {0};
+    CLAY(CLAY_ID("ActivityRail"), {
+        .floating = {.attachTo = CLAY_ATTACH_TO_ELEMENT_WITH_ID, .parentId = CLAY_ID("InboxProjectPicker").id,
+            .attachPoints = {.element = CLAY_ATTACH_POINT_RIGHT_TOP, .parent = CLAY_ATTACH_POINT_LEFT_TOP},
+            .offset = {.x = -gap, .y = offset_y}, .zIndex = 2,
+            .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH},
+        .layout = {.layoutDirection = CLAY_TOP_TO_BOTTOM,
+            .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(height)}}})
+    {
+        ActivityText("A C T I V I T Y", true, true);
+        ActivityGap(6 * scale);
+        ActivityText("All projects · Includes subagents", false, true);
+        ActivityGap(24 * scale);
+        ActivityText("Tokens", true, false);
+        ActivityGap(10 * scale);
+        const char *periods[] = {"1d", "7d", "30d"};
+        for (int i = 0; i < 3; i++)
+        {
+            const PicoActivityTokens *tokens = &s->activity.windows[i];
+            Clay_ElementId id = CLAY_IDI("ActivityTokens", i);
+            CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                                           .height = CLAY_SIZING_FIXED(row_height)}}})
+            { ActivityPair(periods[i], s->activity_loaded ? ActivityAmount(s, tokens->input + tokens->output) : "—", false); }
+            if (hover_allowed && Clay_PointerOver(id))
+            {
+                tip_anchor = id;
+                const char *titles[] = {"Last 24 hours", "Last 7 days", "Last 30 days"};
+                snprintf(tip->heading, sizeof(tip->heading), "%s", titles[i]);
+                tip->count = 3;
+                tip->labels[0] = "Input"; tip->labels[1] = "Output"; tip->labels[2] = "Cache hit rate";
+                ActivityGroupedAmount(tip->values[0], sizeof(tip->values[0]), tokens->input);
+                ActivityGroupedAmount(tip->values[1], sizeof(tip->values[1]), tokens->output);
+                if (tokens->input > 0)
+                    snprintf(tip->values[2], sizeof(tip->values[2]), "%.1f%%", 100.0 * tokens->cached / tokens->input);
+                else snprintf(tip->values[2], sizeof(tip->values[2]), "—");
+            }
+        }
+        ActivityGap(16 * scale);
+        int64_t max_tokens = 1;
+        for (int i = 0; i < 30; i++) if (s->activity.days[i] > max_tokens) max_tokens = s->activity.days[i];
+        CLAY(CLAY_ID("ActivityChart"), {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+            .childGap = 3 * scale, .childAlignment = {.y = CLAY_ALIGN_Y_BOTTOM},
+            .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(40 * scale)}}})
+        {
+            for (int i = 0; i < 30; i++)
+            {
+                Clay_ElementId id = CLAY_IDI("ActivityDay", i);
+                float bar_height = 40 * scale * (double)s->activity.days[i] / max_tokens;
+                CLAY(id, {.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(40 * scale)},
+                    .childAlignment = {.y = CLAY_ALIGN_Y_BOTTOM}}})
+                {
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0),
+                        .height = CLAY_SIZING_FIXED(fmaxf(scale, bar_height))}},
+                        .backgroundColor = s->activity.days[i] ? COLOR_LINK : COLOR_HR}) {}
+                }
+                if (hover_allowed && Clay_PointerOver(id))
+                {
+                    tip_anchor = id;
+                    if (i == 29) snprintf(tip->heading, sizeof(tip->heading), "Last 24 hours");
+                    else snprintf(tip->heading, sizeof(tip->heading), "%d–%d days ago", 29 - i, 30 - i);
+                    tip->count = 1; tip->labels[0] = "Tokens";
+                    ActivityGroupedAmount(tip->values[0], sizeof(tip->values[0]), s->activity.days[i]);
+                    for (int m = 0; m < s->activity.day_model_count[i]; m++)
+                    {
+                        const PicoActivityDayModel *model = &s->activity.day_models[i][m];
+                        if (model->show_provider)
+                            snprintf(tip->model_labels[m], sizeof(tip->model_labels[m]), "%s (%s)", model->model, model->provider);
+                        else snprintf(tip->model_labels[m], sizeof(tip->model_labels[m]), "%s", model->model);
+                        int row = tip->count++;
+                        tip->labels[row] = tip->model_labels[m];
+                        ActivityGroupedAmount(tip->values[row], sizeof(tip->values[row]), model->tokens);
+                    }
+                }
+            }
+        }
+        ActivityGap(6 * scale);
+        ActivityPair("Daily usage", "Last 30 days", false);
+        ActivityGap(30 * scale);
+        ActivityPair("Generation", "7d median", true);
+        ActivityGap(12 * scale);
+        for (int i = 0; i < s->activity.model_count; i++)
+        {
+            const PicoActivityModel *model = &s->activity.models[i];
+            /* Clip long model IDs in the compact rail; hover preserves identity. */
+            CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(line)}},
+                          .clip = {.horizontal = true}})
+            { ActivityText(model->model, false, true); }
+            for (int mode = 0; mode < 2; mode++)
+            {
+                const PicoActivityMode *r = &model->modes[mode];
+                if (!r->requests) continue;
+                Clay_ElementId id = CLAY_IDI("ActivitySpeed", i * 2 + mode);
+                char *speed = SidebarNextLabel(s);
+                if (speed) snprintf(speed, SIDEBAR_LABEL_CAPACITY, r->samples ? "%.0f tok/s" : "—", r->tps);
+                CLAY(id, {.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
+                    .childGap = 8 * scale, .childAlignment = {.y = CLAY_ALIGN_Y_CENTER},
+                    .sizing = {.width = CLAY_SIZING_FIXED(width), .height = CLAY_SIZING_FIXED(row_height)}}})
+                {
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(74 * scale)}}})
+                    { ActivityText(mode ? "Fast ⚡" : "Standard", false, false); }
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_GROW(0), .height = CLAY_SIZING_FIXED(6 * scale)}}})
+                    {
+                        CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_PERCENT((float)(r->tps / max_speed)),
+                            .height = CLAY_SIZING_FIXED(6 * scale)}}, .backgroundColor = COLOR_LINK}) {}
+                    }
+                    CLAY_AUTO_ID({.layout = {.sizing = {.width = CLAY_SIZING_FIXED(78 * scale)},
+                        .childAlignment = {.x = CLAY_ALIGN_X_RIGHT}}})
+                    { ActivityText(speed ? speed : "—", false, false); }
+                }
+                if (hover_allowed && Clay_PointerOver(id))
+                {
+                    tip_anchor = id;
+                    snprintf(tip->heading, sizeof(tip->heading), "%s", model->model);
+                    snprintf(tip->subtitle, sizeof(tip->subtitle), "%s", model->provider);
+                    tip->count = 2;
+                    tip->labels[0] = "Generation speed"; tip->labels[1] = "Initial response latency";
+                    snprintf(tip->values[0], sizeof(tip->values[0]), r->samples ? "%.0f tok/s" : "—", r->tps);
+                    if (r->latency >= 0) snprintf(tip->values[1], sizeof(tip->values[1]), "%.1f s", r->latency);
+                    else snprintf(tip->values[1], sizeof(tip->values[1]), "—");
+                }
+            }
+            ActivityGap(12 * scale);
+        }
+    }
+    if (tip_anchor.id) RenderActivityTooltip(tip, tip_anchor);
+}
+
 bool PicoSidebar_RenderProjectPicker(PicoHost *host)
 {
     SidebarState *s = PicoPlugins_HostState(host, "sidebar");
@@ -2207,6 +2556,7 @@ bool PicoSidebar_RenderProjectPicker(PicoHost *host)
             }
         }
     }
+    RenderActivity(s);
     RenderWorkspaceDragPreview(s);
     return true;
 }
@@ -3364,6 +3714,10 @@ static void SidebarOnFrame(PicoHost *host, void *state, float dt)
         s->dirty = true;
     }
     selected = PicoHost_SelectedAgentConst(host);
+    bool activity_visible = !selected;
+    if (activity_visible && !s->activity_visible) s->activity_attempted = false;
+    if (SidebarActivityDue(s)) s->dirty = true;
+    s->activity_visible = activity_visible;
     if (s->order_persist_generation != 0)
     {
         PicoCatalogPersistStatus status = PicoCatalog_OrderPersistStatus(
@@ -3480,8 +3834,8 @@ static void SidebarShutdown(PicoHost *host, void *state)
     UnloadFolderIcons(s);
     if (s->scan_worker)
     {
-        s->dirty = true;
-        return;
+        atomic_store(&s->scan_worker->cancelled, true);
+        s->scan_worker = NULL;
     }
     s->scan_serial++;
     if (s->catalog_scanned)

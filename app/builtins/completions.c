@@ -1015,6 +1015,8 @@ static void ApplyUsage(PicoCompletionsCtx *c, const JsonDoc *doc, int usage)
     {
         c->input_tokens = input;
     }
+    c->output_tokens = JsonObjInt(doc, usage, "completion_tokens",
+                                  JsonObjInt(doc, usage, "output_tokens", 0));
     int details = JsonObjGet(doc, usage, "prompt_tokens_details");
     if (!JsonIsObject(doc, details))
     {
@@ -1299,9 +1301,11 @@ static void SetResultProjectionError(PicoLlmResult *out)
 {
     int input_tokens = out->input_tokens;
     int cached_tokens = out->cached_tokens;
+    int output_tokens = out->output_tokens;
     pico_llm_result_free(out);
     out->input_tokens = input_tokens;
     out->cached_tokens = cached_tokens;
+    out->output_tokens = output_tokens;
     out->error = JsonDup("out of memory");
 }
 
@@ -1338,6 +1342,7 @@ void pico_completions_fill_result(PicoCompletionsCtx *c, PicoLlmResult *out)
     ValidateCompletedCalls(c);
     out->input_tokens = c->input_tokens;
     out->cached_tokens = c->cached_tokens;
+    out->output_tokens = c->output_tokens;
     snprintf(out->service_tier, sizeof(out->service_tier), "%s", c->service_tier);
     if (c->error)
     {

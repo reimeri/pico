@@ -506,6 +506,7 @@ typedef struct PicoLlmResult {
     char service_tier[32]; /* NUL-terminated actual reported tier; empty means unknown */
     int input_tokens;
     int cached_tokens;
+    int output_tokens; /* Provider-reported generated tokens (including reasoning); 0 if unavailable. */
     PicoLlmItem *items;
     int item_count;
     /* malloc'd JSON array: complete replacement canonical history, ending in

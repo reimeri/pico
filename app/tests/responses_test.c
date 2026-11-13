@@ -657,6 +657,26 @@ static void TestFastServiceTier(void)
     pico_responses_ctx_free(&ctx);
 }
 
+static void TestOutputUsage(void)
+{
+    /* The total-only fallback must subtract output instead of double counting. */
+    const char *events[] = {
+        "{\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120,\"input_tokens_details\":{\"cached_tokens\":80}},\"output\":[]}}",
+        "{\"type\":\"response.completed\",\"response\":{\"usage\":{\"output_tokens\":20,\"total_tokens\":120,\"input_tokens_details\":{\"cached_tokens\":80}},\"output\":[]}}"
+    };
+    for (int i = 0; i < 2; i++)
+    {
+        PicoResponsesCtx ctx = {0};
+        Check(pico_responses_feed(&ctx, events[i], strlen(events[i])), "usage event accepted");
+        PicoLlmResult result = {0};
+        pico_responses_fill_result(&ctx, &result);
+        Check(result.input_tokens == 100 && result.cached_tokens == 80 && result.output_tokens == 20,
+              "Responses input/output usage must not double-count cached or generated tokens");
+        pico_llm_result_free(&result);
+        pico_responses_ctx_free(&ctx);
+    }
+}
+
 static void TestToolImageObservation(void)
 {
     char dir[] = "/tmp/pico-tool-image-XXXXXX";
@@ -928,6 +948,7 @@ int main(void)
     TestMalformedToolOutput();
     TestToolSchemaPolicy();
     TestFastServiceTier();
+    TestOutputUsage();
     TestContextItemConversion();
     TestImageRequestConversion();
     TestReasoningRemoval();

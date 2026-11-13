@@ -3085,6 +3085,8 @@ static int RunSettingsPanelShellCase(bool with_sidebar)
 static int RunToolGroupReleaseCase(bool with_sidebar, bool follow);
 static int TestColdTranscriptRefinement(bool with_sidebar);
 static int RunStashedPickerShellCase(bool with_sidebar);
+static int RunActivityRailShellCase(bool with_sidebar);
+static int TestPickerReloadRejectsOldSnapshot(void);
 #endif
 
 static int RunCompactionStatusCase(bool with_sidebar)
@@ -3187,6 +3189,8 @@ static int TestBottomFollowShellGeometryStable(void)
 {
     if (RunCompactionStatusCase(false) || RunCompactionStatusCase(true)) return 1;
 #ifdef PICO_CLAY_FRAME_FAULT_TESTS
+    if (TestPickerReloadRejectsOldSnapshot()) return 1;
+    if (RunActivityRailShellCase(false) || RunActivityRailShellCase(true)) return 1;
     if (RunStashedPickerShellCase(false) || RunStashedPickerShellCase(true)) return 1;
     if (TestColdTranscriptRefinement(false) || TestColdTranscriptRefinement(true)) return 1;
     if (RunToolGroupReleaseCase(false, false) || RunToolGroupReleaseCase(true, false) ||
@@ -18757,6 +18761,232 @@ done:
     return !good;
 }
 
+static int TestPickerReloadRejectsOldSnapshot(void)
+{
+    InteractionFixture f = {0};
+    int ready[2] = {-1, -1}, proceed[2] = {-1, -1};
+    bool good = false, released = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f) || pipe(ready) || pipe(proceed)) goto done;
+    PicoHost_ClearAgentSelection(f.host);
+    if (!WaitHostReload(f.host)) goto done;
+    InteractionOmitDrawHooks(f.host);
+    /* Hold the old instance's reconciliation after its rows have been read.
+     * A replacement instance is allowed to finish newer reads independently. */
+    phase = "old reconciliation";
+    g_preference_ready_fd = ready[1]; g_preference_continue_fd = proceed[0];
+    g_preference_stage = "catalog_scan_done"; g_preference_fail = false;
+    int scans = g_catalog_scan_calls;
+    PICO_TEST_WAIT(g_catalog_scan_calls == scans) pico_host_pump(f.host);
+    if (!TransferTestByte(ready[0], false) || PicoCatalog_SetProjectName(f.dir, "Reloaded project")) goto done;
+    phase = "replacement publishes current rows";
+    int completed = g_catalog_scan_done_calls + 1;
+    if (!WaitHostReload(f.host)) goto done;
+    InteractionOmitDrawHooks(f.host);
+    PICO_TEST_WAIT(g_catalog_scan_done_calls < completed) pico_host_pump(f.host);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 800, 0);
+    if (!FindCardText(&commands, "Reloaded project")) goto done;
+    phase = "late old completion";
+    if (!TransferTestByte(proceed[1], true)) goto done;
+    released = true;
+    PICO_TEST_WAIT_LOOP("old snapshot retires without replacing the current picker")
+    {
+        pico_host_pump(f.host);
+        commands = PicoHost_LayoutShell(f.host, 800, 0);
+        if (!FindCardText(&commands, "Reloaded project") || FindCardText(&commands, "Original")) goto done;
+        if (!f.host->tasks) break;
+    }
+    good = true;
+done:
+    if (!released && proceed[1] >= 0) (void)TransferTestByte(proceed[1], true);
+    InteractionFixtureFree(&f);
+    g_preference_stage = NULL; g_preference_ready_fd = g_preference_continue_fd = -1;
+    for (int i = 0; i < 2; i++) { if (ready[i] >= 0) close(ready[i]); if (proceed[i] >= 0) close(proceed[i]); }
+    if (!good) { fprintf(stderr, "picker reload phase: %s\n", phase); Fail("a pre-reload scan must not replace the current picker snapshot"); }
+    return !good;
+}
+
+static Clay_RenderCommand *FindActivityTooltipText(Clay_RenderCommandArray *commands, const char *label)
+{
+    Clay_ElementData tooltip = Clay_GetElementData(CLAY_ID("ActivityTooltip"));
+    for (int i = 0; tooltip.found && i < commands->length; i++)
+    {
+        Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(commands, i);
+        if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ||
+            !ShellBoxStable(CardTextClip(commands, cmd), tooltip.boundingBox)) continue;
+        Clay_StringSlice text = cmd->renderData.text.stringContents;
+        if (text.length == (int)strlen(label) && !memcmp(text.chars, label, text.length)) return cmd;
+    }
+    return NULL;
+}
+
+static int RunActivityRailShellCase(bool with_sidebar)
+{
+    InteractionFixture f = {0};
+    bool good = false;
+    const char *phase = "fixture";
+    if (!InteractionFixtureInit(&f)) goto done;
+    if (!with_sidebar) f.host->view_count[PICO_SLOT_SIDEBAR] = 0;
+    PicoHost_ClearAgentSelection(f.host);
+    for (int i = 0; i < 3; i++)
+        for (int mode = 0; mode < 2; mode++)
+        {
+            const char *models[] = {"Model A", "Model B", "Model C"};
+            if (!PicoActivity_Record(&(PicoActivityRecord){.timestamp = (int64_t)time(NULL) - 2 * 86400 - 3600,
+                .provider = "test", .model = models[i], .fast = mode, .service_tier = "default",
+                .input_tokens = 1000, .cached_tokens = 800, .output_tokens = 20,
+                .tps = mode ? 89 : 54, .latency = 0.5})) goto done;
+        }
+    g_sidebar_poll_due = true;
+    if (!WaitCatalogSnapshotDone(f.host, g_catalog_snapshot_done_calls + 1)) goto done;
+    const Clay_ElementId ids[] = {CLAY_ID("Root"), CLAY_ID("Body"), CLAY_ID("Sidebar"),
+        CLAY_ID("RightColumn"), CLAY_ID("MainColumn"), CLAY_ID("ChatScroll"),
+        CLAY_ID("ComposerAlign"), CLAY_ID("Footer"), CLAY_ID("InboxProjectPicker"), CLAY_ID("ActivityRail")};
+    Clay_BoundingBox wide_picker = {0};
+    phase = "wide/narrow bottom-follow geometry";
+    for (int size = 0; size < 3; size++)
+    {
+        bool wide = size != 1;
+        Clay_Dimensions viewport = {wide ? 1714 : 800, 900};
+        Clay_ElementData expected[sizeof(ids) / sizeof(ids[0])] = {0};
+        for (int frame = 0; frame < 60; frame++)
+        {
+            LayoutChatStabilityFrame(f.host, viewport);
+            Clay_ScrollContainerData scroll = Clay_GetScrollContainerData(CLAY_ID("ChatScroll"));
+            if (scroll.found && scroll.scrollPosition)
+                PicoScrollbar_PinToBottom(scroll.scrollContainerDimensions.height, scroll.contentDimensions.height,
+                                          &scroll.scrollPosition->y);
+            (void)PicoHost_LayoutShell(f.host, viewport.height, 0);
+            for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+            {
+                Clay_ElementData current = Clay_GetElementData(ids[i]);
+                if (frame == 10) expected[i] = current;
+                if (frame > 10 && (current.found != expected[i].found ||
+                    (current.found && !ShellBoxStable(expected[i].boundingBox, current.boundingBox)))) goto done;
+            }
+        }
+        Clay_ElementData rail = Clay_GetElementData(CLAY_ID("ActivityRail"));
+        Clay_ElementData picker = Clay_GetElementData(CLAY_ID("InboxProjectPicker"));
+        Clay_ElementData content = Clay_GetElementData(CLAY_ID("ChatContent"));
+        if (!picker.found || rail.found != wide ||
+            fabsf(picker.boundingBox.x + picker.boundingBox.width / 2 -
+                  content.boundingBox.x - content.boundingBox.width / 2) > 0.01f) goto done;
+        if (wide && (rail.boundingBox.x < Clay_GetElementData(CLAY_ID("MainColumn")).boundingBox.x ||
+            rail.boundingBox.x + rail.boundingBox.width >= picker.boundingBox.x ||
+            !ShellVerticallyContains(Clay_GetElementData(CLAY_ID("Root")).boundingBox, rail.boundingBox))) goto done;
+        if (size == 0) wide_picker = picker.boundingBox;
+        if (size == 2 && !ShellBoxStable(wide_picker, picker.boundingBox)) goto done;
+    }
+    phase = "hover details";
+    Clay_ElementData row = Clay_GetElementData(CLAY_IDI("ActivitySpeed", 1));
+    if (!row.found) goto done;
+    Clay_SetPointerState((Clay_Vector2){row.boundingBox.x + 10, row.boundingBox.y + 10}, false);
+    Clay_RenderCommandArray commands = PicoHost_LayoutShell(f.host, 900, 0);
+    Clay_ElementData tip = Clay_GetElementData(CLAY_ID("ActivityTooltip"));
+    if (!tip.found || !FindCardText(&commands, "6k") || !FindCardText(&commands, "89 tok/s") ||
+        !ShellVerticallyContains(Clay_GetElementData(CLAY_ID("Root")).boundingBox, tip.boundingBox)) goto done;
+    Clay_RenderCommand *heading = FindActivityTooltipText(&commands, "Model A");
+    Clay_RenderCommand *provider = FindActivityTooltipText(&commands, "test");
+    Clay_RenderCommand *latency_label = FindActivityTooltipText(&commands, "Initial response latency");
+    Clay_RenderCommand *latency_value = FindActivityTooltipText(&commands, "0.5 s");
+    Clay_RenderCommand *speed_value = FindActivityTooltipText(&commands, "89 tok/s");
+    if (!heading || !provider || !latency_label || !latency_value || !speed_value ||
+        heading->renderData.text.fontId == latency_label->renderData.text.fontId ||
+        BadgeColorEqual(latency_label->renderData.text.textColor, latency_value->renderData.text.textColor) ||
+        fabsf(speed_value->boundingBox.x + speed_value->boundingBox.width -
+              latency_value->boundingBox.x - latency_value->boundingBox.width) > 0.01f) goto done;
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, i);
+        if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT) continue;
+        Clay_StringSlice text = cmd->renderData.text.stringContents;
+        const char *removed[] = {"tier", "Requested", "samples", "requests", "Hover for"};
+        for (size_t j = 0; j < sizeof(removed) / sizeof(removed[0]); j++)
+            if (memmem(text.chars, text.length, removed[j], strlen(removed[j]))) goto done;
+    }
+    phase = "tooltips fit their text";
+    float token_tip_width = 0;
+    const Clay_ElementId hover_ids[] = {CLAY_IDI("ActivityTokens", 1), CLAY_IDI("ActivityDay", 29),
+                                       CLAY_IDI("ActivityTokens", 0)};
+    for (int i = 0; i < 3; i++)
+    {
+        row = Clay_GetElementData(hover_ids[i]);
+        Clay_SetPointerState((Clay_Vector2){row.boundingBox.x + row.boundingBox.width / 2,
+                                          row.boundingBox.y + row.boundingBox.height / 2}, false);
+        commands = PicoHost_LayoutShell(f.host, 900, 0);
+        tip = Clay_GetElementData(CLAY_ID("ActivityTooltip"));
+        if (!tip.found) goto done;
+        float left = tip.boundingBox.x + tip.boundingBox.width, right = tip.boundingBox.x;
+        bool has_text = false;
+        for (int c = 0; c < commands.length; c++)
+        {
+            Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, c);
+            Clay_BoundingBox box = cmd->boundingBox;
+            if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT || box.x < tip.boundingBox.x ||
+                box.x >= tip.boundingBox.x + tip.boundingBox.width ||
+                !ShellVerticallyContains(tip.boundingBox, box)) continue;
+            if (!ShellBoxStable(CardTextClip(&commands, cmd), tip.boundingBox)) continue;
+            has_text = true;
+            left = fminf(left, box.x);
+            right = fmaxf(right, box.x + box.width);
+        }
+        /* Observable padding symmetry, not a hardcoded tooltip width/padding. */
+        if (!has_text || fabsf((left - tip.boundingBox.x) -
+            (tip.boundingBox.x + tip.boundingBox.width - right)) > 0.01f ||
+            !ShellBoxStable(wide_picker, Clay_GetElementData(CLAY_ID("InboxProjectPicker")).boundingBox)) goto done;
+        if (i == 0) token_tip_width = tip.boundingBox.width;
+        else if (i == 1 && tip.boundingBox.width >= token_tip_width) goto done;
+        if (i != 1)
+        {
+            Clay_RenderCommand *input = FindActivityTooltipText(&commands, "Input");
+            Clay_RenderCommand *output = FindActivityTooltipText(&commands, "Output");
+            Clay_RenderCommand *cache = FindActivityTooltipText(&commands, "Cache hit rate");
+            if (!input || !output || !cache || input->boundingBox.y >= output->boundingBox.y ||
+                output->boundingBox.y >= cache->boundingBox.y ||
+                !FindActivityTooltipText(&commands, i == 0 ? "80.0%" : "—") ||
+                !FindActivityTooltipText(&commands, i == 0 ? "6,000" : "0") ||
+                FindActivityTooltipText(&commands, "Cached input")) goto done;
+        }
+    }
+    phase = "daily model breakdown";
+    /* The fixture is safely inside one daily bucket, not on a clock-sensitive boundary. */
+    row = Clay_GetElementData(CLAY_IDI("ActivityDay", 27));
+    Clay_SetPointerState((Clay_Vector2){row.boundingBox.x + row.boundingBox.width / 2,
+                                      row.boundingBox.y + row.boundingBox.height / 2}, false);
+    commands = PicoHost_LayoutShell(f.host, 900, 0);
+    Clay_RenderCommand *total = FindActivityTooltipText(&commands, "6,120");
+    Clay_RenderCommand *first = FindActivityTooltipText(&commands, "Model A");
+    Clay_RenderCommand *second = FindActivityTooltipText(&commands, "Model B");
+    Clay_RenderCommand *third = FindActivityTooltipText(&commands, "Model C");
+    if (!total || !first || !second || !third || total->boundingBox.y >= first->boundingBox.y ||
+        first->boundingBox.y >= second->boundingBox.y || second->boundingBox.y >= third->boundingBox.y ||
+        FindActivityTooltipText(&commands, "Model A (test)")) goto done;
+    int model_values = 0;
+    tip = Clay_GetElementData(CLAY_ID("ActivityTooltip"));
+    for (int i = 0; i < commands.length; i++)
+    {
+        Clay_RenderCommand *cmd = Clay_RenderCommandArray_Get(&commands, i);
+        if (cmd->commandType != CLAY_RENDER_COMMAND_TYPE_TEXT ||
+            !ShellBoxStable(CardTextClip(&commands, cmd), tip.boundingBox)) continue;
+        Clay_StringSlice text = cmd->renderData.text.stringContents;
+        if (text.length == 5 && !memcmp(text.chars, "2,040", 5))
+        {
+            if (fabsf(cmd->boundingBox.x + cmd->boundingBox.width -
+                      total->boundingBox.x - total->boundingBox.width) > 0.01f) goto done;
+            model_values++;
+        }
+    }
+    if (model_values != 3 || !ShellBoxStable(wide_picker, Clay_GetElementData(CLAY_ID("InboxProjectPicker")).boundingBox)) goto done;
+    Clay_SetPointerState((Clay_Vector2){1, 1}, false);
+    (void)PicoHost_LayoutShell(f.host, 900, 0);
+    if (Clay_GetElementData(CLAY_ID("ActivityTooltip")).found) goto done;
+    good = true;
+done:
+    InteractionFixtureFree(&f);
+    if (!good) { fprintf(stderr, "activity rail phase: %s\n", phase); Fail("activity rail must preserve centered picker/shell geometry, hide on narrow screens, and expose hover details"); }
+    return !good;
+}
+
 /* Overflowing stash rows must stay reachable without feeding content height
  * back into viewport geometry, including after returning to a transcript. */
 static int RunStashedPickerShellCase(bool with_sidebar)
@@ -22729,6 +22959,9 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--layout-invalidation") == 0)
         return TestLayoutInvalidation();
     if (argc == 1 && TestLayoutInvalidation()) return 1;
+    if (argc == 2 && strcmp(argv[1], "--activity") == 0)
+        return PICO_TEST_RUN(TestPickerReloadRejectsOldSnapshot()) ||
+               PICO_TEST_RUN(RunActivityRailShellCase(false)) || PICO_TEST_RUN(RunActivityRailShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--shell-geometry") == 0)
         return PICO_TEST_RUN(TestBottomFollowShellGeometryStable());
     if (argc == 2 && strcmp(argv[1], "--tool-group-release") == 0)

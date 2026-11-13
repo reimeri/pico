@@ -673,7 +673,8 @@ static void HandleResponseObject(PicoResponsesCtx *c, const JsonDoc *doc, int ob
         int input = JsonObjInt(doc, usage, "input_tokens", 0);
         int total = JsonObjInt(doc, usage, "total_tokens", 0);
         int details = JsonObjGet(doc, usage, "input_tokens_details");
-        c->input_tokens = input > 0 ? input : total;
+        c->output_tokens = JsonObjInt(doc, usage, "output_tokens", 0);
+        c->input_tokens = input > 0 ? input : (total > c->output_tokens ? total - c->output_tokens : 0);
         if (JsonIsObject(doc, details))
         {
             c->cached_tokens = JsonObjInt(doc, details, "cached_tokens", 0);
@@ -1328,6 +1329,7 @@ void pico_responses_fill_result(PicoResponsesCtx *c, PicoLlmResult *out)
 {
     out->input_tokens = c->input_tokens;
     out->cached_tokens = c->cached_tokens;
+    out->output_tokens = c->output_tokens;
     snprintf(out->service_tier, sizeof(out->service_tier), "%s", c->service_tier);
     if (c->error)
     {
@@ -1675,6 +1677,7 @@ void pico_responses_compact_result(PicoResponsesCtx *c, const PicoLlmTurn *turn,
 {
     out->input_tokens = c->input_tokens;
     out->cached_tokens = c->cached_tokens;
+    out->output_tokens = c->output_tokens;
     snprintf(out->service_tier, sizeof(out->service_tier), "%s", c->service_tier);
     if (c->error) { out->error = JsonDup(c->error); return; }
     if (!c->completed || c->malformed || !c->completed_response) {

@@ -128,6 +128,10 @@ typedef struct TestState {
     int provider_tokens;
     int provider_cached_tokens;
     int usage_log_count;
+    int activity_count;
+    int64_t activity_input, activity_output;
+    PicoActivityRecord last_activity;
+    char activity_provider[128], activity_model[128], activity_tier[32];
     int notice_log_count;
     char notice_log_text[2048];
     bool emit_think_summaries;
@@ -257,6 +261,9 @@ static void ResetTest(TestMode mode, int tool_limit)
     g_test.provider_tokens = 0;
     g_test.provider_cached_tokens = 0;
     g_test.usage_log_count = 0;
+    g_test.activity_count = 0;
+    g_test.activity_input = g_test.activity_output = 0;
+    g_test.last_activity = (PicoActivityRecord){0};
     g_test.notice_log_count = 0;
     g_test.notice_log_text[0] = '\0';
     g_test.emit_think_summaries = false;
@@ -596,6 +603,7 @@ static int FakeProvider(PicoAgentContext *ctx, const PicoLlmTurn *turn, PicoLlmC
 
     out->input_tokens = tokens;
     out->cached_tokens = cached_tokens;
+    out->output_tokens = tokens ? 20 : 0;
     if (mode == TEST_PROVIDER_TPS)
     {
         FakeDelta(on_delta, user, PICO_LLM_DELTA_TEXT, "abcd", 4);
@@ -1544,6 +1552,23 @@ PicoSessionWriteResult PicoSession_LogNotice(PicoHost *app, PicoAgent *agent,
     strncat(g_test.session_item_order, "N",
             sizeof(g_test.session_item_order) - strlen(g_test.session_item_order) - 1);
     return PICO_SESSION_WRITE_OK;
+}
+
+bool PicoActivity_Record(const PicoActivityRecord *record)
+{
+    pthread_mutex_lock(&g_test.mu);
+    g_test.activity_count++;
+    g_test.activity_input += record->input_tokens;
+    g_test.activity_output += record->output_tokens;
+    g_test.last_activity = *record;
+    snprintf(g_test.activity_provider, sizeof(g_test.activity_provider), "%s", record->provider);
+    snprintf(g_test.activity_model, sizeof(g_test.activity_model), "%s", record->model);
+    snprintf(g_test.activity_tier, sizeof(g_test.activity_tier), "%s", record->service_tier);
+    g_test.last_activity.provider = g_test.activity_provider;
+    g_test.last_activity.model = g_test.activity_model;
+    g_test.last_activity.service_tier = g_test.activity_tier;
+    pthread_mutex_unlock(&g_test.mu);
+    return true;
 }
 
 PicoSessionWriteResult PicoSession_LogUsage(PicoHost *app, PicoAgent *agent,
@@ -4276,6 +4301,13 @@ static int TestCancelledProviderUsage(void)
     PicoHost app;
     InitApp(&app);
     PicoAgent_StartTurn(&app, TestAgent(&app), "start");
+    PICO_TEST_WAIT_LOOP("provider started before cancellation")
+    {
+        pthread_mutex_lock(&g_test.mu);
+        bool started = g_test.fast_request_count > 0;
+        pthread_mutex_unlock(&g_test.mu);
+        if (started) break;
+    }
     PicoAgent_Cancel(TestAgent(&app));
     if (!WaitForIdle(&app))
     {
@@ -4283,9 +4315,10 @@ static int TestCancelledProviderUsage(void)
         return Fail(name, "cancelled provider did not return idle");
     }
     bool ok = TestAgent(&app)->session_input_tokens == 0 && TestAgent(&app)->session_cached_tokens == 0 &&
-              g_test.usage_log_count == 0;
+              g_test.usage_log_count == 0 && g_test.activity_input == 100 &&
+              g_test.activity_output == 20 && g_test.last_activity.tps == 0;
     PicoHost_Shutdown(&app);
-    return ok ? 0 : Fail(name, "cancelled provider result contributed usage");
+    return ok ? 0 : Fail(name, "cancelled usage must be best-effort activity only, not session totals or speed");
 }
 
 static int TestSessionUsageAccumulation(void)
@@ -4313,7 +4346,8 @@ static int TestSessionUsageAccumulation(void)
         return Fail(name, "second turn did not finish");
     }
     bool ok = TestAgent(&app)->tokens_used == 200 && TestAgent(&app)->tokens_cached == 150 && TestAgent(&app)->session_input_tokens == 400 &&
-              TestAgent(&app)->session_cached_tokens == 200 && g_test.usage_log_count == 3;
+              TestAgent(&app)->session_cached_tokens == 200 && g_test.usage_log_count == 3 &&
+              g_test.activity_count == 3 && g_test.activity_input == 400 && g_test.activity_output == 60;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "latest or cumulative usage did not include every successful request");
 }
@@ -4477,9 +4511,11 @@ static int TestFastTurnSnapshot(void)
         ok = pico_tool_answer(&app, ask.id, "{}") && WaitForIdle(&app);
     if (ok)
     {
+        ok = g_test.last_activity.fast && !strcmp(g_test.last_activity.service_tier, "default") &&
+             !strcmp(g_test.last_activity.provider, "test") && !strcmp(g_test.last_activity.model, "test-model");
         agent->compact_enabled = false;
         PicoAgent_StartTurn(&app, agent, "next turn");
-        ok = WaitForIdle(&app);
+        ok = WaitForIdle(&app) && ok;
     }
     pthread_mutex_lock(&g_test.mu);
     ok = ok && g_test.fast_request_count == 4 && g_test.fast_requests[0] &&
@@ -4490,7 +4526,7 @@ static int TestFastTurnSnapshot(void)
     {
         agent->fast = true;
         PicoAgent_Compact(&app, agent);
-        ok = WaitForIdle(&app);
+        ok = WaitForIdle(&app) && ok;
         pthread_mutex_lock(&g_test.mu);
         ok = ok && g_test.fast_request_count == 5 && g_test.fast_requests[4];
         pthread_mutex_unlock(&g_test.mu);
@@ -5728,7 +5764,8 @@ static int TestBufferedProviderReset(void)
               !strstr(g_test.logged_tool_ids, "discarded");
 #ifdef PICO_TEST_CLOCK
     /* Only the 36 replacement bytes over two seconds count, not the failed attempt. */
-    ok &= TestAgent(&app)->has_tokens_per_second && TestAgent(&app)->tokens_per_second == 4.5;
+    ok &= TestAgent(&app)->has_tokens_per_second && TestAgent(&app)->tokens_per_second == 4.5 &&
+          g_test.activity_count == 1 && g_test.last_activity.tps == 4.5;
     PicoTestClock_Reset();
 #endif
     PicoHost_Shutdown(&app);
@@ -5860,13 +5897,15 @@ static int TestStreamingTpsOutput(void)
      * The controlled two-second generation ignores scheduler/dispatch latency. */
     bool counted_once = agent->has_tokens_per_second && agent->tokens_per_second > 0;
 #ifdef PICO_TEST_CLOCK
-    counted_once = counted_once && agent->tokens_per_second == 4.0;
+    counted_once = counted_once && agent->tokens_per_second == 4.0 &&
+                   g_test.activity_count == 1 && g_test.last_activity.tps == 4.0;
     PicoTestClock_Reset();
 #endif
     double final_rate = agent->tokens_per_second;
     PicoAgent_Compact(&app, agent);
     bool retained = WaitForIdle(&app) && agent->has_tokens_per_second &&
-                    agent->tokens_per_second == final_rate;
+                    agent->tokens_per_second == final_rate && g_test.last_activity.compact &&
+                    g_test.last_activity.tps == 0;
     PicoAgent_StartTurn(&app, agent, "next user message");
     bool reset = !agent->has_tokens_per_second;
     bool finished = WaitForIdle(&app);
@@ -5876,9 +5915,9 @@ static int TestStreamingTpsOutput(void)
     return reset && finished ? 0 : Fail(name, "new user turn did not reset TPS");
 }
 
-static int TestSubagentDoesNotCalculateTps(void)
+static int TestSubagentActivityTps(void)
 {
-    const char *name = "subagents do not calculate TPS";
+    const char *name = "subagents record activity without publishing live TPS";
     ResetTest(TEST_PROVIDER_TPS, 0);
     PicoHost app;
     InitApp(&app);
@@ -5892,7 +5931,8 @@ static int TestSubagentDoesNotCalculateTps(void)
     }
     PicoAgent *child = TestAgent(&app);
     PicoAgent_StartTurn(&app, child, "start");
-    bool ok = WaitForIdle(&app) && !child->has_tokens_per_second;
+    bool ok = WaitForIdle(&app) && !child->has_tokens_per_second &&
+              g_test.activity_count == 1 && g_test.last_activity.tps > 0;
     PicoHost_Shutdown(&app);
     return ok ? 0 : Fail(name, "child must not publish a rate");
 }
@@ -6829,7 +6869,7 @@ int main(void)
     failed |= PICO_TEST_RUN(TestCancelledThinkingPersistence());
     failed |= PICO_TEST_RUN(TestStreamingTextActivity());
     failed |= PICO_TEST_RUN(TestStreamingTpsOutput());
-    failed |= PICO_TEST_RUN(TestSubagentDoesNotCalculateTps());
+    failed |= PICO_TEST_RUN(TestSubagentActivityTps());
     failed |= PICO_TEST_RUN(TestThinkSummaryCoalesce());
     failed |= PICO_TEST_RUN(TestRestoredThinkKeepsUnknownDuration());
     failed |= PICO_TEST_RUN(TestUiPostAppendReplace());

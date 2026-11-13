@@ -275,7 +275,7 @@ NULL means unsupported. Pico calls it only for explicitly opted-in models, on th
 
 `PicoLlmTurn.fast` is an immutable boolean for this agent turn. Map it to your backend's priority option without altering effort. The worker must independently validate the authentication route it actually uses; it can change between the capability query and the request. Unsupported requests fail explicitly rather than silently downgrading. The callback belongs to its immutable registration generation, with the same reload/quiescence rules as `stream`.
 
-Populate `PicoLlmResult.service_tier` with the actual backend-reported tier as a NUL-terminated string, or leave its fixed-size array empty when unknown. Do not infer it from `turn->fast`: a provider can serve standard tier after priority was requested. It is copied with the result, needs no separate allocation/free, and is exposed as `PicoAgentInfo.last_service_tier` and `/fast status`. Successful usage records store requested `fast` and actual `service_tier` separately; this is not dollar-cost accounting. Failed/cancelled calls do not contribute usage.
+Populate `PicoLlmResult.service_tier` with the actual backend-reported tier as a NUL-terminated string, or leave its fixed-size array empty when unknown. Do not infer it from `turn->fast`: a provider can serve standard tier after priority was requested. It is copied with the result, needs no separate allocation/free, and is exposed as `PicoAgentInfo.last_service_tier` and `/fast status`. Successful usage records store requested `fast` and actual `service_tier` separately; this is not dollar-cost accounting. Failed/cancelled calls do not contribute to saved-session input totals; the independent activity ledger can retain reported usage from those calls.
 
 ## Turn
 
@@ -331,6 +331,47 @@ Builtin Responses maps `type: "context"` to a `developer` input message; builtin
 Each successful provider completion with valid usage contributes to the owning agent's saved-session totals, including tool follow-ups and compaction calls. Current-window and cumulative cache accounting are agent-owned; failed and cancelled calls do not contribute.
 
 HTTP helpers (see [HTTP](http.md) for response headers and callback ownership): `pico_http_post_sse`, `pico_http_post`, `pico_http_get`, `pico_http_form_encode` in `pico/http.h`. Requests may run concurrently; sequential requests can reuse connections from a bounded idle-handle pool, without retaining caller-owned callback or header pointers. The pool remains usable while any host is live, and a clean shutdown of the last host allows a later host to initialize it again. `pico_http_get` uses the same `PicoHttpReq` as POST and ignores `body`. Buffered requests return `PICO_HTTP_OK` when the transfer completes even for HTTP 4xx/5xx; inspect `out_http` for application status. Streaming responses use `Content-Type: text/event-stream`. When that header is absent, the helper recognizes SSE from a first line beginning with `event:`, `data:`, `id:`, `retry:`, or `:`. An explicit content type takes precedence; non-SSE responses are delivered as one JSON body. Mixed LF/CRLF/CR event boundaries are supported. See [contracts](contracts.md#http-helpers) for ownership, cancellation, redirects, and timeout behavior.
+
+## Activity usage (ABI 32)
+
+`PicoLlmResult.output_tokens` is a value-owned provider-reported generated-token
+count, including reasoning tokens when included by the provider. Leave it zero
+when unavailable. Do not estimate it from text, add it to `input_tokens`, or add
+`cached_tokens` to the input total: cached input is a subset of input usage.
+For example, a request reporting 100 input, 80 cached, and 20 output tokens
+contributes 120 tokens to activity, not 200. Native compaction may report request
+usage in these same fields; `compaction_usage` remains a separate history-size
+measurement and must not be counted as usage.
+
+Core captures provider/model identity and requested Fast mode for each call. On
+the provider worker, after `stream` returns and before freeing its result, core
+best-effort appends usage to the global catalog activity ledger. Storage contention
+may drop a sample rather than delay cancellation or shutdown. It includes
+subagents, ephemeral agents, tool follow-ups, and compaction. Reported usage from
+failed/cancelled calls can also be retained, but those calls and compaction are
+excluded from speed samples. Providers need no registration or extra callback;
+result ownership and success hooks are unchanged. Separately billed tools such
+as image generation are not included. Older catalogs migrate to an empty ledger;
+there is no historical transcript backfill. Deleting sessions/projects does not
+delete activity.
+
+The new-session rail uses rolling 1/7/30-day totals and thirty rolling 24-hour
+buckets. Each daily bar’s hover shows its total and up to three provider/model
+groups ranked by input + output tokens in that same bucket, combining requested
+modes and including reported compaction usage. Provider names are shown only
+when another positive-usage group in that bucket shares the model name.
+Speed is the 7-day median of per-request byte-derived streaming rates,
+using the same estimator as live TPS (text, thinking/tool arguments, and summary
+fallback without double-counting raw thinking). It excludes initial waiting and
+tool execution, resets on provider attempt reset, and records timing even for
+subagents whose live TPS display is disabled. Initial-output latency is measured
+from the current attempt start to its first output/summary. These are local
+best-effort diagnostics, not billed-token throughput benchmarks. Up to three
+provider/model groups are selected by non-compaction request count over 7 days;
+Standard/Fast rows reflect requested mode. Compact hover details show model/provider,
+generation speed, and initial-response latency. Token hovers show grouped input/output
+counts and cache hit rate (cached input divided by input, or unavailable for zero input). Snapshots are read off-thread and refreshed
+on entry and approximately once per minute while the picker is visible.
 
 ## Contract
 

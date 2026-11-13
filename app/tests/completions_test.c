@@ -322,7 +322,7 @@ static void TestFeedChunks(void)
     const char *tool2 =
         "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]}}]}";
     const char *usage =
-        "{\"usage\":{\"prompt_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":3}}}";
+        "{\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":3}}}";
     Check(pico_completions_feed(&ctx, content, strlen(content)), "content chunk is accepted");
     Check(pico_completions_feed(&ctx, think, strlen(think)), "reasoning_content chunk is accepted");
     Check(pico_completions_feed(&ctx, tool1, strlen(tool1)), "first tool-call delta is accepted");
@@ -349,7 +349,7 @@ static void TestFeedChunks(void)
           "split tool-call arguments concatenate");
     Check(out.items[1].item_id == NULL, "Completions does not invent Responses item ids");
     Check(out.input_tokens == 9, "prompt_tokens become input tokens");
-    Check(out.cached_tokens == 3, "cached prompt tokens are recorded");
+    Check(out.cached_tokens == 3 && out.output_tokens == 7, "cached input and generated tokens remain separate");
     FreeResult(&out);
     pico_completions_ctx_free(&ctx);
 }

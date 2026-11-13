@@ -2,6 +2,21 @@
 
 Read this before writing an extension. Getting these wrong crashes Pico or silently no-ops. Host and workspace lifecycle details are in [host](host.md) and [workspace](workspace.md).
 
+## Activity usage (ABI 32)
+
+`PicoLlmResult.output_tokens` is a copied integer, not owned storage. It reports
+provider-generated tokens (including reasoning when reported); zero means no
+reported output usage. `cached_tokens` remains a subset of `input_tokens`.
+Core records request usage/identity in an independent global catalog ledger on
+the provider worker before releasing the result, including subagents and
+compaction. Failed/cancelled requests may contribute reported usage, not speed
+samples. This does not change successful-response hooks, saved-session input
+accounting, provider registration, or result allocation/free rules. No Clay/UI
+work runs on that worker. The UI reads an asynchronously refreshed copied
+snapshot. Activity survives deletion of session/project history; older catalogs
+migrate without backfilling incomplete historical usage. See
+[providers](providers.md#activity-usage-abi-32) for timing and aggregation semantics.
+
 ## Composer session references
 
 `/`, `@`, and `#` are builtin completion triggers; custom completers can use

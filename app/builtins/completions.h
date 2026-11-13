@@ -44,6 +44,7 @@ typedef struct PicoCompletionsCtx {
     int call_count;
     int input_tokens;
     int cached_tokens;
+    int output_tokens;
     char service_tier[32];
     char *error;
     bool failed;

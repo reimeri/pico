@@ -10,6 +10,49 @@
 
 #define PICO_SESSION_TITLE_MAX_BYTES (72 * 4)
 
+/* Independent, best-effort activity ledger. Worker-only I/O; no transcript or
+ * session foreign keys, so deleting history never rewrites recorded activity. */
+typedef struct PicoActivityRecord {
+    int64_t timestamp;
+    const char *provider, *model, *service_tier;
+    bool fast, compact;
+    int input_tokens, cached_tokens, output_tokens;
+    double tps, latency; /* <= 0 means no speed sample; latency < 0 means unknown */
+} PicoActivityRecord;
+
+typedef struct PicoActivityTokens {
+    int64_t input, cached, output;
+} PicoActivityTokens;
+
+typedef struct PicoActivityMode {
+    int64_t requests, samples;
+    double tps, latency;
+    char service_tier[64]; /* unknown, a reported tier, or mixed */
+} PicoActivityMode;
+
+typedef struct PicoActivityModel {
+    char provider[128], model[128];
+    PicoActivityMode modes[2]; /* requested Standard / Fast */
+} PicoActivityModel;
+
+typedef struct PicoActivityDayModel {
+    char provider[128], model[128];
+    int64_t tokens;
+    bool show_provider; /* Another positive-usage group in this day shares the model name. */
+} PicoActivityDayModel;
+
+typedef struct PicoActivitySnapshot {
+    PicoActivityTokens windows[3]; /* rolling 1d, 7d, 30d */
+    int64_t days[30]; /* rolling 24h buckets, oldest first */
+    PicoActivityDayModel day_models[30][3]; /* input + output, combining requested modes */
+    int day_model_count[30];
+    PicoActivityModel models[3]; /* most requests in 7d, excluding compaction */
+    int model_count;
+} PicoActivitySnapshot;
+
+bool PicoActivity_Record(const PicoActivityRecord *record);
+bool PicoActivity_Read(int64_t now, PicoActivitySnapshot *out);
+
 typedef struct PicoSessionInfo {
     char path[4096];
     char cwd[4096];

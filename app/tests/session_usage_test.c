@@ -3049,6 +3049,114 @@ static int TestCatalogDeleteRejectsSwappedCheckout(void)
     return 0;
 }
 
+static int TestActivityLedger(void)
+{
+    char config[] = "/tmp/pico-activity-cfg-XXXXXX", ws[] = "/tmp/pico-activity-ws-XXXXXX";
+    char original[4096];
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config) || !mkdtemp(ws)) return Fail("activity fixture");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    bool ok = false;
+    sqlite3 *lock = NULL;
+    PicoActivitySnapshot snapshot;
+    const int64_t now = 1800000000;
+    if (!PicoActivity_Read(now, &snapshot) || snapshot.model_count || snapshot.windows[2].input) goto done;
+    const int ages[] = {0, 1, 7, 30, 31, -1};
+    for (int i = 0; i < 6; i++)
+    {
+        PicoActivityRecord r = {.timestamp = now - ages[i] * 86400,
+            .provider = "first", .model = "model", .service_tier = i == 2 ? "priority" : "default",
+            .fast = i == 1, .compact = i == 3, .input_tokens = 100, .cached_tokens = 80,
+            .output_tokens = 20, .tps = 40 + i * 10, .latency = 1 + i};
+        if (!PicoActivity_Record(&r)) goto done;
+    }
+    /* Provider identity is part of grouping. Low-traffic groups cannot displace
+     * the most-used one; deterministic tie ordering keeps the rail quiet. */
+    const char *providers[] = {"other", "third", "z-last"};
+    for (int i = 0; i < 3; i++)
+        if (!PicoActivity_Record(&(PicoActivityRecord){.timestamp = now, .provider = providers[i],
+            .model = "model", .latency = -1})) goto done;
+    if (!PicoActivity_Read(now, &snapshot)) goto done;
+    int64_t daily = 0;
+    for (int i = 0; i < 30; i++) daily += snapshot.days[i];
+    if (snapshot.windows[0].input + snapshot.windows[0].output != 240 ||
+        snapshot.windows[1].input + snapshot.windows[1].output != 360 ||
+        snapshot.windows[2].input + snapshot.windows[2].output != 480 || daily != 480 ||
+        snapshot.windows[2].cached != 320 || snapshot.days[0] != 120 || snapshot.days[29] != 240)
+        goto done;
+    if (snapshot.model_count != 3 || strcmp(snapshot.models[0].provider, "first") ||
+        strcmp(snapshot.models[1].provider, "other") || strcmp(snapshot.models[2].provider, "third")) goto done;
+    PicoActivityMode *standard = &snapshot.models[0].modes[0], *fast = &snapshot.models[0].modes[1];
+    if (standard->requests != 2 || standard->samples != 2 || standard->tps != 50 ||
+        standard->latency != 2 || strcmp(standard->service_tier, "mixed") ||
+        fast->requests != 1 || fast->tps != 50 || strcmp(fast->service_tier, "default")) goto done;
+    /* Reconciliation and deletion are not allowed to rebuild or erase usage. */
+    PicoHost host = {0};
+    if (PicoCatalog_Ensure(ws) || PicoCatalog_DeleteProject(&host, ws) ||
+        !PicoActivity_Read(now, &snapshot) || snapshot.windows[2].input + snapshot.windows[2].output != daily)
+        goto done;
+    /* Time advances even without new activity. */
+    if (!PicoActivity_Read(now + 40 * 86400, &snapshot) || snapshot.model_count || snapshot.windows[2].input)
+        goto done;
+    char path[4096];
+    if (!PicoPath_Format(path, sizeof(path), "%s/sessions/.catalog.sqlite3", config) ||
+        sqlite3_open(path, &lock) != SQLITE_OK || sqlite3_exec(lock, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        goto done;
+    PicoActivityRecord contended = {.timestamp = now + 40 * 86400, .provider = "test", .model = "busy",
+                                   .input_tokens = 10, .output_tokens = 5, .latency = -1};
+    if (PicoActivity_Record(&contended)) goto done;
+    if (sqlite3_exec(lock, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK || !PicoActivity_Record(&contended) ||
+        !PicoActivity_Read(contended.timestamp, &snapshot) || snapshot.windows[0].input + snapshot.windows[0].output != 15)
+        goto done;
+    ok = true;
+done:
+    if (lock) sqlite3_close(lock);
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    return ok ? 0 : Fail("activity must retain independent usage, rolling windows, model/mode medians, and expiry");
+}
+
+static int TestActivityDayModels(void)
+{
+    char config[] = "/tmp/pico-day-models-XXXXXX", original[4096];
+    snprintf(original, sizeof(original), "%s", g_config_dir);
+    if (!mkdtemp(config)) return Fail("daily model fixture");
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", config);
+    const int64_t now = 1800000000;
+    bool ok = false;
+    PicoActivitySnapshot snapshot;
+    PicoActivityRecord records[] = {
+        {.timestamp=now-10, .provider="alpha", .model="Shared", .input_tokens=100, .cached_tokens=100, .output_tokens=20},
+        {.timestamp=now-10, .provider="alpha", .model="Shared", .fast=true, .input_tokens=100, .cached_tokens=100, .output_tokens=30},
+        {.timestamp=now-86400, .provider="alpha", .model="Shared", .input_tokens=20},
+        {.timestamp=now-10, .provider="beta", .model="Shared", .output_tokens=200},
+        {.timestamp=now-10, .provider="alpha", .model="Compact", .compact=true, .input_tokens=170, .cached_tokens=150, .output_tokens=10},
+        /* This name collision matters even though the other provider is below the top three. */
+        {.timestamp=now-10, .provider="beta", .model="Compact", .output_tokens=1},
+        {.timestamp=now-86401, .provider="alpha", .model="Yesterday", .input_tokens=10000},
+        {.timestamp=now-86401, .provider="zero", .model="Yesterday"},
+    };
+    for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); i++)
+        if (!PicoActivity_Record(&records[i])) goto done;
+    /* More requests must not outrank higher token usage. */
+    for (int i = 0; i < 5; i++)
+        if (!PicoActivity_Record(&(PicoActivityRecord){.timestamp=now-10, .provider="alpha",
+            .model="Frequent", .input_tokens=10})) goto done;
+    if (!PicoActivity_Read(now, &snapshot)) goto done;
+    PicoActivityDayModel *top = snapshot.day_models[29];
+    if (snapshot.days[29] != 701 || snapshot.day_model_count[29] != 3 ||
+        strcmp(top[0].model, "Shared") || strcmp(top[0].provider, "alpha") || top[0].tokens != 270 ||
+        strcmp(top[1].model, "Shared") || strcmp(top[1].provider, "beta") || top[1].tokens != 200 ||
+        strcmp(top[2].model, "Compact") || top[2].tokens != 180 ||
+        !top[0].show_provider || !top[1].show_provider || !top[2].show_provider) goto done;
+    if (snapshot.days[28] != 10000 || snapshot.day_model_count[28] != 1 ||
+        strcmp(snapshot.day_models[28][0].model, "Yesterday") || snapshot.day_models[28][0].show_provider ||
+        snapshot.day_model_count[27]) goto done;
+    ok = true;
+done:
+    snprintf(g_config_dir, sizeof(g_config_dir), "%s", original);
+    return ok ? 0 : Fail("daily model breakdown must share bar boundaries, rank tokens, combine modes, and disambiguate providers");
+}
+
 static int TestCatalogPresentationMigration(int old_version)
 {
     char config[] = "/tmp/pico-catalog-pin-cfg-XXXXXX";
@@ -3070,7 +3178,8 @@ static int TestCatalogPresentationMigration(int old_version)
         !PicoPath_Format(path, sizeof(path), "%s/sessions/.catalog.sqlite3", config) ||
         sqlite3_open(path, &db) != SQLITE_OK) goto done;
     /* Reconstruct the historical column sets, not merely their version tag. */
-    if (sqlite3_exec(db, "ALTER TABLE projects DROP COLUMN starred", NULL, NULL, NULL) != SQLITE_OK) goto done;
+    if (sqlite3_exec(db, "DROP TABLE activity", NULL, NULL, NULL) != SQLITE_OK) goto done;
+    if (old_version < 5 && sqlite3_exec(db, "ALTER TABLE projects DROP COLUMN starred", NULL, NULL, NULL) != SQLITE_OK) goto done;
     if (old_version < 4 && sqlite3_exec(db, "ALTER TABLE sessions DROP COLUMN pinned", NULL, NULL, NULL) != SQLITE_OK) goto done;
     if (old_version <= 2 && sqlite3_exec(db,
         "ALTER TABLE sessions DROP COLUMN inbox; ALTER TABLE sessions DROP COLUMN last_user_action",
@@ -3081,6 +3190,12 @@ static int TestCatalogPresentationMigration(int old_version)
     snprintf(version_sql, sizeof(version_sql), "PRAGMA user_version=%d", old_version);
     if (sqlite3_exec(db, version_sql, NULL, NULL, NULL) != SQLITE_OK) goto done;
     sqlite3_close(db); db = NULL;
+    PicoActivitySnapshot activity;
+    if (!PicoActivity_Read(1800000000, &activity) || activity.model_count ||
+        !PicoActivity_Record(&(PicoActivityRecord){.timestamp = 1800000000, .provider = "test", .model = "model",
+            .input_tokens = 10, .output_tokens = 5, .latency = -1}) ||
+        !PicoActivity_Read(1800000000, &activity) || activity.windows[0].input + activity.windows[0].output != 15)
+        goto done;
     n = PicoCatalog_ScanGrouped(&list);
     const PicoCatalogWorkspace *group = FindCatalogPath(list, n, ws);
     if (!group || group->starred || strcmp(group->name, "Preserved preference") || group->inbox_count ||
@@ -4912,10 +5027,13 @@ int main(void)
         PICO_TEST_RUN(TestCatalogDeleteRejectsSwappedCheckout()) != 0 ||
         PICO_TEST_RUN(TestCatalogRejectsCollidingPaths()) != 0 ||
         PICO_TEST_RUN(TestCatalogSQLiteImport()) != 0 ||
+        PICO_TEST_RUN(TestActivityLedger()) != 0 ||
+        PICO_TEST_RUN(TestActivityDayModels()) != 0 ||
         PICO_TEST_RUN(TestCatalogPresentationMigration(1)) != 0 ||
         PICO_TEST_RUN(TestCatalogPresentationMigration(2)) != 0 ||
         PICO_TEST_RUN(TestCatalogPresentationMigration(3)) != 0 ||
         PICO_TEST_RUN(TestCatalogPresentationMigration(4)) != 0 ||
+        PICO_TEST_RUN(TestCatalogPresentationMigration(5)) != 0 ||
         PICO_TEST_RUN(TestCatalogRejectsIncompatibleSchema()) != 0)
     {
         return 1;

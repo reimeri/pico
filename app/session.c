@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <time.h>
+#include <math.h>
 #include <unistd.h>
 
 static bool CatalogMetaPath(const char *dir, char *out, size_t cap);
@@ -4584,9 +4585,20 @@ static bool CatalogDbHasColumn(sqlite3 *db, const char *column)
     return found;
 }
 
-enum { CATALOG_DB_VERSION = 5 };
+/* The activity ledger deliberately has no session/project foreign keys. It is
+ * append-only historical usage, not a rebuildable transcript index. */
+static const char *ActivitySchema =
+    "CREATE TABLE activity("
+    "timestamp INTEGER NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,"
+    "fast INTEGER NOT NULL,compact INTEGER NOT NULL,service_tier TEXT NOT NULL,"
+    "input_tokens INTEGER NOT NULL,cached_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,"
+    "tps REAL NOT NULL,latency REAL NOT NULL);"
+    "CREATE INDEX activity_time ON activity(timestamp);"
+    "CREATE INDEX activity_model_time ON activity(provider,model,fast,compact,timestamp);";
 
-static sqlite3 *CatalogDbOpenUnlocked(void)
+enum { CATALOG_DB_VERSION = 6 };
+
+static sqlite3 *CatalogDbOpenUnlocked(int busy_ms)
 {
     char root[4096], path[4096], marker[4096], version_sql[64];
     sqlite3 *db = NULL;
@@ -4603,7 +4615,7 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
     }
     if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
                        SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) goto fail;
-    sqlite3_busy_timeout(db, 1000);
+    sqlite3_busy_timeout(db, busy_ms);
     if (!CatalogDbExec(db, "PRAGMA foreign_keys=ON") ||
         !CatalogDbPrepare(db, &stmt, "PRAGMA user_version")) goto fail;
     if (sqlite3_step(stmt) == SQLITE_ROW) version = sqlite3_column_int(stmt, 0);
@@ -4646,6 +4658,12 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
             if (!CatalogDbExec(db, "ALTER TABLE projects ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;"
                                    "PRAGMA user_version=5")) goto fail;
             version = 5;
+        }
+        if (version == 5)
+        {
+            if (!CatalogDbExec(db, ActivitySchema) ||
+                !CatalogDbExec(db, "PRAGMA user_version=6")) goto fail;
+            version = 6;
         }
         if (!CatalogDbExec(db, "COMMIT")) goto fail;
     }
@@ -4699,7 +4717,7 @@ static sqlite3 *CatalogDbOpenUnlocked(void)
         "FOREIGN KEY(workspace_path) REFERENCES workspaces(path) ON DELETE CASCADE);"
         "CREATE INDEX sessions_recent ON sessions(workspace_path,mtime DESC,mtime_nsec DESC,id DESC);"
         "CREATE INDEX sessions_project_recent ON sessions(project_path,kind,mtime DESC,mtime_nsec DESC,id DESC);") &&
-        CatalogDbImport(db, root) && CatalogDbExec(db, version_sql) &&
+        CatalogDbExec(db, ActivitySchema) && CatalogDbImport(db, root) && CatalogDbExec(db, version_sql) &&
         CatalogDbExec(db, "COMMIT");
     if (!ok)
     {
@@ -4732,9 +4750,185 @@ static pthread_mutex_t g_catalog_open_mu = PTHREAD_MUTEX_INITIALIZER;
 static sqlite3 *CatalogDbOpen(void)
 {
     pthread_mutex_lock(&g_catalog_open_mu);
-    sqlite3 *db = CatalogDbOpenUnlocked();
+    sqlite3 *db = CatalogDbOpenUnlocked(1000);
     pthread_mutex_unlock(&g_catalog_open_mu);
     return db;
+}
+
+bool PicoActivity_Record(const PicoActivityRecord *r)
+{
+    if (!r || !r->provider || !r->model || r->timestamp <= 0) return false;
+    /* Optional telemetry must not queue behind schema maintenance or hold a
+     * cancelled provider worker through the host's shutdown deadline. Drop a
+     * sample on contention rather than turn a statistic into a request error. */
+    if (pthread_mutex_trylock(&g_catalog_open_mu) != 0) return false;
+    sqlite3 *db = CatalogDbOpenUnlocked(20);
+    pthread_mutex_unlock(&g_catalog_open_mu);
+    if (!db) return false;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = CatalogDbPrepare(db, &stmt, "INSERT INTO activity VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+    if (ok)
+    {
+        int input = r->input_tokens > 0 ? r->input_tokens : 0;
+        int cached = r->cached_tokens > 0 ? r->cached_tokens : 0;
+        sqlite3_bind_int64(stmt, 1, r->timestamp);
+        sqlite3_bind_text(stmt, 2, r->provider, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, r->model, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 4, r->fast);
+        sqlite3_bind_int(stmt, 5, r->compact);
+        sqlite3_bind_text(stmt, 6, r->service_tier ? r->service_tier : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 7, input);
+        sqlite3_bind_int(stmt, 8, cached < input ? cached : input);
+        sqlite3_bind_int(stmt, 9, r->output_tokens > 0 ? r->output_tokens : 0);
+        sqlite3_bind_double(stmt, 10, !r->compact && isfinite(r->tps) && r->tps > 0 ? r->tps : 0);
+        sqlite3_bind_double(stmt, 11, !r->compact && isfinite(r->latency) && r->latency >= 0 ? r->latency : -1);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return ok;
+}
+
+static void ActivityBindModel(sqlite3_stmt *stmt, const PicoActivityModel *model, int mode, int64_t now)
+{
+    sqlite3_bind_text(stmt, 1, model->provider, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, model->model, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, mode);
+    sqlite3_bind_int64(stmt, 4, now - 7 * 86400);
+    sqlite3_bind_int64(stmt, 5, now);
+}
+
+/* Reading the middle one/two ordered values keeps memory bounded even when a
+ * busy installation has many thousands of samples. SQLite owns the sorting. */
+static bool ActivityMedian(sqlite3 *db, const PicoActivityModel *model, int mode,
+                           int64_t now, bool latency, int64_t count, double *out)
+{
+    *out = latency ? -1 : 0;
+    if (!count) return true;
+    const char *sql = latency
+        ? "SELECT AVG(latency) FROM (SELECT latency FROM activity WHERE provider=? AND model=? AND fast=? "
+          "AND compact=0 AND timestamp>=? AND timestamp<=? AND latency>=0 ORDER BY latency LIMIT ? OFFSET ?)"
+        : "SELECT AVG(tps) FROM (SELECT tps FROM activity WHERE provider=? AND model=? AND fast=? "
+          "AND compact=0 AND timestamp>=? AND timestamp<=? AND tps>0 ORDER BY tps LIMIT ? OFFSET ?)";
+    sqlite3_stmt *stmt = NULL;
+    bool ok = CatalogDbPrepare(db, &stmt, sql);
+    if (ok)
+    {
+        ActivityBindModel(stmt, model, mode, now);
+        sqlite3_bind_int64(stmt, 6, count % 2 ? 1 : 2);
+        sqlite3_bind_int64(stmt, 7, (count - 1) / 2);
+        ok = sqlite3_step(stmt) == SQLITE_ROW;
+        if (ok) *out = sqlite3_column_double(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool PicoActivity_Read(int64_t now, PicoActivitySnapshot *out)
+{
+    if (!out) return false;
+    PicoActivitySnapshot next = {0};
+    sqlite3 *db = CatalogDbOpen();
+    sqlite3_stmt *stmt = NULL;
+    if (!db) return false;
+    bool ok = CatalogDbExec(db, "BEGIN");
+    const int days[] = {1, 7, 30};
+    for (int i = 0; ok && i < 3; i++)
+    {
+        ok = CatalogDbPrepare(db, &stmt, "SELECT SUM(input_tokens),SUM(cached_tokens),SUM(output_tokens) "
+                                       "FROM activity WHERE timestamp>=? AND timestamp<=?");
+        if (ok)
+        {
+            sqlite3_bind_int64(stmt, 1, now - days[i] * 86400);
+            sqlite3_bind_int64(stmt, 2, now);
+            ok = sqlite3_step(stmt) == SQLITE_ROW;
+            if (ok) next.windows[i] = (PicoActivityTokens){sqlite3_column_int64(stmt, 0),
+                sqlite3_column_int64(stmt, 1), sqlite3_column_int64(stmt, 2)};
+        }
+        sqlite3_finalize(stmt); stmt = NULL;
+    }
+    if (ok) ok = CatalogDbPrepare(db, &stmt,
+        "WITH grouped AS ("
+        "SELECT MIN(29,(timestamp-?)/86400) AS day,provider,model,SUM(input_tokens+output_tokens) AS tokens "
+        "FROM activity WHERE timestamp>=? AND timestamp<=? GROUP BY 1,2,3 HAVING tokens>0),"
+        "ranked AS (SELECT *,SUM(tokens) OVER (PARTITION BY day) AS total,"
+        "COUNT(*) OVER (PARTITION BY day,model) AS names,"
+        "ROW_NUMBER() OVER (PARTITION BY day ORDER BY tokens DESC,provider,model) AS rank FROM grouped) "
+        "SELECT day,total,provider,model,tokens,names FROM ranked WHERE rank<=3 ORDER BY day,rank");
+    if (ok)
+    {
+        sqlite3_bind_int64(stmt, 1, now - 30 * 86400);
+        sqlite3_bind_int64(stmt, 2, now - 30 * 86400);
+        sqlite3_bind_int64(stmt, 3, now);
+        int rc;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+        {
+            int day = sqlite3_column_int(stmt, 0);
+            if (day >= 0 && day < 30 && next.day_model_count[day] < 3)
+            {
+                next.days[day] = sqlite3_column_int64(stmt, 1);
+                PicoActivityDayModel *model = &next.day_models[day][next.day_model_count[day]++];
+                snprintf(model->provider, sizeof(model->provider), "%s", CatalogDbText(stmt, 2));
+                snprintf(model->model, sizeof(model->model), "%s", CatalogDbText(stmt, 3));
+                model->tokens = sqlite3_column_int64(stmt, 4);
+                model->show_provider = sqlite3_column_int(stmt, 5) > 1;
+            }
+        }
+        ok = rc == SQLITE_DONE;
+    }
+    sqlite3_finalize(stmt); stmt = NULL;
+    if (ok) ok = CatalogDbPrepare(db, &stmt,
+        "SELECT provider,model FROM activity WHERE timestamp>=? AND timestamp<=? AND compact=0 "
+        "GROUP BY provider,model ORDER BY COUNT(*) DESC,provider,model LIMIT 3");
+    if (ok)
+    {
+        sqlite3_bind_int64(stmt, 1, now - 7 * 86400);
+        sqlite3_bind_int64(stmt, 2, now);
+        int rc;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW && next.model_count < 3)
+        {
+            PicoActivityModel *model = &next.models[next.model_count++];
+            snprintf(model->provider, sizeof(model->provider), "%s", sqlite3_column_text(stmt, 0));
+            snprintf(model->model, sizeof(model->model), "%s", sqlite3_column_text(stmt, 1));
+        }
+        ok = rc == SQLITE_DONE;
+    }
+    sqlite3_finalize(stmt); stmt = NULL;
+    for (int i = 0; ok && i < next.model_count; i++)
+    {
+        PicoActivityModel *model = &next.models[i];
+        for (int mode = 0; ok && mode < 2; mode++)
+        {
+            PicoActivityMode *row = &model->modes[mode];
+            int64_t latency_count = 0;
+            ok = CatalogDbPrepare(db, &stmt,
+                "SELECT COUNT(*),SUM(tps>0),SUM(latency>=0),MIN(service_tier),MAX(service_tier) "
+                "FROM activity WHERE provider=? AND model=? AND fast=? AND compact=0 AND timestamp>=? AND timestamp<=?");
+            if (ok)
+            {
+                ActivityBindModel(stmt, model, mode, now);
+                ok = sqlite3_step(stmt) == SQLITE_ROW;
+                if (ok)
+                {
+                    row->requests = sqlite3_column_int64(stmt, 0);
+                    row->samples = sqlite3_column_int64(stmt, 1);
+                    latency_count = sqlite3_column_int64(stmt, 2);
+                    const char *lo = (const char *)sqlite3_column_text(stmt, 3);
+                    const char *hi = (const char *)sqlite3_column_text(stmt, 4);
+                    snprintf(row->service_tier, sizeof(row->service_tier), "%s",
+                        !lo || !hi ? "unknown" : strcmp(lo, hi) ? "mixed" : lo[0] ? lo : "unknown");
+                }
+            }
+            sqlite3_finalize(stmt); stmt = NULL;
+            if (ok) ok = ActivityMedian(db, model, mode, now, false, row->samples, &row->tps) &&
+                         ActivityMedian(db, model, mode, now, true, latency_count, &row->latency);
+        }
+    }
+    if (ok) ok = CatalogDbExec(db, "COMMIT");
+    else (void)CatalogDbExec(db, "ROLLBACK");
+    sqlite3_close(db);
+    if (ok) *out = next;
+    return ok;
 }
 
 static bool CatalogDbWorkspace(sqlite3 *db, const char *path, const char *key,

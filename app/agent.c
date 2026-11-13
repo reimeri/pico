@@ -173,6 +173,7 @@ struct PicoAgentRt {
     PicoWorkKind work;
     PicoProviderStreamFn work_stream;
     char *work_model;
+    char work_provider[128];
     char *work_base_url;
     char *work_effort;
     bool turn_fast; /* main-thread snapshot at the start of an agent turn */
@@ -218,6 +219,8 @@ struct PicoAgentRt {
     bool summary_new_step;
     bool stream_reset_pending; /* worker -> main, snapshotted with the replacement buffers */
     PicoStreamingTps attempt_tps;
+    PicoStreamingTps request_tps; /* independent of live main-session display */
+    double request_started, first_output;
 
     PicoProvStream *prov; /* worker-side, under mu */
     int prov_count;
@@ -770,8 +773,11 @@ static PicoProvStream *ProvStreamFor(PicoAgentRt *rt, int call_index)
 
 static void CountOutput(PicoAgentRt *rt, size_t bytes, bool thinking)
 {
+    double now = ThinkNow();
+    if (bytes && rt->first_output < 0) rt->first_output = now;
+    PicoStreamingTps_Output(&rt->request_tps, bytes, thinking, now);
     if (rt->tps.enabled && rt->tps.request_open && bytes)
-        PicoStreamingTps_Output(&rt->tps, bytes, thinking, ThinkNow());
+        PicoStreamingTps_Output(&rt->tps, bytes, thinking, now);
 }
 
 static void DeltaCb(void *user, const PicoLlmDelta *delta)
@@ -804,6 +810,10 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
         rt->summary_new_step = false;
         ClearProvStreamLocked(rt);
         rt->tps = rt->attempt_tps;
+        PicoStreamingTps_Reset(&rt->request_tps, true);
+        PicoStreamingTps_Begin(&rt->request_tps);
+        rt->request_started = ThinkNow();
+        rt->first_output = -1;
         rt->provider_status[0] = '\0';
         rt->provider_status_dirty = true;
         rt->stream_reset_pending = true;
@@ -913,6 +923,8 @@ static void DeltaCb(void *user, const PicoLlmDelta *delta)
     {
         if (rt->tps.enabled && rt->tps.request_open)
             PicoStreamingTps_Summary(&rt->tps, s ? n : 0, ThinkNow());
+        PicoStreamingTps_Summary(&rt->request_tps, s ? n : 0, ThinkNow());
+        if (s && n && rt->first_output < 0) rt->first_output = ThinkNow();
         if (n == 0)
         {
             rt->summary_new_step = true;
@@ -1463,6 +1475,8 @@ static void *WorkerMain(void *arg)
         PicoWorkKind kind = rt->work;
         PicoProviderStreamFn stream_fn = rt->work_stream;
         char *model = rt->work_model;
+        char provider[128];
+        snprintf(provider, sizeof(provider), "%s", rt->work_provider);
         char *base_url = rt->work_base_url;
         char *effort = rt->work_effort;
         char *instructions = rt->work_instructions;
@@ -1506,6 +1520,10 @@ static void *WorkerMain(void *arg)
             pthread_mutex_lock(&rt->mu);
             if (!compact) PicoStreamingTps_Begin(&rt->tps);
             rt->attempt_tps = rt->tps;
+            PicoStreamingTps_Reset(&rt->request_tps, true);
+            PicoStreamingTps_Begin(&rt->request_tps);
+            rt->request_started = ThinkNow();
+            rt->first_output = -1;
             rt->provider_status[0] = '\0';
             rt->provider_status_dirty = false;
             free(rt->summary);
@@ -1550,7 +1568,20 @@ static void *WorkerMain(void *arg)
             pthread_mutex_lock(&rt->mu);
             if (rt->tps.enabled && rt->tps.request_open)
                 PicoStreamingTps_End(&rt->tps, ThinkNow());
+            PicoStreamingTps_End(&rt->request_tps, ThinkNow());
+            double speed = !compact && rc == PICO_LLM_OK && rt->request_tps.valid
+                               ? rt->request_tps.rate : 0;
+            double latency = !compact && rc == PICO_LLM_OK && rt->first_output >= 0
+                               ? rt->first_output - rt->request_started : -1;
             pthread_mutex_unlock(&rt->mu);
+            /* Record once per provider request, before result ownership moves or
+             * cancellation discards it. No host/agent access from this worker. */
+            if (rc == PICO_LLM_OK || result.input_tokens > 0 || result.output_tokens > 0)
+                (void)PicoActivity_Record(&(PicoActivityRecord){
+                    .timestamp = (int64_t)time(NULL), .provider = provider, .model = model,
+                    .service_tier = result.service_tier, .fast = fast, .compact = compact,
+                    .input_tokens = result.input_tokens, .cached_tokens = result.cached_tokens,
+                    .output_tokens = result.output_tokens, .tps = speed, .latency = latency});
             if (rc == PICO_LLM_CANCEL)
             {
                 PostEvent(rt, PICO_AEV_LLM_CANCEL, NULL, NULL, 0, 0);
@@ -1943,6 +1974,7 @@ static bool QueueLlm(PicoHost *app, PicoAgent *agent, bool compact, bool include
     rt->work_stream = p->stream;
     rt->work_stream_state = p->state;
     rt->work_model = Dup(m->id);
+    snprintf(rt->work_provider, sizeof(rt->work_provider), "%s", p->name);
     rt->work_base_url = Dup(m->base_url);
     rt->work_effort = Dup(agent->has_running_model ? agent->running_effort
                                                    : PicoSettings_ActiveEffort(agent));

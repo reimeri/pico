@@ -73,6 +73,8 @@ bool PicoSettings_SetModel(PicoAgent *agent, const char *id_or_name);
 bool PicoSettings_SetEffort(PicoAgent *agent, const char *level);
 bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoModel *model);
 bool PicoSettings_FastAvailable(const PicoAgent *agent);
+/* Initial selection for main conversations only, gated by model/provider/auth support. */
+bool PicoSettings_DefaultFast(const PicoAgent *agent);
 bool PicoSettings_SetFast(PicoAgent *agent, bool enabled);
 /* Keys are builtin names or user extension source paths; preferences are global. */
 bool PicoHost_SetExtensionDisabled(PicoHost *host, const char *name, bool disabled);

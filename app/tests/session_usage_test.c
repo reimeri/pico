@@ -1010,6 +1010,12 @@ PicoModel *PicoSettings_ActiveModel(const PicoAgent *agent)
     return NULL;
 }
 
+bool PicoSettings_DefaultFast(const PicoAgent *agent)
+{
+    (void)agent;
+    return false;
+}
+
 void PicoSettings_SyncAgent(PicoAgent *agent)
 {
     if (!agent) return;

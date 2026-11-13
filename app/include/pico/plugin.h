@@ -5,7 +5,7 @@
 #include "pico/host.h"
 #include "pico/workspace.h"
 
-#define PICO_EXT_ABI 32 /* Provider-reported output tokens for durable activity. */
+#define PICO_EXT_ABI 33 /* Per-model default Fast selection in PicoModel. */
 
 /* Host callbacks may run before any workspace exists; active agent ID may be zero. */
 typedef int (*PicoHostExtInitFn)(PicoHost *host, void **state_out);

@@ -73,6 +73,69 @@ void PicoOverlay_Notify(PicoHost *host, const char *text)
     (void)text;
 }
 
+static bool DefaultFastSupported(PicoHost *host, const PicoModel *model, void *state)
+{
+    (void)host;
+    (void)model;
+    return *(bool *)state;
+}
+
+static int TestModelFastDefaults(void)
+{
+    bool available = true;
+    PicoModel models[2] = {
+        {.id = "fast", .provider = "test", .supports_fast = true, .default_fast = true},
+        {.id = "standard", .provider = "test", .supports_fast = true},
+    };
+    PicoWorkspace ws = {0};
+    ws.models = models;
+    ws.model_count = 2;
+    snprintf(ws.settings.default_model, sizeof(ws.settings.default_model), "fast");
+    ws.providers[0] = (PicoProvider){.name = "test", .supports_fast = DefaultFastSupported,
+                                     .state = &available};
+    ws.provider_count = 1;
+    PicoAgent agent = {.workspace = &ws, .kind = PICO_AGENT_MAIN};
+    PicoSettings_InitAgent(&agent);
+    if (!agent.fast)
+        return Fail("new main conversation must use the model Fast default");
+    if (!PicoSettings_SetModel(&agent, "standard") || agent.fast ||
+        !PicoSettings_SetModel(&agent, "fast") || !agent.fast)
+        return Fail("model switches must replace Fast with the destination default");
+    if (!PicoSettings_SetFast(&agent, false))
+        return Fail("manual Fast off must override a model default");
+    PicoSettings_ReconcileIdleAgent(&agent);
+    if (agent.fast)
+        return Fail("idle reconciliation must not overwrite a manual Fast selection");
+    if (!PicoSettings_SetFast(&agent, true))
+        return Fail("manual Fast on must be available for a supported model");
+    models[0].default_fast = false;
+    PicoSettings_ReconcileIdleAgent(&agent);
+    if (!agent.fast)
+        return Fail("editing a model default must preserve an existing Fast selection");
+    available = false;
+    PicoSettings_ReconcileIdleAgent(&agent);
+    if (!agent.fast)
+        return Fail("temporary auth loss must preserve an existing Fast selection");
+    models[0].default_fast = true;
+    PicoSettings_InitAgent(&agent);
+    if (agent.fast)
+        return Fail("model Fast default must respect provider/auth availability");
+    available = true;
+    PicoSettings_ReconcileIdleAgent(&agent);
+    if (agent.fast)
+        return Fail("gaining auth availability must not apply defaults to an existing conversation");
+    models[0].supports_fast = false;
+    PicoSettings_InitAgent(&agent);
+    if (agent.fast)
+        return Fail("model Fast default must not bypass model capability");
+    models[0].supports_fast = true;
+    agent.kind = PICO_AGENT_SUBAGENT;
+    PicoSettings_InitAgent(&agent);
+    if (agent.fast)
+        return Fail("subagents must not opt in through the model Fast default");
+    return 0;
+}
+
 static int TestModelContextBeatsFallback(void)
 {
     PicoWorkspace ws;
@@ -1024,6 +1087,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     }
     draft.models[0].vision = true;
     draft.models[0].supports_fast = true;
+    draft.models[0].default_fast = true;
     draft.models[0].context_limit = 64000;
     snprintf(draft.models[0].effort[0], sizeof(draft.models[0].effort[0]), "high");
     draft.models[0].effort_count = 1;
@@ -1064,7 +1128,7 @@ static int TestUserDraftSeedsEmptyModelsAndPreservesDisabled(void)
     free(saved);
     memset(&loaded, 0, sizeof(loaded));
     if (!failed &&
-        (!PicoSettings_LoadUserDraft(&loaded, NULL, 0) || loaded.model_count != 1 || !loaded.models[0].vision || !loaded.models[0].supports_fast ||
+        (!PicoSettings_LoadUserDraft(&loaded, NULL, 0) || loaded.model_count != 1 || !loaded.models[0].vision || !loaded.models[0].supports_fast || !loaded.models[0].default_fast ||
          loaded.models[0].context_limit != 64000 || strcmp(loaded.models[0].base_url, "https://example.test/v1") != 0 ||
          loaded.max_parallel_tools != draft.max_parallel_tools || loaded.font_scale != 1.5 || loaded.chat_width != 100 || !loaded.resume_last || loaded.compact_enabled ||
          loaded.spell || strcmp(loaded.spell_lang, "de_DE") != 0 ||
@@ -1539,6 +1603,7 @@ static int TestUserDraftValidationAndPreservation(void)
         failed = 1;
     }
     draft.models[0].supports_fast = true;
+    draft.models[0].default_fast = true;
     draft.font_scale = 1.25;
     if (!failed && !PicoSettings_SaveUserDraft(&host, &draft, NULL, 0))
     {
@@ -1546,7 +1611,12 @@ static int TestUserDraftValidationAndPreservation(void)
     }
     PicoUserSettingsDraft patched = {0};
     if (!PicoSettings_LoadUserDraft(&patched, NULL, 0) || patched.model_count < 1 ||
-        !patched.models[0].supports_fast)
+        !patched.models[0].supports_fast || !patched.models[0].default_fast)
+        failed = 1;
+    PicoSettings_FreeUserDraft(&patched);
+    draft.models[0].default_fast = false;
+    if (!PicoSettings_SaveUserDraft(&host, &draft, NULL, 0) ||
+        !PicoSettings_LoadUserDraft(&patched, NULL, 0) || patched.models[0].default_fast)
         failed = 1;
     PicoSettings_FreeUserDraft(&patched);
     after = Pico_ReadFile(path, &after_len);
@@ -1762,6 +1832,7 @@ static int TestParallelSettingsResolution(void)
 
 int main(void)
 {
+    if (PICO_TEST_RUN(TestModelFastDefaults())) return 1;
     if (PICO_TEST_RUN(TestFreshUserSettingsCanSave())) return 1;
     if (PICO_TEST_RUN(TestUserDraftSavesCommentsOnlyObject())) return 1;
     if (PICO_TEST_RUN(TestUserDraftRepairsTrailingCommas())) return 1;

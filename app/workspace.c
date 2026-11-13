@@ -525,6 +525,7 @@ static PicoResult ConfigureAgent(PicoHost *app, PicoAgent *agent,
         agent->effort[0] = '\0';
         PicoSettings_SyncAgent(agent);
     }
+    agent->fast = PicoSettings_DefaultFast(agent);
     if (options->effort && options->effort[0])
     {
         const PicoModel *model = PicoSettings_ActiveModelConst(agent);

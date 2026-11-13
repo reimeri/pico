@@ -1664,6 +1664,12 @@ static void RenderModelEditor(SettingsState *s, int index, PicoModel *m)
     SETTINGS_ROW_BEGIN
         RenderToggle(CLAY_IDI("SettingsModelFast", index), "Supports Fast mode", m->supports_fast);
     }
+    if (m->supports_fast)
+    {
+        SETTINGS_ROW_BEGIN
+            RenderToggle(CLAY_IDI("SettingsModelDefaultFast", index), "Fast mode by default", m->default_fast);
+        }
+    }
     SETTINGS_ROW_BEGIN
         RenderLabel("Effort");
         CLAY_AUTO_ID({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT,
@@ -2068,6 +2074,7 @@ static bool HoveredClickable(SettingsState *s)
         if (Clay_PointerOver(CLAY_IDI("SettingsModelId", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelName", i)) ||
             Clay_PointerOver(CLAY_IDI("SettingsModelProvider", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelBaseUrl", i)) ||
             Clay_PointerOver(CLAY_IDI("SettingsModelContext", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelVision", i)) || Clay_PointerOver(CLAY_IDI("SettingsModelFast", i)) ||
+            (s->draft.models[i].supports_fast && Clay_PointerOver(CLAY_IDI("SettingsModelDefaultFast", i))) ||
             Clay_PointerOver(CLAY_IDI("SettingsCustomEffort", i)) || Clay_PointerOver(CLAY_IDI("SettingsAddEffort", i)))
         {
             return true;
@@ -2291,6 +2298,11 @@ static bool HandleClicks(SettingsState *s)
             if (Clay_PointerOver(CLAY_IDI("SettingsModelFast", i)))
             {
                 m->supports_fast = !m->supports_fast;
+                return true;
+            }
+            if (m->supports_fast && Clay_PointerOver(CLAY_IDI("SettingsModelDefaultFast", i)))
+            {
+                m->default_fast = !m->default_fast;
                 return true;
             }
             if (Clay_PointerOver(CLAY_IDI("SettingsCustomEffort", i)))

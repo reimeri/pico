@@ -54,7 +54,7 @@ Profiles are parsed as JSONC, so line and block comments are allowed.
   "model": "gpt-5.6-sol",
   "effort": "low",
 
-  // Optional explicit Fast opt-in; never inherited from the parent.
+  // Optional explicit Fast opt-in; ignores the parent selection and model default.
   "fast": false,
 
   // Optional exact-name tool allowlist.

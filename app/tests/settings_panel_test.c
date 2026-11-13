@@ -56,6 +56,43 @@ done:
     return !good;
 }
 
+static int TestSettingsPanelFastDefault(void)
+{
+    InteractionFixture f = {0};
+    PicoUserSettingsDraft draft = {0};
+    bool good = false;
+    const char *phase = "open model editor";
+    if (!InteractionFixtureInit(&f) || !PicoSettings_LoadUserDraft(&draft, NULL, 0) ||
+        draft.model_count < 1) goto done;
+    PicoHost *host = f.host;
+    PicoSettingsUi_Open(host); PicoHost_Frame(host);
+    phase = "default toggle follows model capability";
+    if (!draft.models[0].supports_fast) {
+        if (Clay_GetElementData(CLAY_IDI("SettingsModelDefaultFast", 0)).found ||
+            !SubagentSettingsClick(host, CLAY_IDI("SettingsModelFast", 0))) goto done;
+    }
+    phase = "default toggle is clickable";
+    if (!SubagentSettingsClick(host, CLAY_IDI("SettingsModelDefaultFast", 0))) goto done;
+    Clay_BoundingBox toggle = Clay_GetElementData(CLAY_IDI("SettingsModelDefaultFast", 0)).boundingBox;
+    g_find_pointer = (Vector2){toggle.x + toggle.width / 2, toggle.y + toggle.height / 2};
+    PicoHost_Frame(host);
+    if (!host->hovered_clickable) goto done;
+    bool expected = !draft.models[0].default_fast;
+    PicoSettings_FreeUserDraft(&draft);
+    phase = "Apply persists model Fast preference";
+    if (!SidebarFrameClick(host, Clay_GetElementData(CLAY_ID("SettingsApply"))) ||
+        !SubagentSettingsDrain(host) || PicoSettingsUi_IsOpen(host) ||
+        !PicoSettings_LoadUserDraft(&draft, NULL, 0) || draft.model_count < 1 ||
+        !draft.models[0].supports_fast || draft.models[0].default_fast != expected) goto done;
+    good = true;
+done:
+    PicoSettings_FreeUserDraft(&draft);
+    if (!good) fprintf(stderr, "settings model Fast default: %s\n", phase);
+    InteractionFixtureFree(&f);
+    if (!good) Fail("model Fast default must be capability-gated, clickable, and saved by Apply");
+    return !good;
+}
+
 static int TestSettingsPanelResize(void)
 {
     InteractionFixture f = {0};

@@ -2940,7 +2940,7 @@ void PicoSession_Reset(PicoHost *app, PicoAgent *agent)
     agent->has_llm_response = false;
     agent->session_input_tokens = 0;
     agent->session_cached_tokens = 0;
-    agent->fast = false;
+    agent->fast = PicoSettings_DefaultFast(agent);
     agent->last_service_tier[0] = '\0';
     agent->activity[0] = '\0';
     free(agent->compact_summary);

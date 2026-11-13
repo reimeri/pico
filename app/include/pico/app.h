@@ -94,6 +94,7 @@ typedef struct PicoModel {
     int context_limit;
     bool vision;
     bool supports_fast; /* explicit model capability; provider/auth must also support it */
+    bool default_fast; /* initial main-conversation selection; capability/auth gates still apply */
     char effort[PICO_MAX_EFFORTS][PICO_EFFORT_LEN];
     int effort_count;
     char default_effort[PICO_EFFORT_LEN];

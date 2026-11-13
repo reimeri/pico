@@ -2,6 +2,16 @@
 
 Read this before writing an extension. Getting these wrong crashes Pico or silently no-ops. Host and workspace lifecycle details are in [host](host.md) and [workspace](workspace.md).
 
+## Model Fast defaults (ABI 33)
+
+`PicoModel.default_fast` is copied catalog metadata, separate from
+`supports_fast`. It defaults to false and selects Fast for new main
+conversations and model selections only when provider/auth capability allows
+it. Manual selections survive settings refreshes; saved conversations restore
+their last saved selection. Subagents ignore model defaults and remain explicit
+profile opt-ins. No registration, callback ownership, threading, or reload rules
+change. See [providers](providers.md#fast-mode).
+
 ## Activity usage (ABI 32)
 
 `PicoLlmResult.output_tokens` is a copied integer, not owned storage. It reports

@@ -2241,15 +2241,22 @@ static int TestFastSelectionPersistence(void)
     ws->models = models;
     ws->model_count = 2;
     models[0].supports_fast = true;
+    models[0].default_fast = true;
     snprintf(models[0].provider, sizeof(models[0].provider), "openai");
     models[0].base_url[0] = '\0';
     models[1] = models[0];
+    models[1].default_fast = false;
     snprintf(models[1].id, sizeof(models[1].id), "second-fast-model");
     PicoAgentCreateOptions options = {.kind = PICO_AGENT_MAIN, .session_start = PICO_SESSION_NEW};
     phase = "Fast persistence writer creation";
     if (pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK)
         goto done;
     PicoAgent *writer = PicoHost_FindAgent(host, id);
+    if (!writer->fast)
+    {
+        Fail("new main conversation must apply its model Fast default");
+        goto done;
+    }
     phase = "Fast persistence enabling Fast";
     if (!PicoSettings_SetFast(writer, true)) goto done;
     phase = "Fast persistence queueing seed message";
@@ -2260,9 +2267,15 @@ static int TestFastSelectionPersistence(void)
     if (!DrainSessionForAssertion(host, writer)) goto done;
     phase = "Fast persistence resumed agent creation";
     options.session_start = PICO_SESSION_NONE;
+    options.model = models[1].id;
     if (pico_main_agent_create(host, ws_id, &options, &id) != PICO_OK)
         goto done;
     PicoAgent *resumed = PicoHost_FindAgent(host, id);
+    if (resumed->fast)
+    {
+        Fail("explicit creation model must supply its own Fast default");
+        goto done;
+    }
     if (PicoSession_Replay(host, resumed, writer->session_path, false) != 0 || !resumed->fast ||
         strcmp(resumed->last_service_tier, "default") != 0)
     {
@@ -2270,16 +2283,17 @@ static int TestFastSelectionPersistence(void)
         goto done;
     }
     PicoSession_Reset(host, resumed);
-    if (resumed->fast || resumed->last_service_tier[0])
+    if (!resumed->fast || resumed->last_service_tier[0])
     {
-        Fail("new conversation must reset Fast and last served tier");
+        Fail("new conversation must apply model Fast default and clear last served tier");
         goto done;
     }
-    if (!PicoSettings_SetModel(writer, models[1].id) || !writer->fast)
+    if (!PicoSettings_SetModel(writer, models[1].id) || writer->fast)
     {
-        Fail("switching to another supported model must retain Fast");
+        Fail("switching to another supported model must apply its Fast-off default");
         goto done;
     }
+    if (!PicoSettings_SetFast(writer, true)) goto done;
     models[1].supports_fast = false;
     PicoSettings_ReconcileIdleAgent(writer);
     if (writer->fast)
@@ -2292,9 +2306,10 @@ static int TestFastSelectionPersistence(void)
         goto done;
     /* Restoring capability must not resurrect the old fast:true session event. */
     models[1].supports_fast = true;
+    models[1].default_fast = true;
     if (PicoSession_Replay(host, resumed, writer->session_path, false) != 0 || resumed->fast)
     {
-        Fail("capability-removal Fast clear must survive session resume");
+        Fail("saved Fast off must override the model Fast-on default on resume");
         goto done;
     }
     phase = "Fast persistence re-enabling Fast";
@@ -22976,7 +22991,7 @@ int main(int argc, char **argv)
         return PICO_TEST_RUN(TestSidebarResize());
     if (argc == 1 && PICO_TEST_RUN(TestSidebarResize())) return 1;
     if (argc == 2 && strcmp(argv[1], "--settings-panel") == 0)
-        return PICO_TEST_RUN(TestSettingsPanelInteraction()) || PICO_TEST_RUN(TestSettingsPanelResize()) ||
+        return PICO_TEST_RUN(TestSettingsPanelInteraction()) || PICO_TEST_RUN(TestSettingsPanelFastDefault()) || PICO_TEST_RUN(TestSettingsPanelResize()) ||
                PICO_TEST_RUN(TestSettingsPanelBrowserSwitch()) || PICO_TEST_RUN(RunSettingsPanelShellCase(false)) ||
                PICO_TEST_RUN(RunSettingsPanelShellCase(true));
     if (argc == 2 && strcmp(argv[1], "--subagent-settings") == 0)
@@ -23091,6 +23106,7 @@ int main(int argc, char **argv)
         PICO_TEST_RUN(TestSidebarInboxWorkingAnswerOrder(INBOX_REJECT_QUESTIONNAIRE))) return 1;
     if (PICO_TEST_RUN(TestDiffPanelInteraction()) || PICO_TEST_RUN(TestDiffPanelContext()) || PICO_TEST_RUN(TestDiffFileBands())) return 1;
     if (PICO_TEST_RUN(TestShellStripSettings()) || PICO_TEST_RUN(TestSettingsPanelInteraction()) ||
+        PICO_TEST_RUN(TestSettingsPanelFastDefault()) ||
         PICO_TEST_RUN(TestSettingsPanelResize()) || PICO_TEST_RUN(TestSettingsPanelBrowserSwitch())) return 1;
     if (PICO_TEST_RUN(TestRestoreOrderQueue()) || PICO_TEST_RUN(TestProjectRestoreSnapshot())) return 1;
     if (PICO_TEST_RUN(TestSidebarContextMenus()) != 0) return 1;

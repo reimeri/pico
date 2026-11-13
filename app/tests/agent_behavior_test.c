@@ -1459,6 +1459,12 @@ bool PicoSettings_ModelSupportsFast(const PicoWorkspace *workspace, const PicoMo
     return p && p->supports_fast && p->supports_fast(workspace->host, model, p->state);
 }
 
+bool PicoSettings_DefaultFast(const PicoAgent *agent)
+{
+    (void)agent;
+    return false;
+}
+
 void PicoSession_EnqueueModelChange(PicoHost *app, PicoAgent *agent)
 {
     (void)app;

@@ -2251,7 +2251,9 @@ void Clay__InitializePersistentMemory(Clay_Context* context) {
 
     // Scroll data from the previous layout remains until the next update while a new set is registered.
     context->scrollContainerDatas = Clay__ScrollContainerDataInternalArray_Allocate_Arena(maxElementCount * 2, arena);
-    context->transitionDatas = Clay__TransitionDataInternalArray_Allocate_Arena(200, arena);
+    // New transitions are registered before EndLayout prunes records for elements that disappeared.
+    // Allow a full layout's transitions plus the previous layout's retained records.
+    context->transitionDatas = Clay__TransitionDataInternalArray_Allocate_Arena(maxElementCount * 2, arena);
     context->layoutElementsHashMapInternal = Clay__LayoutElementHashMapItemArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementsHashMap = Clay__int32_tArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementsHashMapFreeList = Clay__int32_tArray_Allocate_Arena(maxElementCount, arena);

@@ -192,6 +192,70 @@ static int TestManyClippedElements(void)
     return failed;
 }
 
+static void LayoutTransitionRows(Clay_String prefix, int32_t count, bool reverse)
+{
+    Clay_BeginLayout();
+    CLAY(CLAY_ID("TransitionRoot"),
+         {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(100), .height = CLAY_SIZING_FIXED(100)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM}})
+    {
+        for (int32_t i = 0; i < count; i++)
+        {
+            uint32_t index = (uint32_t)(reverse ? count - 1 - i : i);
+            CLAY(Clay_GetElementIdWithIndex(prefix, index),
+                 {.layout = {.sizing = {.width = CLAY_SIZING_FIXED(1), .height = CLAY_SIZING_FIXED(1)}},
+                  .transition = {.handler = Clay_EaseOut, .duration = 0.18f,
+                                 .properties = CLAY_TRANSITION_PROPERTY_Y}})
+            {
+            }
+        }
+    }
+    Clay_EndLayout(0.1f);
+}
+
+static int TestManyTransitionRows(void)
+{
+    if (!Pico_InitClay((Clay_Dimensions){200, 200}))
+    {
+        return Fail("could not initialize Clay for transition rows");
+    }
+    /* Leave room in the ID cache for both generations during replacement. */
+    Clay_SetMaxElementCount(600);
+    if (!Pico_ReinitClay(NULL, false))
+    {
+        Pico_FreeClay();
+        return Fail("could not prepare small arena for transition rows");
+    }
+    int failed = 0;
+    /* A full workspace's inbox can contain 256 rows. Replace every row before
+     * EndLayout prunes the previous layout's transition records. */
+    for (int pass = 0; pass < 3 && !failed; pass++)
+    {
+        Clay_String prefix = pass % 2 ? CLAY_STRING("TransitionB") : CLAY_STRING("TransitionA");
+        LayoutTransitionRows(prefix, 256, false);
+        if (Pico_NeedsClayReinit())
+        {
+            failed = Fail("transition rows exhausted Clay capacity during layout or replacement");
+            break;
+        }
+        /* Let Clay establish parent-relative positions before reordering. */
+        LayoutTransitionRows(prefix, 256, false);
+        Clay_ElementId last = Clay_GetElementIdWithIndex(prefix, 255);
+        Clay_ElementData before = Clay_GetElementData(last);
+        LayoutTransitionRows(prefix, 256, true);
+        Clay_ElementData after = Clay_GetElementData(last);
+        /* The last row moves to the top, but must still animate rather than
+         * jumping straight there because its transition record was dropped. */
+        if (Pico_NeedsClayReinit() || !before.found || !after.found ||
+            after.boundingBox.y <= 0 || after.boundingBox.y > before.boundingBox.y)
+        {
+            failed = Fail("last transition row did not retain its animated position");
+        }
+    }
+    Pico_FreeClay();
+    return failed;
+}
+
 static void LayoutChat(float content_h)
 {
     Clay_BeginLayout();
@@ -380,6 +444,8 @@ int main(void)
     rc = TestLayoutRecoversAfterOverflow();
     if (rc != 0) return rc;
     rc = TestManyClippedElements();
+    if (rc != 0) return rc;
+    rc = TestManyTransitionRows();
     if (rc != 0) return rc;
     rc = TestScrollSurvivesReinit();
     if (rc != 0) return rc;
